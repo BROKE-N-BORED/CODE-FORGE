@@ -2560,6 +2560,46 @@ class SettingsDialog(QDialog):
         form.addRow("Docker image", self.contained_docker_image)
         form.addRow("", caption("The container image contained commands run in when the Docker cage "
                                 "is used."))
+        # Browser merge (2026-11-11): which engine opens and
+        # reads pages behind the Browse seam, and which local
+        # engine Forge Browser renders with. Both default to
+        # today's behavior (the Browse connector).
+        self.research_web_engine = QComboBox()
+        self.research_web_engine.addItem(
+            "Browse connector (OpenCode Browse)", "browse")
+        self.research_web_engine.addItem(
+            "Forge Browser (built into Forge — no key, no account)",
+            "forge-browser")
+        _web_engine_idx = self.research_web_engine.findData(
+            str(settings.get("research_web_engine", "browse")
+                or "browse"))
+        if _web_engine_idx >= 0:
+            self.research_web_engine.setCurrentIndex(_web_engine_idx)
+        form.addRow("Research web engine", self.research_web_engine)
+        form.addRow("", caption("Which engine opens and reads web pages when the agent "
+                                "browses — this is Research mode's engine. The Browse connector drives "
+                                "your real Chromium through the external Browse server (its own setup, "
+                                "in Customize → Connectors). Forge Browser is built into Forge: keyless "
+                                "page reading on this PC, nothing to install for reading. Clicking and "
+                                "typing on pages ride the Browse connector under either choice, and the "
+                                "project's site allowlist (.forge/browse.json) fences navigation "
+                                "under both."))
+        self.forge_browser_engine = QComboBox()
+        self.forge_browser_engine.addItem("Auto", "auto")
+        self.forge_browser_engine.addItem("Chromium", "chromium")
+        self.forge_browser_engine.addItem("Lightpanda", "lightpanda")
+        _fb_engine_idx = self.forge_browser_engine.findData(
+            str(settings.get("forge_browser_engine", "auto") or "auto"))
+        if _fb_engine_idx >= 0:
+            self.forge_browser_engine.setCurrentIndex(_fb_engine_idx)
+        form.addRow("Forge Browser engine", self.forge_browser_engine)
+        form.addRow("", caption("The local browser engine Forge Browser uses when it must "
+                                "RENDER a page — browser verification and screenshots. Auto uses an "
+                                "already-running engine endpoint when one is set (FORGE_CDP_URL / "
+                                "FORGE_LIGHTPANDA_URL), else Chromium. Lightpanda is the fast reader "
+                                "engine; Chromium is full-fidelity. Optional engines are installed by "
+                                "you, once, by running browser-setup.sh in the Forge folder — nothing "
+                                "downloads or installs from this pane."))
         # G5 (GUIFX Research Brief #1, 2026-11-09): the density
         # toggle — a token swap over the global stylesheet (see
         # TOKENS_COMPACT / build_style), applied by the window when
@@ -2608,6 +2648,10 @@ class SettingsDialog(QDialog):
                 "contained_docker": self.contained_docker.isChecked(),
                 "contained_docker_image": self.contained_docker_image.text().strip()
                 or "python:3-slim",
+                "research_web_engine": str(
+                    self.research_web_engine.currentData() or "browse"),
+                "forge_browser_engine": str(
+                    self.forge_browser_engine.currentData() or "auto"),
                 "density": str(self.density.currentData() or "comfortable")}
 
 
@@ -18472,6 +18516,15 @@ class ForgeWindow(QMainWindow):
                      "seat instead.")
             reviewer_model = seats_mod.SEAT_DEFAULTS["reviewer"]
         self.plugin_ctx.governing_roster = self.settings.get("governing_roster", "")
+        # Browser merge (2026-11-11): the Research web engine +
+        # Forge Browser engine choices ride the context through
+        # the same door as the tester cap — the Browse plugin
+        # reads ctx.research_web_engine / ctx.forge_browser_engine
+        # to route behind the browse seam.
+        self.plugin_ctx.research_web_engine = str(
+            self.settings.get("research_web_engine", "") or "")
+        self.plugin_ctx.forge_browser_engine = str(
+            self.settings.get("forge_browser_engine", "auto") or "auto")
         self.plugin_ctx.workspace = self.workspace
         turn_hooks, turn_verify = self._turn_config()
         extra = self._extra_tools()
@@ -18503,7 +18556,9 @@ class ForgeWindow(QMainWindow):
             governing_roster=self.settings.get("governing_roster", ""),
             current_model=model,
             tester_model=tester_model,
-            tester_max_cycles=self.plugin_ctx.tester_max_cycles)
+            tester_max_cycles=self.plugin_ctx.tester_max_cycles,
+            research_web_engine=self.plugin_ctx.research_web_engine,
+            forge_browser_engine=self.plugin_ctx.forge_browser_engine)
         # S5 (audit S1-08): the MCP/Browse spawn trust store — the
         # LIVE settings dict, so a trust the owner grants at this
         # turn's gate lands in settings and save_settings persists

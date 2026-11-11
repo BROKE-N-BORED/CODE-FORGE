@@ -67,6 +67,16 @@ class PluginContext:
     # same way tester_model is; 0 = unset — the tester plugin then
     # keeps its own built-in cap.
     tester_max_cycles: int = 0
+    # Browser merge (2026-11-11): the owner's Research web engine
+    # choice — settings `research_web_engine`: "" / "browse" = the
+    # #55 Browse connector (today's behavior), "forge-browser" =
+    # the built-in forge/browser package — and the package's CDP
+    # engine choice (settings `forge_browser_engine`: "auto" /
+    # "chromium" / "lightpanda"). Both are refreshed by the shell
+    # each turn the same way tester_max_cycles is; the Browse
+    # plugin reads them to route behind the browse seam.
+    research_web_engine: str = ""
+    forge_browser_engine: str = "auto"
     governing_roster: str = ""  # owner's roster extension (bite #3)
     config: dict = field(default_factory=dict)
     log: object = None  # callable(str) or None

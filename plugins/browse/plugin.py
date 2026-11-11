@@ -31,6 +31,16 @@ loop the #55 spec named as Browse's first job. It is a Forge-side
 composite, not a server verb: it drives open / read / screenshot
 through this file's own fenced _call and composes their results
 in forge/verify.py, so every fence above applies to it unchanged.
+
+Browser merge (2026-11-11): a second engine now sits behind the
+same seam. When the owner's Settings → Behavior → "Research web
+engine" names Forge Browser, open / read / screenshot are served
+by the built-in keyless forge/browser package
+(forge/webengine.py) and verify composes on the package's own
+engine — behind the SAME fences: the hold refuses first, the
+allowlist decides before either engine is touched, and acting
+verbs (click / type) keep riding this connector under either
+choice. The default is unchanged: everything above.
 """
 from __future__ import annotations
 import sys
@@ -41,6 +51,7 @@ from mcp_client import McpError, get_server  # noqa: E402
 
 from forge import browse as browse_mod  # noqa: E402
 from forge import verify as verify_mod  # noqa: E402
+from forge import webengine as webengine_mod  # noqa: E402
 
 
 def _resolved(ctx) -> dict:
@@ -94,23 +105,35 @@ def browse_open(args, ctx):
         url, browse_mod.load_allowlist(ctx.workspace))
     if refusal:
         return refusal
+    # The fence above is engine-independent: whichever engine the
+    # owner picked, the project's allowlist has already decided.
+    if webengine_mod.engine_for(ctx) == webengine_mod.ENGINE_PACKAGE:
+        return webengine_mod.open_page(ctx.workspace, url, ctx)
     return _call("open", {"url": url}, ctx)
 
 
 def browse_read(args, ctx):
+    if webengine_mod.engine_for(ctx) == webengine_mod.ENGINE_PACKAGE:
+        return webengine_mod.read_page(ctx.workspace)
     return _call("read", {}, ctx)
 
 
 def browse_click(args, ctx):
+    if webengine_mod.engine_for(ctx) == webengine_mod.ENGINE_PACKAGE:
+        return webengine_mod.acting_refusal("click")
     return _call("click", {"selector": str(args.get("selector", ""))}, ctx)
 
 
 def browse_type(args, ctx):
+    if webengine_mod.engine_for(ctx) == webengine_mod.ENGINE_PACKAGE:
+        return webengine_mod.acting_refusal("type")
     return _call("type", {"selector": str(args.get("selector", "")),
                           "text": str(args.get("text", ""))}, ctx)
 
 
 def browse_screenshot(args, ctx):
+    if webengine_mod.engine_for(ctx) == webengine_mod.ENGINE_PACKAGE:
+        return webengine_mod.screenshot_page(ctx.workspace, ctx)
     return _call("screenshot", {}, ctx)
 
 
@@ -151,6 +174,17 @@ def verify_in_browser(args, ctx):
     hold = browse_mod.get_hold(ctx.workspace)
     if hold is not None:
         return browse_mod.hold_refusal("verify_in_browser", hold)
+    if webengine_mod.engine_for(ctx) == webengine_mod.ENGINE_PACKAGE:
+        # Forge Browser's own verify: same classification and
+        # fences inside the package, no MCP server needed at all.
+        target = str(args.get("target", "")).strip()
+        if not target:
+            return ("verify_in_browser needs a target: a project-"
+                    "relative path to a page in this project (e.g. "
+                    "'index.html'), or an http(s) URL on the "
+                    "project's Browse allowlist.")
+        return webengine_mod.verify_page(
+            ctx.workspace, target, webengine_mod.cdp_engine_for(ctx))
     resolved = _resolved(ctx)
     if browse_mod.server_spec(
             getattr(ctx, "config", None) or {}, resolved) is None:

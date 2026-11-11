@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-11 — Forge Browser inside Code Forge
+- The forge/browser package is part of Code Forge now (search, fetch, render, vault, media seats — no API keys)
+- Settings → Behavior: Research can use Forge Browser as its web engine instead of the Browse connector; the project's browse allowlist and wall rules apply the same either way
+- Browser engine choice (auto / Chromium / Lightpanda) in the same place; installing an engine stays a manual one-time step (browser-setup.sh), nothing downloads from the settings pane
+- Every browser verification now files a recording artifact in the project: the step log plus the screenshots taken — it states on its face that it is a log and stills, not a video
+- Under the Forge Browser engine, clicking and typing answer in plain words; those actions still ride the Browse connector
+
 ## 2026-11-11 — Write canvas
 - The Write window is a canvas now: conversation, document, and suggestions side by side in one window
 - Type in the document and it auto-saves; every save keeps a steppable version

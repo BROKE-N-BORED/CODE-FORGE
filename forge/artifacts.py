@@ -21,7 +21,10 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-KINDS = ("plan", "design", "architect", "review", "walkthrough", "note")
+# "recording" (browser merge, 2026-11-11): a browser verification
+# session's step log + screenshots, filed by forge/recordings.py.
+KINDS = ("plan", "design", "architect", "review", "walkthrough",
+         "note", "recording")
 MAX_TEXT = 200_000
 
 

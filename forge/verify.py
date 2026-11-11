@@ -41,6 +41,9 @@ would re-create the #71 poison: a stored image re-sends with the
 history on every later turn. So the verify loop's eyes are its
 text snapshot; the screenshot is for the OWNER — saved to disk
 and named in the result, whatever the driving model can see.
+Every run, however it ends, also files a verification RECORDING
+artifact — the step log + the screenshots taken, bundled as one
+entry (forge/recordings.py; browser merge, 2026-11-11).
 """
 from __future__ import annotations
 import base64
@@ -56,6 +59,7 @@ from pathlib import Path
 
 from . import browse as browse_mod
 from . import projects as proj
+from . import recordings as recordings_mod
 
 _IMAGE_MAGICS = ((b"\x89PNG\r\n\x1a\n", "png"),
                  (b"\xff\xd8\xff", "jpg"),
@@ -192,9 +196,23 @@ def run_verify(target, workspace, call) -> str:
     is the Browse plugin's fenced verb dispatch,
     call(verb_key, args) -> str — hold check, tool map, and wall
     scan on every call — so verify composes the verbs, it never
-    replaces their fences."""
+    replaces their fences.
+
+    Browser merge (2026-11-11): every run — verified, failed,
+    held, or refused before it started — also files a RECORDING
+    artifact (forge/recordings.py): the step log of what the loop
+    did plus the screenshots it saved, bundled as one artifact
+    entry. The composed result text is unchanged by the recording;
+    filing never breaks the loop."""
+    steps = [("Verify requested", f"target: {target}")]
+    shots: list[str] = []
+    engine = "Browse connector (#65 verify loop)"
     kind, value = classify_target(target, workspace)
     if kind == "error":
+        steps.append(("Target check", "refused before any browsing"))
+        recordings_mod.file_recording(
+            workspace, str(target), steps, shots, "refused",
+            engine_label=engine)
         return value
     if kind == "url":
         # NO exception for external pages: the owner's allowlist
@@ -202,31 +220,63 @@ def run_verify(target, workspace, call) -> str:
         refusal = browse_mod.check_open(
             value, browse_mod.load_allowlist(workspace))
         if refusal:
+            steps.append(("Site allowlist",
+                          "refused — the host is not on the "
+                          "project's Browse allowlist"))
+            recordings_mod.file_recording(
+                workspace, str(target), steps, shots, "refused",
+                engine_label=engine)
             return refusal
-        return _verify_at(value, value, workspace, call)
+        result, outcome = _verify_at(value, value, workspace, call,
+                                     steps, shots)
+        recordings_mod.file_recording(
+            workspace, str(target), steps, shots, outcome,
+            engine_label=engine)
+        return result
     root = Path(workspace).resolve()
     rel = value.relative_to(root).as_posix()
     with preview_server(workspace) as base:
         url = base + "/" + urllib.parse.quote(rel)
-        return _verify_at(url, f"{rel} (local preview)", workspace, call)
+        result, outcome = _verify_at(
+            url, f"{rel} (local preview)", workspace, call,
+            steps, shots)
+    recordings_mod.file_recording(
+        workspace, str(target), steps, shots, outcome,
+        engine_label=engine)
+    return result
 
 
-def _verify_at(url, label, workspace, call) -> str:
+def _verify_at(url, label, workspace, call, steps, shots) -> tuple:
+    """The open / read / screenshot loop. Returns (result text,
+    outcome) and appends the session's steps + screenshot names
+    to the caller's lists, for the recording run_verify files."""
     opened = call("open", {"url": url})
     if opened.startswith("MCP tool error"):
+        steps.append(("Open the page",
+                      f"failed — {opened.splitlines()[0][:200]}"))
         return (f"Verify failed — the browser could not open "
-                f"{label}: {opened}")
+                f"{label}: {opened}"), "failed"
     if browse_mod.get_hold(workspace) is not None:
         # The open hit a wall: the dispatch already set the hold
         # and appended the forced-handoff notice to its result.
         # That text IS the verify result — the loop stops here.
-        return opened
+        steps.append(("Open the page",
+                      "a wall held the session — the tab is with "
+                      "the owner"))
+        return opened, "held for the owner"
+    steps.append(("Open the page", f"opened {label}"))
     text = call("read", {})
     if text.startswith("MCP tool error"):
+        steps.append(("Read the page",
+                      f"failed — {text.splitlines()[0][:200]}"))
         return (f"Verify failed — the page opened ({label}) but "
-                f"its text could not be read: {text}")
+                f"its text could not be read: {text}"), "failed"
     if browse_mod.get_hold(workspace) is not None:
-        return text
+        steps.append(("Read the page",
+                      "a wall held the session — the tab is with "
+                      "the owner"))
+        return text, "held for the owner"
+    steps.append(("Read the page", "text snapshot taken"))
     shot = call("screenshot", {})
     lines = [f"Verified in the browser: {label}",
              "",
@@ -236,7 +286,9 @@ def _verify_at(url, label, workspace, call) -> str:
     saved = save_screenshot(workspace, shot)
     if saved is not None:
         name, kind = saved
+        shots.append(name)
         if kind == "image":
+            steps.append(("Screenshot", f"saved as {name}"))
             lines.append(
                 f"Screenshot saved to .forge/artifacts/{name} — "
                 "the owner can open it from the project folder. "
@@ -244,13 +296,20 @@ def _verify_at(url, label, workspace, call) -> str:
                 "never attached to this conversation as image "
                 "data, whatever model is driving.)")
         else:
+            steps.append(("Screenshot",
+                          "the server's reply was not image data; "
+                          f"saved as returned ({name})"))
             lines.append(
                 "The Browse server's screenshot reply was not "
                 f"image data; it was saved as returned to "
                 f".forge/artifacts/{name}.")
     elif shot.startswith("MCP tool error"):
+        steps.append(("Screenshot",
+                      f"failed — {shot.splitlines()[0][:200]}"))
         lines.append(f"Screenshot failed: {shot.splitlines()[0]}")
     else:
+        steps.append(("Screenshot",
+                      "the server returned nothing to save"))
         lines.append("The Browse server returned no screenshot "
                      "to save.")
-    return "\n".join(lines)
+    return "\n".join(lines), "verified"
