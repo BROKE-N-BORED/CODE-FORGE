@@ -111,7 +111,7 @@ the planted checks.
 | Forge + resident models, worst state above | ≤ 6 GB | | |
 | Forge idle RSS | ≤ 1 GB | | |
 | Cold start (median) | ≤ 30 s | | |
-| Install footprint | ≤ 4 MiB / 150 files | *(suite-enforced — `tests/test_perf_budget.py` prints the real tree's numbers)* | |
+| Install footprint | ≤ 6 MiB / 200 files | *(suite-enforced — `tests/test_perf_budget.py` prints the real tree's numbers)* | |
 
 Any line that fails is a finding, not an embarrassment: record it,
 and either the code gets lighter or the budget line in

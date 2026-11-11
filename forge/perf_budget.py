@@ -63,26 +63,32 @@ BUDGET = {
     },
     # --- Install footprint (enforced HERE, deterministically) ---
     "footprint_bytes_ceiling": {
-        "value": 4 * 1024 * 1024,
+        "value": 6 * 1024 * 1024,
         "unit": "bytes",
         "enforcement": "suite",
         "derivation": (
-            "The tree measured 1,923,259 bytes across 68 files on "
-            "2026-11-09 (packaging exclusions: no .venv, __pycache__, "
-            ".git, .forge, *.pyc). The ceiling is ~2.2x that — room "
-            "to grow features, while a single vendored dependency, "
-            "venv, or stray binary (tens of MB) trips it by an order "
-            "of magnitude. Enforced by tests/test_perf_budget.py."),
+            "Originally 4 MiB against the 1,923,259-byte tree of "
+            "2026-11-09. Raised 2026-11-11 on the owner's decision: "
+            "the tree measured 4,455,870 bytes across 140 files that "
+            "day after the browser package, Research/Write rooms, "
+            "parallel agents, project knowledge, export/convert and "
+            "the Light Machine profile landed. 6 MiB is ~1.4x that — "
+            "room for near-term features, while a single vendored "
+            "dependency, venv, or stray binary (tens of MB) still "
+            "trips it by an order of magnitude. Enforced by "
+            "tests/test_perf_budget.py."),
     },
     "footprint_files_ceiling": {
-        "value": 150,
+        "value": 200,
         "unit": "files",
         "enforcement": "suite",
         "derivation": (
-            "68 files measured 2026-11-09 (same exclusions as the "
-            "byte ceiling); ~2.2x headroom. A vendored dependency "
-            "tree trips this by the hundreds even if its bytes were "
-            "somehow small. Enforced by tests/test_perf_budget.py."),
+            "Originally 150 against 68 files (2026-11-09); raised to "
+            "200 on 2026-11-11 with the byte ceiling (140 files "
+            "measured that day, same exclusions). A vendored "
+            "dependency tree trips this by the hundreds even if its "
+            "bytes were somehow small. Enforced by "
+            "tests/test_perf_budget.py."),
     },
     # --- Cold start (target; stopwatch on the PC) ---
     "cold_start_ceiling_s": {

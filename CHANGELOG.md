@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-11 — Performance envelope: footprint ceiling raised
+- The install footprint ceiling is raised from 4 MiB / 150 files to 6 MiB / 200 files (owner's call). The tree measured 4,455,870 bytes across 140 files after today's builds landed (browser package, Research/Write rooms, parallel agents, project knowledge, export/convert, Light Machine). The guard still trips on a vendored dependency or stray binary; BENCH.md and the README table state the same numbers.
+
 ## 2026-11-11 — Ollama start-timeout fix
 - When Ollama fails to start a local model in time ("timed out waiting for llama-server to start", seen on slow hard drives while models load or swap), Forge now waits 3 seconds and retries the generation once on its own, and logs the retry in the session log.
 - If the retry also fails, the message is plain language — what happened, that nothing was lost, send the message again — with the raw Ollama text kept in the session log. No other errors are retried.
