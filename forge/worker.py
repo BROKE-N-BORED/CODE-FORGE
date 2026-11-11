@@ -187,6 +187,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 try:
@@ -1011,6 +1012,13 @@ class AgentWorker(QThread):
     plan_active = Signal(int)        # a step became the current one
     plan_step_done = Signal(int)     # a step was announced DONE
     plan_turn_done = Signal(object)  # SKRIBE outcome dict at turn end
+    # Research room (2026-11-11): the run's live state, emitted
+    # only from real run events — the gate opening, the run
+    # arming, each counted page operation, the report's consulted
+    # sync, the kill. A dict snapshot (see _emit_research_progress);
+    # the Research window renders its meters from these and from
+    # nothing else.
+    research_progress = Signal(object)
 
     def __init__(self, client: OllamaClient, model: str, messages: list[dict],
                  options: dict, workspace: str, extra_tools: dict | None = None,
@@ -1036,6 +1044,7 @@ class AgentWorker(QThread):
                  skills_dir=None,
                  plugins_dir=None,
                  researching: bool = False,
+                 research_options: dict | None = None,
                  mcp_trust: dict | None = None,
                  mcp_trust_save=None):
         super().__init__()
@@ -1135,9 +1144,22 @@ class AgentWorker(QThread):
         # machinery engages. The run state below is reset at every
         # turn start in run().
         self.researching = bool(researching)
+        # Research room (2026-11-11): the owner's in-room choices
+        # for this run — {"web": bool, "project": bool,
+        # "supplied": [names], "depth": "standard"|"deep"} — set
+        # by the Research window and handed over by the window at
+        # construction. {} (every pre-room construction, every
+        # bench-typed research turn) means the drafted plan alone
+        # governs, exactly as before. The web flag and the depth
+        # are the shell-enforced halves (see _research_refusal and
+        # the arming in _research_phase); the source list rides
+        # the run's instruction so the plan and the run honour it.
+        self.research_options = dict(research_options or {})
         self._research_approved = False
         self._research_started: float | None = None
         self._research_page_ops = 0
+        self._research_opens = 0
+        self._research_reads = 0
         self._research_cap = RESEARCH_STANDARD_PAGE_OPS
         self._research_depth = "standard"
         self._research_consulted: list[str] = []
@@ -1307,7 +1329,8 @@ class AgentWorker(QThread):
         visible = set(perms_mod.mode_visible_tools(
             mode, [s["function"]["name"] for s in all_schemas], classes))
         offered = [s for s in all_schemas if s["function"]["name"] in visible]
-        if mode == "research" and not self._research_approved:
+        if mode == "research" and (not self._research_approved
+                                   or self._research_web_off()):
             # The research plan gate, at the offer seam: until the
             # owner approves a plan in this conversation, the
             # browse verbs are not offered at all — the model
@@ -2108,6 +2131,74 @@ class AgentWorker(QThread):
                   sections=len(modes_mod.RESEARCH_PLAN_SECTIONS))
         return document
 
+    def _research_web_off(self) -> bool:
+        """The owner's Research-room web switch for this run:
+        off means the browse verbs are neither offered nor
+        executable, however the drafted plan reads — the room's
+        switch is an owner setting, not a model suggestion."""
+        return self.research_options.get("web") is False
+
+    def _emit_research_progress(self, state: str, step: str = "") -> None:
+        """One research_progress snapshot for the Research room,
+        built ONLY from the run's real counters at a real event
+        (gate, arming, a counted page operation, the consulted
+        sync, the kill). Emitting must never break the run it
+        reports on, so every failure here is swallowed."""
+        try:
+            started = self._research_started
+            self.research_progress.emit({
+                "state": state,
+                "step": step,
+                "ops": self._research_page_ops,
+                "opens": self._research_opens,
+                "reads": self._research_reads,
+                "cap": self._research_cap,
+                "depth": self._research_depth,
+                "elapsed": (time.time() - started)
+                           if started is not None else 0.0,
+                "tokens": int(self._turn_prompt_tokens
+                              + self._turn_eval_tokens),
+                "consulted": list(self._research_consulted),
+                "slug": self._research_slug,
+            })
+        except Exception:
+            pass
+
+    def _research_options_note(self) -> str:
+        """The owner's Research-room choices as one instruction
+        block appended to the run's working instruction — what
+        the room's Sources picker and depth choice mean for the
+        run, in words the model can honour (the shell enforces
+        the web switch and the depth cap itself)."""
+        opts = self.research_options
+        if not opts:
+            return ""
+        sources = []
+        if opts.get("web"):
+            sources.append("the web")
+        if opts.get("project"):
+            sources.append("this project's files")
+        supplied = [str(s) for s in opts.get("supplied") or []]
+        if supplied:
+            sources.append("the files the owner supplied, copied "
+                           "into .forge/sources/: " + ", ".join(supplied))
+        lines = ["OWNER'S RESEARCH SETTINGS (set in the Research "
+                 "room — they govern this run):"]
+        if sources:
+            lines.append("Sources for this run: "
+                         + "; ".join(sources) + ".")
+        if opts.get("web") is False:
+            lines.append("The web is OFF for this run: browsing is "
+                         "disabled by the shell. Answer from the "
+                         "project and the supplied files; what only "
+                         "the web could settle goes under Open "
+                         "questions, stated plainly.")
+        depth = str(opts.get("depth") or "").strip().lower()
+        if depth in ("standard", "deep"):
+            lines.append(f"Depth for this run: {depth.capitalize()} "
+                         "(the room's choice sets the budget).")
+        return "\n".join(lines) if len(lines) > 1 else ""
+
     def _research_phase(self) -> bool:
         """Research mode's gate (Write/Research spec, 2026-11-09):
         HOMEWORK (the existing read pass) → the research PLAN
@@ -2174,6 +2265,9 @@ class AgentWorker(QThread):
         self.plan_document.emit(document)
         self.status.emit("Research plan ready — Approve, Edit, or Kill. "
                          "No clock is running.")
+        self._emit_research_progress(
+            "gate", "Plan drafted — parked at the gate; "
+            "nothing has browsed.")
         decision = {"action": "kill", "steps": list(steps)}
         event = threading.Event()
         self._plan_decision, self._plan_event = decision, event
@@ -2189,6 +2283,8 @@ class AgentWorker(QThread):
         if decision["action"] != "approve" or self._cancel or not approved:
             self._log("research_killed")
             self.status.emit("Research plan killed — nothing was browsed.")
+            self._emit_research_progress(
+                "killed", "Killed at the gate — nothing browsed.")
             return False
         # Arm the run. Research's fences stay exactly as they are
         # (unlike Plan, approval does NOT lift the mode to code):
@@ -2197,14 +2293,32 @@ class AgentWorker(QThread):
         self._research_approved = True
         self._research_started = time.time()
         self._research_page_ops = 0
+        self._research_opens = 0
+        self._research_reads = 0
         self._research_consulted = []
-        self.messages.append({"role": "user",
-                              "content": modes_mod.research_work_instruction(
-                                  document, approved, report_rel,
-                                  self._research_depth, self._research_cap)})
+        # The Research room's depth choice, when the owner set
+        # one, overrides the plan's declared depth: the room is
+        # the owner's own setting surface, the drafted Depth
+        # section is the model's reading of the request.
+        room_depth = str(self.research_options.get("depth")
+                         or "").strip().lower()
+        if room_depth in ("standard", "deep"):
+            self._research_depth = room_depth
+            self._research_cap = (RESEARCH_DEEP_PAGE_OPS
+                                  if room_depth == "deep"
+                                  else RESEARCH_STANDARD_PAGE_OPS)
+        instruction = modes_mod.research_work_instruction(
+            document, approved, report_rel,
+            self._research_depth, self._research_cap)
+        note = self._research_options_note()
+        if note:
+            instruction += "\n\n" + note
+        self.messages.append({"role": "user", "content": instruction})
         self.status.emit("Research plan approved — running the research.")
         self._log("research_run_armed", depth=self._research_depth,
                   cap=self._research_cap, steps=len(approved))
+        self._emit_research_progress(
+            "running", "Run started — working the approved plan.")
         return True
 
     def _research_refusal(self, name: str) -> str | None:
@@ -2223,6 +2337,13 @@ class AgentWorker(QThread):
                     "owner approves a research plan in this "
                     "conversation. Draft the plan and wait for the "
                     "gate — do not try to browse before it.")
+        if self._research_web_off():
+            return ("Research web access is OFF for this run — the "
+                    "owner switched the web off in the Research "
+                    "room, so browsing is disabled whatever the plan "
+                    "says. Work from the project's files and the "
+                    "supplied files, and put what only the web "
+                    "could settle under Open questions.")
         if self._research_started is not None and \
                 time.time() - self._research_started > RESEARCH_TIME_CAP_SECONDS:
             return ("Research run time is up: this run's one-hour cap "
@@ -2254,11 +2375,18 @@ class AgentWorker(QThread):
                 return  # never reached a page: no op, no source
             self._research_page_ops += 1
             if name == "browse_open":
+                self._research_opens += 1
                 url = str((args or {}).get("url", "")).strip()
                 if url and url not in self._research_consulted:
                     self._research_consulted.append(url)
                     self._log("research_source", url=url[:200],
                               ops=self._research_page_ops)
+                host = urllib.parse.urlparse(url).hostname or url
+                step = f"Opened {host}"
+            else:
+                self._research_reads += 1
+                step = "Read a page"
+            self._emit_research_progress("running", step)
             return
         if name in ("write_file", "append_file", "edit_file"):
             path = str((args or {}).get("path", ""))
@@ -2302,6 +2430,8 @@ class AgentWorker(QThread):
             target.write_text(content, encoding="utf-8")
             self._log("research_sources_synced", path=path,
                       sources=len(self._research_consulted))
+            self._emit_research_progress(
+                "report", f"Report updated — {target.name}")
         except Exception as exc:
             self._log("research_sources_sync_failed", path=path,
                       error=str(exc)[:200])
@@ -3008,6 +3138,8 @@ class AgentWorker(QThread):
             self._research_approved = False
             self._research_started = None
             self._research_page_ops = 0
+            self._research_opens = 0
+            self._research_reads = 0
             self._research_cap = RESEARCH_STANDARD_PAGE_OPS
             self._research_depth = "standard"
             self._research_consulted = []

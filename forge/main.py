@@ -5933,12 +5933,15 @@ class ModeWindow(QWidget):
                  "back to disk — and the Documents tab lists the "
                  "project's own document files.",
         "research": "Deep research, gated and budgeted "
-                    "(Write/Research modes, 2026-11-09): the plan "
-                    "is approved before anything browses, and the "
-                    "finished reports live in the Reports tab — "
-                    "real files under .forge/research/, with the "
-                    "sources cited and the sources consulted both "
-                    "listed.",
+                    "(rebuilt 2026-11-11): ask a question in the "
+                    "room, pick sources and depth, and the drafted "
+                    "plan waits at the gate in the room — nothing "
+                    "browses before you approve it. The run shows "
+                    "its steps, pages, tokens and sites live; the "
+                    "finished report opens in the room under "
+                    ".forge/research/, with the sources cited and "
+                    "the sources consulted both listed, and edits "
+                    "filed as new versions.",
     }
 
     # (tab label, project-relative folder) per mode.
@@ -7129,12 +7132,50 @@ class AskWindow(ModeWindow):
 
 
 class ResearchWindow(ModeWindow):
-    """The Research room, split honestly (2026-11-10 upgrade):
-    its one folder becomes two tabs — Plans (the gated research
-    plans, *-plan.md) and Reports — and a selected report shows
-    its Sources cited and Sources consulted as two lists beside
-    the text: the mode's honesty claim, visible. The lists parse
-    lazily from the selected report only."""
+    """The Research room (rebuilt 2026-11-11 to the Write/Research
+    spec, on the Gemini Deep Research shape): the room's first tab
+    IS the research workflow, not a session transcript with lists.
+
+      ASK + SOURCES — a question box, a Sources picker (Web on by
+      default, Project files, Supplied files — supplied files are
+      copied into .forge/sources/ so the run can actually read
+      them) and a Standard / Deep choice. The choices reach the
+      run through the worker's research_options: the web switch
+      and the depth are shell-enforced (browse verbs are neither
+      offered nor executable with the web off; the room's depth
+      sets the page-op budget), the source list rides the run's
+      instruction. The room says on its face that searches are
+      the only thing that leaves the machine.
+
+      THE GATE IN THE ROOM — submitting a question runs a Research
+      turn on the bench; the worker drafts the plan (homework,
+      section drafting, filing — the existing machinery) and the
+      gate opens HERE (ForgeWindow.on_plan_ready routes research
+      gates to this room): the draft document, its sub-questions,
+      Approve / Edit / Kill wired to the same _plan_gate_action
+      the Plan window uses. Nothing browses before approval —
+      that enforcement never moved (offer seam + per-call
+      backstop in the worker).
+
+      THE LIVE RUN — the worker emits research_progress snapshots
+      from real run events only (gate, arming, each counted page
+      operation, the consulted sync, the kill); the meters, the
+      current step and the sites-browsed list render from those.
+      Stop calls the worker's cancel — the same F8 stop the bench
+      uses.
+
+      THE REPORT — a finished run's report opens in the room's
+      editor with its Sources cited and Sources consulted beside
+      it. Editing saves as a new version step (snapshots under
+      .forge/research-history/, Prev/Next stepping, the Write
+      room's pattern): an edit never silently rewrites the filed
+      report. Follow-ups go back through a Research turn that
+      answers from the report when it can and drafts a small
+      top-up plan at this gate when it needs the web.
+
+    The Plans / Reports tabs stay as the library (2026-11-10): a
+    past report selected there shows its two source lists, and a
+    double-click reopens it in the editor with its versions."""
 
     def _doc_tab_filter(self, tab_label, paths):
         if tab_label == "Plans":
@@ -7146,10 +7187,49 @@ class ResearchWindow(ModeWindow):
 
     def __init__(self, owner, key="research"):
         # Set before super().__init__: a document shown during
-        # construction already fires _on_doc_shown.
+        # construction already fires _on_doc_shown, and
+        # set_project (called at the end of the base __init__)
+        # touches this state — every widget attr starts as None
+        # and the methods below guard on it.
         self.cited_list = None
         self.consulted_list = None
+        self.ask_edit = None
+        self.src_web_check = None
+        self.src_project_check = None
+        self.src_supplied_check = None
+        self.supplied_label = None
+        self.depth_standard_radio = None
+        self.depth_deep_radio = None
+        self.gate_box = None
+        self.gate_status = None
+        self.gate_plan_view = None
+        self.gate_steps_list = None
+        self.run_status = None
+        self.run_step_label = None
+        self.run_meters = None
+        self.run_sites_list = None
+        self.stop_btn = None
+        self.report_path_label = None
+        self.report_editor = None
+        self.report_cited_list = None
+        self.report_consulted_list = None
+        self.report_version_status = None
+        self.report_status = None
+        self.followup_edit = None
+        self.followup_status = None
+        self._supplied_names: list[str] = []
+        self._report_path = ""
+        self._report_seen_stamp = None
+        self._report_viewing_stamp = None
+        self._report_loading = False
+        self._report_dirty = False
+        self._gate_steps_shown = None
+        self._clock = None
+        self._run_started_wall = None
+        self._last_payload = None
         super().__init__(owner, key)
+        # The library's source lists beside a selected report
+        # (2026-11-10 — kept whole).
         page = self._doc_pages.get("Reports")
         if page is not None:
             col = QWidget()
@@ -7164,26 +7244,863 @@ class ResearchWindow(ModeWindow):
             col.setMaximumWidth(280)
             page.layout().addWidget(col)
             listing, _viewer, paths = self._doc_tabs["Reports"]
+            listing.itemDoubleClicked.connect(
+                self._open_report_from_list)
             if 0 <= listing.currentRow() < len(paths):
                 self._on_doc_shown("Reports",
                                     paths[listing.currentRow()])
+        self._build_research_tab()
+        self._clock = QTimer(self)
+        self._clock.timeout.connect(self._tick_clock)
+        newest = self._newest_report()
+        self._report_seen_stamp = newest[1] if newest else None
 
-    def _on_doc_shown(self, tab_label, path):
-        if tab_label != "Reports" or self.cited_list is None:
+    def _build_research_tab(self):
+        """The workflow tab: ask + sources, the gate, the live
+        run, the report, follow-ups — built once, populated only
+        from real events (a sent turn, a gate, progress
+        snapshots, a finished report)."""
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        lay.addWidget(QLabel("Ask a research question"))
+        self.ask_edit = QPlainTextEdit()
+        self.ask_edit.setPlaceholderText(
+            "What should the research answer? Submitting drafts "
+            "a plan — nothing browses until you approve it here.")
+        self.ask_edit.setMaximumHeight(64)
+        lay.addWidget(self.ask_edit)
+        src_row = QHBoxLayout()
+        src_row.addWidget(QLabel("Sources:"))
+        self.src_web_check = QCheckBox("Web")
+        self.src_web_check.setChecked(True)
+        self.src_web_check.setToolTip(
+            "Web searching and page reading through the Browse "
+            "tools — the only part of a run that leaves this "
+            "machine. Switch it off to research only your own "
+            "material: browsing is then disabled by the shell, "
+            "not just unrequested.")
+        src_row.addWidget(self.src_web_check)
+        self.src_project_check = QCheckBox("Project files")
+        self.src_project_check.setChecked(True)
+        src_row.addWidget(self.src_project_check)
+        self.src_supplied_check = QCheckBox("Supplied files")
+        src_row.addWidget(self.src_supplied_check)
+        self.supplied_btn = QPushButton("Add files…")
+        self.supplied_btn.setToolTip(
+            "Copy files into the project's .forge/sources/ so "
+            "the research can read them")
+        self.supplied_btn.clicked.connect(self.add_supplied_files)
+        src_row.addWidget(self.supplied_btn)
+        src_row.addStretch(1)
+        lay.addLayout(src_row)
+        self.supplied_label = QLabel("")
+        self.supplied_label.setObjectName("muted")
+        self.supplied_label.setWordWrap(True)
+        lay.addWidget(self.supplied_label)
+        depth_row = QHBoxLayout()
+        depth_row.addWidget(QLabel("Depth:"))
+        self.depth_standard_radio = QRadioButton(
+            "Standard (up to 40 page operations)")
+        self.depth_standard_radio.setChecked(True)
+        depth_row.addWidget(self.depth_standard_radio)
+        self.depth_deep_radio = QRadioButton(
+            "Deep (up to 120 page operations)")
+        depth_row.addWidget(self.depth_deep_radio)
+        depth_row.addStretch(1)
+        lay.addLayout(depth_row)
+        face = QLabel(
+            "Every run is capped at 60 minutes. Searches are the "
+            "only thing that leaves this machine — your files, "
+            "the notes and the report all stay in the project.")
+        face.setObjectName("muted"); face.setWordWrap(True)
+        lay.addWidget(face)
+        ask_row = QHBoxLayout()
+        self.ask_status = QLabel("")
+        self.ask_status.setObjectName("muted")
+        self.ask_status.setWordWrap(True)
+        ask_row.addWidget(self.ask_status, 1)
+        self.ask_btn = QPushButton("Draft the research plan")
+        self.ask_btn.setToolTip(
+            "Start a Research turn: the plan is drafted and "
+            "parks at the gate below — nothing browses before "
+            "you approve it")
+        self.ask_btn.clicked.connect(self.start_research)
+        ask_row.addWidget(self.ask_btn)
+        lay.addLayout(ask_row)
+        # --- the gate ------------------------------------------
+        self.gate_box = QGroupBox("Research plan — your gate")
+        glay = QVBoxLayout(self.gate_box)
+        glay.setSpacing(6)
+        self.gate_status = QLabel(
+            "Nothing has browsed. Read the draft, then Approve "
+            "to start the run, Edit to change its steps, or Kill "
+            "to end it here.")
+        self.gate_status.setWordWrap(True)
+        glay.addWidget(self.gate_status)
+        self.gate_plan_view = QPlainTextEdit()
+        self.gate_plan_view.setReadOnly(True)
+        self.gate_plan_view.setMaximumHeight(170)
+        glay.addWidget(self.gate_plan_view)
+        glay.addWidget(QLabel("Sub-questions the run will work:"))
+        self.gate_steps_list = QListWidget()
+        self.gate_steps_list.setMaximumHeight(110)
+        glay.addWidget(self.gate_steps_list)
+        gate_row = QHBoxLayout()
+        self.gate_approve_btn = QPushButton("✓ Approve — start the research")
+        self.gate_approve_btn.setObjectName("primary")
+        self.gate_approve_btn.clicked.connect(
+            lambda: self._gate_action("approve"))
+        gate_row.addWidget(self.gate_approve_btn)
+        self.gate_edit_btn = QPushButton("✎ Edit plan")
+        self.gate_edit_btn.clicked.connect(
+            lambda: self._gate_action("edit"))
+        gate_row.addWidget(self.gate_edit_btn)
+        self.gate_kill_btn = QPushButton("✕ Kill")
+        self.gate_kill_btn.clicked.connect(
+            lambda: self._gate_action("kill"))
+        gate_row.addWidget(self.gate_kill_btn)
+        gate_row.addStretch(1)
+        glay.addLayout(gate_row)
+        self.gate_box.setVisible(False)
+        lay.addWidget(self.gate_box)
+        # --- the live run ---------------------------------------
+        run_box = QGroupBox("The run")
+        rlay = QVBoxLayout(run_box)
+        rlay.setSpacing(4)
+        self.run_status = QLabel("No run yet.")
+        self.run_status.setWordWrap(True)
+        rlay.addWidget(self.run_status)
+        self.run_step_label = QLabel("")
+        self.run_step_label.setWordWrap(True)
+        rlay.addWidget(self.run_step_label)
+        self.run_meters = QLabel("")
+        self.run_meters.setObjectName("muted")
+        self.run_meters.setWordWrap(True)
+        rlay.addWidget(self.run_meters)
+        rlay.addWidget(QLabel("Sites browsed"))
+        self.run_sites_list = QListWidget()
+        self.run_sites_list.setMaximumHeight(96)
+        rlay.addWidget(self.run_sites_list)
+        stop_row = QHBoxLayout()
+        self.stop_btn = QPushButton("Stop the run")
+        self.stop_btn.setToolTip(
+            "Stop the research run — the same cancel the bench's "
+            "Stop sends; the run halts and the report is written "
+            "from what was gathered")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_run)
+        stop_row.addWidget(self.stop_btn)
+        stop_row.addStretch(1)
+        rlay.addLayout(stop_row)
+        lay.addWidget(run_box)
+        # --- the report -----------------------------------------
+        report_box = QGroupBox("Report")
+        play = QVBoxLayout(report_box)
+        play.setSpacing(4)
+        self.report_path_label = QLabel(
+            "No report open — a finished run's report opens here, "
+            "or double-click one in the Reports tab.")
+        self.report_path_label.setWordWrap(True)
+        play.addWidget(self.report_path_label)
+        mid = QHBoxLayout()
+        self.report_editor = QPlainTextEdit()
+        self.report_editor.setPlaceholderText(
+            "The finished report opens here, editable — Save "
+            "files your edit as a new version; the version it "
+            "replaces is kept under Prev.")
+        self.report_editor.textChanged.connect(
+            self._note_report_dirty)
+        mid.addWidget(self.report_editor, 1)
+        rcol = QWidget()
+        rcol_lay = QVBoxLayout(rcol)
+        rcol_lay.setContentsMargins(0, 0, 0, 0); rcol_lay.setSpacing(4)
+        rcol_lay.addWidget(QLabel("Sources cited"))
+        self.report_cited_list = QListWidget()
+        rcol_lay.addWidget(self.report_cited_list, 1)
+        rcol_lay.addWidget(QLabel("Sources consulted"))
+        self.report_consulted_list = QListWidget()
+        rcol_lay.addWidget(self.report_consulted_list, 1)
+        rcol.setMaximumWidth(260)
+        mid.addWidget(rcol)
+        play.addLayout(mid, 1)
+        version_row = QHBoxLayout()
+        self.report_prev_btn = QPushButton("◀ Prev")
+        self.report_prev_btn.setToolTip(
+            "Step back to an earlier saved version of this report")
+        self.report_prev_btn.clicked.connect(
+            lambda: self._step_report_version(-1))
+        version_row.addWidget(self.report_prev_btn)
+        self.report_next_btn = QPushButton("Next ▶")
+        self.report_next_btn.setToolTip(
+            "Step forward — past the newest version is the live report")
+        self.report_next_btn.clicked.connect(
+            lambda: self._step_report_version(1))
+        version_row.addWidget(self.report_next_btn)
+        self.report_version_status = QLabel("")
+        self.report_version_status.setObjectName("muted")
+        self.report_version_status.setWordWrap(True)
+        version_row.addWidget(self.report_version_status, 1)
+        self.report_save_btn = QPushButton("Save as a new version")
+        self.report_save_btn.setToolTip(
+            "Write the pane back to the report file — the "
+            "version it replaces is snapshotted first")
+        self.report_save_btn.clicked.connect(self.save_report)
+        version_row.addWidget(self.report_save_btn)
+        play.addLayout(version_row)
+        self.report_status = QLabel("")
+        self.report_status.setObjectName("muted")
+        self.report_status.setWordWrap(True)
+        play.addWidget(self.report_status)
+        lay.addWidget(report_box, 1)
+        # --- follow-ups ------------------------------------------
+        fu_row = QHBoxLayout()
+        self.followup_edit = QLineEdit()
+        self.followup_edit.setPlaceholderText(
+            "Follow-up on the open report — answered from its "
+            "notes when they suffice…")
+        fu_row.addWidget(self.followup_edit, 1)
+        self.followup_btn = QPushButton("Ask follow-up")
+        self.followup_btn.setToolTip(
+            "Send the follow-up as a Research turn against the "
+            "open report; if it needs the web it drafts a small "
+            "top-up plan and comes back to the gate above")
+        self.followup_btn.clicked.connect(self.ask_followup)
+        fu_row.addWidget(self.followup_btn)
+        lay.addLayout(fu_row)
+        self.followup_status = QLabel("")
+        self.followup_status.setObjectName("muted")
+        self.followup_status.setWordWrap(True)
+        lay.addWidget(self.followup_status)
+        self.tabs.insertTab(0, page, "Research")
+        self.tabs.setCurrentIndex(0)
+
+    # -- project / gate sync ------------------------------------
+    def set_project(self, workspace):
+        super().set_project(workspace)
+        newest = self._newest_report()
+        self._report_seen_stamp = newest[1] if newest else None
+        self.sync_gate_from_owner()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.sync_gate_from_owner()
+
+    def sync_gate_from_owner(self):
+        """A research gate can open while this room is closed
+        (the turn was started from the bench): when the room is
+        shown, mirror the owner's parked research draft into the
+        in-room gate. Research turns only — a Plan draft at the
+        gate belongs to the Plan window, never to this room."""
+        if self.gate_box is None:
             return
-        text = self._doc_tabs["Reports"][1].toPlainText()
-        for listing, section in (
-                (self.cited_list, "Sources cited"),
-                (self.consulted_list, "Sources consulted")):
-            listing.clear()
-            body = modes_mod.section_body(text, section)
+        owner = self._owner
+        plan = getattr(owner, "plan_state", None)
+        if not isinstance(plan, dict) \
+                or plan.get("status") != "draft" \
+                or getattr(owner, "_turn_mode", "") != "research":
+            return
+        steps = [str(s.get("text", "")) for s in plan.get("steps", [])]
+        if steps and steps != self._gate_steps_shown:
+            self.show_research_gate(steps, plan.get("document") or "")
+
+    def show_research_gate(self, steps, document):
+        """The gate, in the room: the drafted plan document and
+        its sub-questions, parked. Called by the bench when a
+        research draft lands (and by sync_gate_from_owner when
+        the room reopens onto a parked draft)."""
+        if self.gate_box is None:
+            return
+        self._gate_steps_shown = list(steps)
+        self.gate_plan_view.setPlainText(document or "")
+        self.gate_steps_list.clear()
+        for step in steps:
+            self.gate_steps_list.addItem(QListWidgetItem(str(step)))
+        self.gate_status.setText(
+            "Nothing has browsed. Read the draft, then Approve "
+            "to start the run, Edit to change its steps, or Kill "
+            "to end it here.")
+        self.gate_box.setVisible(True)
+        self.run_status.setText(
+            "Plan drafted — it's at the gate above, waiting on you.")
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Research":
+                self.tabs.setCurrentIndex(i)
+                break
+
+    def _gate_action(self, action):
+        """Approve / Edit / Kill from inside the room — the same
+        _plan_gate_action the Plan window's buttons call, so the
+        decision, the edited steps and the worker release are
+        identical; only the surface is the room's."""
+        fn = getattr(self._owner, "_plan_gate_action", None)
+        if fn is None:
+            self.gate_status.setText(
+                "The bench gate is not available from here.")
+            return
+        fn(action)
+        if action == "edit":
+            # The edit dialog may have rewritten the steps —
+            # re-read them from the owner's plan state.
+            plan = getattr(self._owner, "plan_state", None)
+            if isinstance(plan, dict):
+                steps = [str(s.get("text", ""))
+                         for s in plan.get("steps", [])]
+                self._gate_steps_shown = steps
+                self.gate_steps_list.clear()
+                for step in steps:
+                    self.gate_steps_list.addItem(
+                        QListWidgetItem(step))
+                self.gate_status.setText(
+                    "Steps edited — Approve runs THIS plan.")
+            return
+        self.gate_box.setVisible(False)
+        self._gate_steps_shown = None
+        if action == "approve":
+            self.run_status.setText(
+                "Approved — the run is starting. Its steps, meters "
+                "and sites land below as they happen.")
+        elif action == "kill":
+            self.run_status.setText(
+                "Killed at the gate — nothing was browsed.")
+
+    # -- ask + sources -------------------------------------------
+    def research_options(self) -> dict:
+        """The room's choices as the worker's research_options:
+        the web switch, the project-files toggle, the supplied
+        file names, and the depth."""
+        return {"web": bool(self.src_web_check.isChecked()),
+                "project": bool(self.src_project_check.isChecked()),
+                "supplied": list(self._supplied_names),
+                "depth": "deep" if self.depth_deep_radio.isChecked()
+                         else "standard"}
+
+    def start_research(self):
+        """Submit the question: set the owner's research options
+        (send_message hands them to the worker for a Research
+        turn) and run the turn from the room. The drafting, the
+        filing and the gate are the worker's existing machinery;
+        the gate opens in this room when the draft lands."""
+        question = self.ask_edit.toPlainText().strip()
+        if not question:
+            self.ask_status.setText(
+                "Type the research question first.")
+            return
+        options = self.research_options()
+        try:
+            self._owner._research_room_options = options
+        except Exception:
+            pass
+        sources = []
+        sources.append("the web (on)" if options["web"]
+                       else "the web OFF")
+        if options["project"]:
+            sources.append("project files")
+        if options["supplied"]:
+            sources.append("supplied files: "
+                           + ", ".join(options["supplied"]))
+        text = (question + "\n\n[Research room settings — sources: "
+                + "; ".join(sources) + ". Depth: "
+                + options["depth"].capitalize() + ".]")
+        ok, why = self._bench_turn("Research", text)
+        if not ok:
+            self.ask_status.setText(
+                "The bench is not available to run the turn."
+                if why == "bench" else
+                "Type the research question first.")
+            return
+        self.ask_edit.clear()
+        self.ask_status.setText(
+            "Drafting the research plan — when it's ready, the "
+            "gate opens in this room. Nothing browses before you "
+            "approve it.")
+        self.run_status.setText("Drafting the research plan…")
+
+    def add_supplied_files(self):
+        """Supplied files: copy the owner's picks into the
+        project's .forge/sources/ — inside the jail, so the run's
+        read tools can actually reach them — and carry their
+        names in the room's options."""
+        if not self._workspace:
+            self.supplied_label.setText("No project is open.")
+            return
+        paths, _chosen = QFileDialog.getOpenFileNames(
+            self, "Supply files for the research")
+        if not paths:
+            return
+        dest = Path(self._workspace) / ".forge" / "sources"
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.supplied_label.setText(
+                f"Could not prepare .forge/sources/: {exc}")
+            return
+        added = []
+        for raw in paths:
+            src = Path(raw)
+            try:
+                target = dest / src.name
+                target.write_bytes(src.read_bytes())
+            except OSError:
+                continue
+            if src.name not in self._supplied_names:
+                self._supplied_names.append(src.name)
+            added.append(src.name)
+        if added:
+            self.src_supplied_check.setChecked(True)
+            self.supplied_label.setText(
+                "Supplied (copied into .forge/sources/): "
+                + ", ".join(self._supplied_names))
+        else:
+            self.supplied_label.setText(
+                "None of those files could be copied in.")
+
+    # -- the live run ----------------------------------------------
+    @staticmethod
+    def _fmt_elapsed(seconds) -> str:
+        seconds = max(0, int(seconds or 0))
+        return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+    def on_research_progress(self, payload):
+        """One research_progress snapshot from the worker — a
+        real run event (gate, arming, a counted page operation,
+        the consulted sync, the kill). The meters, the step and
+        the sites list render from the snapshot; nothing here
+        invents movement between events."""
+        if self.run_status is None or not isinstance(payload, dict):
+            return
+        self._last_payload = payload
+        state = payload.get("state")
+        if state == "gate":
+            self.run_status.setText(
+                "Plan drafted — it's at the gate above. Nothing "
+                "has browsed.")
+        elif state == "running":
+            if self._run_started_wall is None:
+                self._run_started_wall = (
+                    time.time() - float(payload.get("elapsed") or 0))
+            if self._clock is not None:
+                self._clock.start(1000)
+            self.stop_btn.setEnabled(True)
+            self.run_status.setText("Running the research…")
+            self._render_meters(payload)
+            self.run_sites_list.clear()
+            for url in payload.get("consulted") or []:
+                self.run_sites_list.addItem(QListWidgetItem(str(url)))
+        elif state == "report":
+            self.run_status.setText(
+                "Report filed — it opens below with its sources.")
+            self.refresh_documents()
+            self._reload_report_if_clean()
+        elif state == "killed":
+            self._stop_clock()
+            self.stop_btn.setEnabled(False)
+            self.run_status.setText(
+                "Killed at the gate — nothing was browsed.")
+
+    def _render_meters(self, payload, elapsed=None):
+        if elapsed is None:
+            elapsed = payload.get("elapsed") or 0
+        self.run_step_label.setText(
+            f"Now: {payload.get('step') or '—'}")
+        ops = int(payload.get("ops") or 0)
+        cap = int(payload.get("cap") or 0)
+        self.run_meters.setText(
+            f"Pages {ops} of {cap} (budget left {max(0, cap - ops)})"
+            f" · opened {int(payload.get('opens') or 0)}"
+            f" · read {int(payload.get('reads') or 0)}"
+            f" · tokens {int(payload.get('tokens') or 0):,}"
+            f" · elapsed {self._fmt_elapsed(elapsed)}"
+            f" · depth {payload.get('depth') or 'standard'}")
+
+    def _tick_clock(self):
+        """The clock readout ONLY: elapsed time re-rendered from
+        the run's real start while it runs. No meter, site or
+        step ever moves on this tick — those move on the
+        worker's progress events alone."""
+        if self._last_payload is None or self._run_started_wall is None:
+            return
+        self._render_meters(
+            self._last_payload,
+            elapsed=time.time() - self._run_started_wall)
+
+    def _stop_clock(self):
+        if self._clock is not None:
+            self._clock.stop()
+        self._run_started_wall = None
+
+    def stop_run(self):
+        """Stop the live run: the running research worker's
+        cancel — the same F8 cancel the bench's Stop sends (it
+        also releases a parked gate as a kill)."""
+        worker = getattr(self._owner, "worker", None)
+        if worker is not None \
+                and getattr(worker, "researching", False) \
+                and worker.isRunning():
+            worker.cancel()
+            self.run_status.setText(
+                "Stopping — the run halts at its next step, and "
+                "the report is written from what was gathered.")
+        else:
+            self.run_status.setText("No research run is live.")
+
+    # -- the report -------------------------------------------------
+    def _newest_report(self):
+        """(path, mtime) of the newest report file in
+        .forge/research/ (plans excluded), or None."""
+        if not self._workspace:
+            return None
+        folder = Path(self._workspace) / ".forge" / "research"
+        if not folder.is_dir():
+            return None
+        best = None
+        for p in folder.iterdir():
+            if not p.is_file() or p.suffix.lower() != ".md" \
+                    or p.name.endswith("-plan.md"):
+                continue
+            try:
+                stamp = p.stat().st_mtime
+            except OSError:
+                continue
+            if best is None or stamp > best[1]:
+                best = (p, stamp)
+        return best
+
+    @staticmethod
+    def _parse_source_lists(text):
+        """(cited, consulted) entry strings out of a report's
+        two shell/model source sections, list markers stripped."""
+        out = {}
+        for key, section in (("cited", "Sources cited"),
+                             ("consulted", "Sources consulted")):
+            entries = []
+            body = modes_mod.section_body(text or "", section)
             if body:
                 for raw in body.splitlines():
                     stripped = raw.strip()
                     stripped = re.sub(r"^[-*]\s+", "", stripped)
                     stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
                     if stripped:
-                        listing.addItem(QListWidgetItem(stripped))
+                        entries.append(stripped)
+            out[key] = entries
+        return out["cited"], out["consulted"]
+
+    @staticmethod
+    def _fill_list(listing, entries):
+        listing.clear()
+        for entry in entries:
+            listing.addItem(QListWidgetItem(entry))
+
+    def _on_doc_shown(self, tab_label, path):
+        if tab_label != "Reports" or self.cited_list is None:
+            return
+        text = self._doc_tabs["Reports"][1].toPlainText()
+        cited, consulted = self._parse_source_lists(text)
+        self._fill_list(self.cited_list, cited)
+        self._fill_list(self.consulted_list, consulted)
+
+    def _open_report_from_list(self, item):
+        entry = self._doc_tabs.get("Reports")
+        if entry is None:
+            return
+        listing, _viewer, paths = entry
+        row = listing.row(item)
+        if 0 <= row < len(paths):
+            self.show_report(paths[row])
+
+    def show_report(self, path):
+        """Open a report in the room's editor: the on-disk
+        content is snapshotted first (a version step), the pane
+        loads the live file, and its cited + consulted lists
+        fill beside it."""
+        target = Path(path)
+        if not target.is_file():
+            return
+        self._report_snapshot(target)
+        try:
+            text = target.read_text(encoding="utf-8",
+                                    errors="replace")
+        except OSError as exc:
+            self.report_status.setText(
+                f"Could not read that report: {exc}")
+            return
+        self._report_path = str(target)
+        self._report_loading = True
+        self.report_editor.setPlainText(text)
+        self._report_loading = False
+        self._report_dirty = False
+        self._report_viewing_stamp = None
+        try:
+            rel = target.resolve().relative_to(
+                Path(self._workspace).resolve()).as_posix()
+        except (ValueError, OSError):
+            rel = target.name
+        self.report_path_label.setText(f"Report — {rel}")
+        cited, consulted = self._parse_source_lists(text)
+        self._fill_list(self.report_cited_list, cited)
+        self._fill_list(self.report_consulted_list, consulted)
+        self.report_version_status.setText(
+            "On the live report — Prev steps back through its "
+            "saved versions.")
+        self.report_status.setText(f"Opened {target.name}.")
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Research":
+                self.tabs.setCurrentIndex(i)
+                break
+
+    def _reload_report_if_clean(self):
+        """A run updated the open report on disk (the consulted
+        sync): reload the pane when the owner holds no unsaved
+        typing in it — their words are never clobbered."""
+        if not self._report_path or self._report_dirty:
+            return
+        target = Path(self._report_path)
+        if not target.is_file():
+            return
+        try:
+            text = target.read_text(encoding="utf-8",
+                                    errors="replace")
+        except OSError:
+            return
+        if text == self.report_editor.toPlainText():
+            return
+        self._report_loading = True
+        self.report_editor.setPlainText(text)
+        self._report_loading = False
+        cited, consulted = self._parse_source_lists(text)
+        self._fill_list(self.report_cited_list, cited)
+        self._fill_list(self.report_consulted_list, consulted)
+
+    def _note_report_dirty(self):
+        if self._report_loading:
+            return
+        self._report_dirty = True
+        if self._report_viewing_stamp is not None:
+            self._report_viewing_stamp = None
+            self.report_version_status.setText(
+                "Editing the live draft — Save files it as the "
+                "report, with the old version kept under Prev.")
+
+    def save_report(self):
+        """Save the pane back to the report file: the on-disk
+        content it replaces is snapshotted FIRST (the edit is a
+        new version step, never a silent rewrite), then the
+        library and the source lists refresh from the saved
+        text."""
+        if not self._report_path:
+            self.report_status.setText("Open a report first.")
+            return
+        target = Path(self._report_path)
+        text = self.report_editor.toPlainText()
+        if target.is_file():
+            try:
+                on_disk = target.read_text(encoding="utf-8",
+                                           errors="replace")
+            except OSError:
+                on_disk = None
+            if on_disk is not None and on_disk != text:
+                self._report_snapshot(target)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self.report_status.setText(f"Could not save: {exc}")
+            return
+        self._report_dirty = False
+        self._report_viewing_stamp = None
+        self.report_version_status.setText(
+            "Saved — on the live report, its earlier versions "
+            "kept under Prev.")
+        self.report_status.setText(
+            f"Saved {target.name} as a new version.")
+        cited, consulted = self._parse_source_lists(text)
+        self._fill_list(self.report_cited_list, cited)
+        self._fill_list(self.report_consulted_list, consulted)
+        self.refresh_documents()
+        newest = self._newest_report()
+        if newest:
+            self._report_seen_stamp = newest[1]
+
+    # -- report version stepping (the Write room's pattern) ------
+    def _report_history_dir(self, target):
+        """The snapshot folder for one report:
+        .forge/research-history/<sanitized relative path>/."""
+        if not self._workspace:
+            return None
+        root = Path(self._workspace).resolve()
+        try:
+            rel = target.resolve().relative_to(root)
+        except (ValueError, OSError):
+            return None
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                           rel.as_posix().replace("/", "__"))
+        return root / ".forge" / "research-history" / sanitized
+
+    def _report_snapshot(self, target):
+        """Snapshot the target's CURRENT on-disk content into
+        its history folder, skipping an exact repeat of the
+        newest snapshot. Silent on failure — history must never
+        break the room."""
+        try:
+            if not target.is_file():
+                return
+            data = target.read_bytes()
+            folder = self._report_history_dir(target)
+            if folder is None:
+                return
+            existing = sorted(folder.glob("*.txt")) \
+                if folder.is_dir() else []
+            if existing:
+                try:
+                    if existing[-1].read_bytes() == data:
+                        return
+                except OSError:
+                    pass
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%SZ",
+                                  time.gmtime()) \
+                + f"-{int((time.time() % 1) * 1000000):06d}"
+            (folder / f"{stamp}.txt").write_bytes(data)
+        except Exception:
+            pass
+
+    def _report_version_paths(self, target):
+        folder = self._report_history_dir(target)
+        if folder is None or not folder.is_dir():
+            return []
+        return sorted(folder.glob("*.txt"))
+
+    def _step_report_version(self, delta):
+        """Prev/Next through the open report's snapshots:
+        stepping loads a snapshot as a VIEW (Save writes it
+        back as the live report); stepping forward past the
+        newest returns to the live file."""
+        if not self._report_path:
+            self.report_version_status.setText(
+                "Open a report first.")
+            return
+        target = Path(self._report_path)
+        versions = self._report_version_paths(target)
+        if not versions:
+            self.report_version_status.setText(
+                "No earlier versions yet — a snapshot is taken "
+                "when a report opens and before each Save that "
+                "changes it.")
+            return
+        stamps = [p.stem for p in versions]
+        if self._report_viewing_stamp is None:
+            if delta > 0:
+                self.report_version_status.setText(
+                    "Already on the live report.")
+                return
+            index = len(versions) - 1
+        else:
+            try:
+                index = stamps.index(self._report_viewing_stamp) \
+                    + delta
+            except ValueError:
+                index = len(versions) - 1 if delta < 0 \
+                    else len(versions)
+        if index >= len(versions):
+            self._report_viewing_stamp = None
+            if target.is_file():
+                try:
+                    live = target.read_text(encoding="utf-8",
+                                            errors="replace")
+                except OSError:
+                    live = None
+                if live is not None:
+                    self._report_loading = True
+                    self.report_editor.setPlainText(live)
+                    self._report_loading = False
+                    self._report_dirty = False
+            self.report_version_status.setText(
+                "Back to the live report.")
+            return
+        index = max(0, index)
+        path = versions[index]
+        try:
+            text = path.read_text(encoding="utf-8",
+                                  errors="replace")
+        except OSError as exc:
+            self.report_version_status.setText(
+                f"Could not read that version: {exc}")
+            return
+        self._report_loading = True
+        self.report_editor.setPlainText(text)
+        self._report_loading = False
+        self._report_viewing_stamp = path.stem
+        self._report_dirty = True
+        self.report_version_status.setText(
+            f"Viewing version from {path.stem} — Save writes it "
+            "back as the live report; typing returns you to the "
+            "live draft.")
+
+    # -- follow-ups --------------------------------------------------
+    def ask_followup(self):
+        """A follow-up against the open report, sent as a
+        Research turn: the instruction pins the report as the
+        first source — answer from it and its gathered sources
+        when they suffice (the phase's plain-answer settle), and
+        when the web is genuinely needed, draft a SMALL top-up
+        plan scoped to this follow-up, which parks at this
+        room's gate like any research plan. Browsing without an
+        approved plan is refused by the worker either way."""
+        question = self.followup_edit.text().strip()
+        if not self._report_path:
+            self.followup_status.setText(
+                "Open a report first — a follow-up needs its "
+                "report.")
+            return
+        if not question:
+            self.followup_status.setText(
+                "Type the follow-up first.")
+            return
+        target = Path(self._report_path)
+        try:
+            rel = target.resolve().relative_to(
+                Path(self._workspace).resolve()).as_posix()
+        except (ValueError, OSError):
+            rel = target.name
+        prompt = (
+            f"Follow-up on the finished research report at "
+            f"{rel}: {question}\n\n"
+            "Read that report first — it and the sources it "
+            "gathered are your notes. Answer from them when they "
+            "suffice. If the answer needs new web research, "
+            "draft a SMALL top-up research plan scoped to just "
+            "this follow-up and let it come to the gate — do "
+            "not browse without an approved plan. If the "
+            "follow-up asks to change the report, the amendment "
+            "lands as a new version of that file, never a "
+            "silent rewrite.")
+        ok, why = self._bench_turn("Research", prompt)
+        if not ok:
+            self.followup_status.setText(
+                "The bench is not available to run the turn."
+                if why == "bench" else
+                "Type the follow-up first.")
+            return
+        self.followup_edit.clear()
+        self.followup_status.setText(
+            "Follow-up sent — the answer lands in Session work; "
+            "a top-up plan, if one is needed, opens at the gate "
+            "above.")
+
+    def add_exchange(self, prompt, reply):
+        """A finished Research turn: file the exchange (the base
+        room's behaviour), stop the run clock, refresh the
+        library — and when the turn filed a NEW report, open it
+        in the room's editor."""
+        super().add_exchange(prompt, reply)
+        self._stop_clock()
+        if self.stop_btn is not None:
+            self.stop_btn.setEnabled(False)
+        self.refresh_documents()
+        newest = self._newest_report()
+        if newest and newest[1] != self._report_seen_stamp:
+            self._report_seen_stamp = newest[1]
+            self.show_report(newest[0])
 
 
 class PlanWindow(QWidget):
@@ -14950,6 +15867,16 @@ class ForgeWindow(QMainWindow):
         plan's full text; the gate shows it under the checklist."""
         self._pending_plan_document = text
 
+    def on_research_progress(self, payload):
+        """Research room (2026-11-11): the research worker's live
+        run events route to the Research window, whose meters and
+        sites list render from these snapshots and nothing else.
+        The bench keeps its own normal status stream; this is the
+        room's feed."""
+        win = getattr(self, "mode_windows", {}).get("research")
+        if win is not None:
+            win.on_research_progress(payload)
+
     def on_plan_ready(self, steps):
         """The worker drafted a plan and is parked at the gate."""
         self.plan_state = planning_mod.new_plan(
@@ -14964,7 +15891,23 @@ class ForgeWindow(QMainWindow):
         self._plan_revising = False
         self.plan_comment_edit.clear()
         self._plan_render()
-        self.open_plan_window()
+        if getattr(self, "_turn_mode", "") == "research":
+            # Research room (2026-11-11): a research plan gates IN
+            # its own room — the room shows the draft and its
+            # Approve / Edit / Kill call this same gate machinery
+            # (_plan_gate_action), so the enforcement under the
+            # surface is unchanged; only the door moved.
+            win = getattr(self, "mode_windows", {}).get("research")
+            if win is not None:
+                win.show()
+                win.raise_()
+                win.show_research_gate(
+                    [s["text"] for s in self.plan_state["steps"]],
+                    self.plan_state.get("document") or "")
+            else:
+                self.open_plan_window()
+        else:
+            self.open_plan_window()
         request = (self._pending_plan_request or "").strip()
         # Item #58: the artifact IS the plan document (the full
         # text lives in the plan .md under .forge/artifacts/);
@@ -16894,6 +17837,11 @@ class ForgeWindow(QMainWindow):
                                   governing_roster=self.settings.get("governing_roster", ""),
                                   planning=(turn_perms.get("mode") == "plan"),
                                   researching=(turn_perms.get("mode") == "research"),
+                                  research_options=(dict(
+                                      getattr(self, "_research_room_options",
+                                              None) or {})
+                                      if turn_perms.get("mode") == "research"
+                                      else None),
                                   auto_snapshot_edits=bool(self.settings.get(
                                       "auto_snapshot_edits", True)),
                                   checkpoint_mode=str(self.settings.get(
@@ -16947,6 +17895,7 @@ class ForgeWindow(QMainWindow):
         worker.plan_goldfish.connect(self.on_plan_goldfish)
         worker.plan_document.connect(self.on_plan_document)
         worker.plan_ready.connect(self.on_plan_ready)
+        worker.research_progress.connect(self.on_research_progress)
         worker.plan_revised.connect(self.on_plan_revised)
         worker.plan_active.connect(self.on_plan_active)
         worker.plan_step_done.connect(self.on_plan_step_done)

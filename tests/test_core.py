@@ -30649,6 +30649,396 @@ class WriteResearchWindowTests(unittest.TestCase):
         self.assertEqual(win.doc_editor.toPlainText(), "Dear three,\n")
 
 
+class ResearchRoomTests(unittest.TestCase):
+    """The rebuilt Research room (2026-11-11, the Gemini Deep
+    Research shape): ask + sources + depth in the room, the gate
+    IN the room on the same gate machinery, live meters fed by
+    the worker's research_progress events (real run counters,
+    nothing else), the report editable in the room with version
+    steps, follow-ups that answer from the report or draft a
+    top-up plan at the gate, and the worker honoring the room's
+    web switch and depth as shell law."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _wait_for(self, cond, timeout=10.0):
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            self.app.processEvents()
+            if cond():
+                return True
+            _time.sleep(0.01)
+        return cond()
+
+    def _bare_owner(self, ws):
+        from PySide6.QtWidgets import QWidget
+        owner = QWidget()
+        owner.workspace = str(ws)
+        return owner
+
+    def _bench_owner(self, ws):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        owner = QWidget()
+        owner.workspace = str(ws)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        return owner
+
+    def _worker(self, script, ws, hits, options=None):
+        from forge.worker import AgentWorker
+
+        def open_handler(args):
+            hits["open"] += 1
+            return "Example page text about swallows."
+
+        def read_handler(args):
+            hits["read"] += 1
+            return "The page's full text."
+
+        extra = {"browse_open": (_browse_schema("browse_open", ("url",)),
+                                 open_handler, True, "test"),
+                 "browse_read": (_browse_schema("browse_read"),
+                                 read_handler, False, "test")}
+        classes = {"browse_open": "write", "browse_read": "read"}
+        worker = AgentWorker(
+            _PlanClient(script), "fake-model",
+            [{"role": "user", "content": "Research the swallow question"}],
+            {}, str(ws), extra_tools=extra,
+            permissions={"rules": [], "mode": "research", "classes": classes},
+            researching=True, research_options=options,
+            skribe_writes=False)
+        worker.approval_needed.connect(
+            lambda *a: worker.resolve_approval(True))
+        seen = {"ready": [], "finished": []}
+        worker.plan_ready.connect(seen["ready"].append)
+        worker.finished_text.connect(
+            lambda text, msgs: seen["finished"].append(text))
+        return worker, seen
+
+    _PLAN_SCRIPT = [
+        {"content": "READY — read the project."},
+        {"content": "What is the airspeed velocity of an unladen swallow?"},
+        {"content": "1. What airspeed do swallows cruise at?\n"
+                    "2. Does the figure differ by species?"},
+        {"content": "The web — ornithology references and encyclopedias."},
+        {"content": "Standard — one focused pass settles it."},
+        {"content": "Assumed: the European swallow, in level flight."},
+    ]
+
+    _REPORT = ("# Swallow airspeed\n\n## Question\n\n"
+               "What is the airspeed velocity of an unladen swallow?\n\n"
+               "## Findings\n\nSwallows cruise near 11 m/s [1].\n\n"
+               "## Evidence\n\nThe example reference states the "
+               "cruising figure directly.\n\n## Open questions\n\n"
+               "None.\n\n## Sources cited\n\n"
+               "1. Swallow reference — https://example.com/swallows\n\n"
+               "## Sources consulted\n\n"
+               "1. https://example.com/swallows\n")
+
+    # -- the room's inventory ------------------------------------
+    def test_room_inventory(self):
+        from PySide6.QtWidgets import QLabel
+        from forge.main import ResearchWindow
+        ws = Path(tempfile.mkdtemp())
+        win = ResearchWindow(self._bare_owner(ws), "research")
+        # The workflow tab is the front door.
+        self.assertEqual(
+            win.tabs.tabText(win.tabs.currentIndex()), "Research")
+        self.assertEqual(
+            [win.tabs.tabText(i) for i in range(win.tabs.count())],
+            ["Research", "Session work", "Plans", "Reports"])
+        # Ask + sources + depth.
+        self.assertTrue(win.src_web_check.isChecked())
+        self.assertTrue(win.src_project_check.isChecked())
+        self.assertFalse(win.src_supplied_check.isChecked())
+        self.assertTrue(win.depth_standard_radio.isChecked())
+        self.assertFalse(win.depth_deep_radio.isChecked())
+        notes = [lbl.text() for lbl in win.findChildren(QLabel)]
+        self.assertTrue(any("only thing that leaves" in t
+                            for t in notes), notes)
+        # Gate, run and report surfaces all exist.
+        self.assertEqual(win.gate_approve_btn.text(),
+                         "✓ Approve — start the research")
+        self.assertFalse(win.gate_box.isVisible())
+        self.assertFalse(win.stop_btn.isEnabled())
+        self.assertIsNotNone(win.report_editor)
+        self.assertIsNotNone(win.followup_edit)
+        win.close()
+
+    # -- the room's settings reach the run -------------------------
+    def test_send_carries_room_settings(self):
+        from forge.main import ResearchWindow
+        ws = Path(tempfile.mkdtemp())
+        owner = self._bench_owner(ws)
+        win = ResearchWindow(owner, "research")
+        win.src_web_check.setChecked(False)
+        win.depth_deep_radio.setChecked(True)
+        win.ask_edit.setPlainText("How fast is a swallow?")
+        win.ask_btn.click()
+        self.assertEqual(len(owner.send_calls), 1)
+        sent = owner.send_calls[0]
+        self.assertIn("How fast is a swallow?", sent)
+        self.assertIn("the web OFF", sent)
+        self.assertIn("Depth: Deep", sent)
+        self.assertEqual(owner.mode_combo.currentText(), "Research")
+        self.assertEqual(owner._research_room_options,
+                         {"web": False, "project": True,
+                          "supplied": [], "depth": "deep"})
+        win.close()
+
+    def test_worker_web_off_refuses_browse_after_approval(self):
+        ws = Path(tempfile.mkdtemp())
+        script = list(self._PLAN_SCRIPT) + [
+            {"tool": "browse_open",
+             "args": {"url": "https://example.com/swallows"}},
+            {"content": "Settled from the project files instead."},
+        ]
+        hits = {"open": 0, "read": 0}
+        worker, seen = self._worker(script, ws, hits,
+                                    options={"web": False})
+        worker.start()
+        self.assertTrue(self._wait_for(lambda: seen["ready"]))
+        worker.resolve_plan("approve")
+        self.assertTrue(self._wait_for(lambda: seen["finished"]))
+        worker.wait(3000)
+        # The handler never ran, and the refusal names the switch.
+        self.assertEqual(hits, {"open": 0, "read": 0})
+        results = [m["content"] for m in worker.messages
+                   if m.get("role") == "tool"]
+        self.assertTrue(any("web access is OFF" in r
+                            for r in results), results)
+        # The offer seam agrees: no browse verbs even when approved.
+        names = [s["function"]["name"] for s in worker._schemas()]
+        self.assertNotIn("browse_open", names)
+        self.assertNotIn("browse_read", names)
+
+    def test_worker_room_depth_overrides_plan_depth(self):
+        ws = Path(tempfile.mkdtemp())
+        hits = {"open": 0, "read": 0}
+        # The plan script declares Standard; the room said Deep.
+        worker, seen = self._worker(list(self._PLAN_SCRIPT), ws, hits,
+                                    options={"depth": "deep"})
+        worker.start()
+        self.assertTrue(self._wait_for(lambda: seen["ready"]))
+        worker.resolve_plan("approve")
+        self.assertTrue(self._wait_for(
+            lambda: worker._research_approved))
+        self.assertEqual(worker._research_depth, "deep")
+        self.assertEqual(worker._research_cap, 120)
+        worker.resolve_plan("kill")
+        worker.cancel()
+        self.assertTrue(self._wait_for(lambda: seen["finished"]))
+        worker.wait(3000)
+
+    # -- progress events are the run's real counters ---------------
+    def test_worker_progress_events_track_the_run(self):
+        from forge import modes as modes_mod
+        ws = Path(tempfile.mkdtemp())
+        slug = modes_mod.research_slug("Research the swallow question")
+        report_rel = f".forge/research/{slug}.md"
+        script = list(self._PLAN_SCRIPT) + [
+            {"tool": "browse_open",
+             "args": {"url": "https://example.com/swallows"}},
+            {"tool": "browse_read", "args": {}},
+            {"tool": "write_file",
+             "args": {"path": report_rel, "content": self._REPORT}},
+            {"content": "Research complete — the report is filed."},
+        ]
+        hits = {"open": 0, "read": 0}
+        worker, seen = self._worker(script, ws, hits)
+        payloads = []
+        worker.research_progress.connect(payloads.append)
+        worker.start()
+        self.assertTrue(self._wait_for(lambda: seen["ready"]))
+        worker.resolve_plan("approve")
+        self.assertTrue(self._wait_for(lambda: seen["finished"]))
+        worker.wait(3000)
+        self._wait_for(lambda: len(payloads) >= 5)
+        states = [p["state"] for p in payloads]
+        self.assertEqual(states[0], "gate")
+        self.assertIn("running", states)
+        self.assertIn("report", states)
+        ops = [p["ops"] for p in payloads]
+        self.assertEqual(ops, sorted(ops))
+        self.assertIn(2, ops)
+        live = [p for p in payloads if p["ops"] == 2][0]
+        self.assertEqual(live["opens"], 1)
+        self.assertEqual(live["reads"], 1)
+        self.assertEqual(live["cap"], 40)
+        self.assertEqual(live["depth"], "standard")
+        self.assertEqual(live["consulted"],
+                         ["https://example.com/swallows"])
+        self.assertIsInstance(live["tokens"], int)
+
+    def test_progress_events_update_the_room_meters(self):
+        from forge.main import ResearchWindow
+        ws = Path(tempfile.mkdtemp())
+        win = ResearchWindow(self._bare_owner(ws), "research")
+        win.on_research_progress(
+            {"state": "gate", "step": "", "ops": 0, "opens": 0,
+             "reads": 0, "cap": 40, "depth": "standard",
+             "elapsed": 0.0, "tokens": 0, "consulted": [],
+             "slug": "x"})
+        self.assertIn("gate", win.run_status.text())
+        win.on_research_progress(
+            {"state": "running", "step": "Opened example.com",
+             "ops": 3, "opens": 2, "reads": 1, "cap": 40,
+             "depth": "standard", "elapsed": 65.0, "tokens": 1234,
+             "consulted": ["https://example.com/swallows"],
+             "slug": "x"})
+        self.assertIn("Pages 3 of 40", win.run_meters.text())
+        self.assertIn("budget left 37", win.run_meters.text())
+        self.assertIn("1,234", win.run_meters.text())
+        self.assertIn("01:05", win.run_meters.text())
+        self.assertIn("Opened example.com",
+                      win.run_step_label.text())
+        self.assertEqual(win.run_sites_list.count(), 1)
+        self.assertEqual(win.run_sites_list.item(0).text(),
+                         "https://example.com/swallows")
+        self.assertTrue(win.stop_btn.isEnabled())
+        win.close()
+
+    # -- the gate, in the room --------------------------------------
+    def test_gate_panel_calls_the_shared_gate_machinery(self):
+        from forge.main import ResearchWindow
+        ws = Path(tempfile.mkdtemp())
+        owner = self._bench_owner(ws)
+        calls = []
+        owner._plan_gate_action = calls.append
+        owner.plan_state = {
+            "status": "draft",
+            "steps": [{"text": "Sub-question one"},
+                      {"text": "Sub-question two"}],
+            "document": "# The drafted plan"}
+        win = ResearchWindow(owner, "research")
+        win.show_research_gate(
+            ["Sub-question one", "Sub-question two"],
+            "# The drafted plan")
+        self.assertTrue(win.gate_box.isVisibleTo(win))
+        self.assertEqual(win.gate_steps_list.count(), 2)
+        self.assertIn("drafted plan",
+                      win.gate_plan_view.toPlainText())
+        win.gate_approve_btn.click()
+        self.assertEqual(calls, ["approve"])
+        win.show_research_gate(["Sub-question one"], "doc")
+        win.gate_kill_btn.click()
+        self.assertEqual(calls, ["approve", "kill"])
+        win.show_research_gate(["Sub-question one"], "doc")
+        win.gate_edit_btn.click()
+        self.assertEqual(calls, ["approve", "kill", "edit"])
+        self.assertEqual(win.gate_steps_list.count(), 2)
+        win.close()
+
+    def test_stop_button_cancels_the_research_worker(self):
+        from forge.main import ResearchWindow
+        ws = Path(tempfile.mkdtemp())
+        owner = self._bare_owner(ws)
+
+        class _StubWorker:
+            researching = True
+            cancelled = False
+
+            def isRunning(self):
+                return True
+
+            def cancel(self):
+                self.cancelled = True
+
+        owner.worker = _StubWorker()
+        win = ResearchWindow(owner, "research")
+        # The button only arms when a run is live — a progress
+        # event is what arms it, exactly as in the room.
+        self.assertFalse(win.stop_btn.isEnabled())
+        win.on_research_progress(
+            {"state": "running", "step": "Opened example.com",
+             "ops": 1, "opens": 1, "reads": 0, "cap": 40,
+             "depth": "standard", "elapsed": 1.0, "tokens": 10,
+             "consulted": ["https://example.com/swallows"],
+             "slug": "x"})
+        self.assertTrue(win.stop_btn.isEnabled())
+        win.stop_btn.click()
+        self.assertTrue(owner.worker.cancelled)
+        win.close()
+
+    # -- the report: both lists, versions, follow-ups ---------------
+    def _report_project(self):
+        ws = Path(tempfile.mkdtemp())
+        folder = ws / ".forge" / "research"
+        folder.mkdir(parents=True)
+        report = folder / "swallow-airspeed.md"
+        report.write_text(self._REPORT, encoding="utf-8")
+        return ws, report
+
+    def test_report_pane_shows_cited_and_consulted(self):
+        from forge.main import ResearchWindow
+        ws, report = self._report_project()
+        win = ResearchWindow(self._bare_owner(ws), "research")
+        win.show_report(report)
+        self.assertIn("Swallows cruise near 11 m/s",
+                      win.report_editor.toPlainText())
+        self.assertEqual(win.report_cited_list.count(), 1)
+        self.assertIn("Swallow reference",
+                      win.report_cited_list.item(0).text())
+        self.assertEqual(win.report_consulted_list.count(), 1)
+        self.assertEqual(win.report_consulted_list.item(0).text(),
+                         "https://example.com/swallows")
+        win.close()
+
+    def test_report_edits_file_as_version_steps(self):
+        from forge.main import ResearchWindow
+        ws, report = self._report_project()
+        win = ResearchWindow(self._bare_owner(ws), "research")
+        win.show_report(report)
+        win.report_editor.setPlainText(
+            self._REPORT + "\nAmended in the room.\n")
+        win.report_save_btn.click()
+        saved = report.read_text(encoding="utf-8")
+        self.assertIn("Amended in the room.", saved)
+        history = list((ws / ".forge" / "research-history")
+                       .rglob("*.txt"))
+        self.assertEqual(len(history), 1)
+        self.assertNotIn("Amended in the room.",
+                         history[0].read_text(encoding="utf-8"))
+        win.report_prev_btn.click()
+        self.assertNotIn("Amended in the room.",
+                         win.report_editor.toPlainText())
+        self.assertIn("Viewing version",
+                      win.report_version_status.text())
+        win.report_next_btn.click()
+        self.assertIn("Amended in the room.",
+                      win.report_editor.toPlainText())
+        win.close()
+
+    def test_followup_asks_from_the_report_first(self):
+        from forge.main import ResearchWindow
+        ws, report = self._report_project()
+        owner = self._bench_owner(ws)
+        win = ResearchWindow(owner, "research")
+        win.show_report(report)
+        win.followup_edit.setText("Does it differ by species?")
+        win.followup_btn.click()
+        self.assertEqual(len(owner.send_calls), 1)
+        sent = owner.send_calls[0]
+        self.assertEqual(owner.mode_combo.currentText(), "Research")
+        self.assertIn(".forge/research/swallow-airspeed.md", sent)
+        self.assertIn("Does it differ by species?", sent)
+        self.assertIn("Read that report first", sent)
+        self.assertIn("top-up", sent)
+        self.assertIn("do not browse without an approved plan",
+                      sent.lower())
+        win.close()
+
+
 class ModeRoomToolsTests(unittest.TestCase):
     """Rooms-are-tools (2026-11-10): every mode room can START a
     turn from inside itself — a composer + Send wired to the bench
