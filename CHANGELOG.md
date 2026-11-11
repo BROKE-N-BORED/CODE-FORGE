@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-11 — Parallel agents
+- Mission Control has a Parallel Jobs section: start a job with a task, a project, and a model, and watch its state, elapsed time, and current step
+- Code jobs run in their own git worktree of the project — isolated from your files and from each other; read-only jobs (research, design, review) run against the real project and file results in that mode's folder
+- Nothing merges back on its own: a finished job shows its diff, and you Approve the merge or Discard it; a merge conflict is reported and leaves your files untouched
+- Two jobs at a time by default (adjustable in the jobs section); when the machine is loaded, new jobs wait in the queue and the row says so
+- Stop leaves a job's partial work in place for inspection; jobs are recorded in the project (.forge/parallel), so a crash shows them as interrupted instead of losing them
+- An approved plan's steps can be dispatched as parallel jobs by ticking them — the tick and Start are your approval; the model does not split work on its own
+- A project that is not a git repo gets a plain refusal for code jobs, with read-only jobs offered instead
+
 ## 2026-11-11 — Forge Browser inside Code Forge
 - The forge/browser package is part of Code Forge now (search, fetch, render, vault, media seats — no API keys)
 - Settings → Behavior: Research can use Forge Browser as its web engine instead of the Browse connector; the project's browse allowlist and wall rules apply the same either way

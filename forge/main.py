@@ -71,6 +71,7 @@ from . import checkpoints as ckpt_mod
 from . import uibuilder as uib_mod
 from . import palette as palette_mod
 from . import layout as layout_mod
+from . import parallel as parallel_mod
 from . import council as council_mod
 from . import seats as seats_mod
 from . import monitor as monitor_mod
@@ -11359,6 +11360,181 @@ class TestingWindow(QWidget):
             self.test_history_list.scrollToBottom()
 
 
+
+class ParallelDiffDialog(QDialog):
+    """A finished parallel job's diff with the owner's gate on it:
+    Approve merge lands exactly this diff; Discard removes the
+    job's copy and lands nothing."""
+
+    def __init__(self, owner, job):
+        super().__init__(owner)
+        self._owner = owner
+        self._job = job
+        self.setWindowTitle("Parallel job — diff")
+        self.resize(820, 560)
+        lay = QVBoxLayout(self)
+        head = QLabel(f"{job['task'][:100]}  ·  {job['model']}")
+        head.setObjectName("section")
+        lay.addWidget(head)
+        if job.get("diff_stat"):
+            stat = QLabel(job["diff_stat"])
+            stat.setObjectName("muted"); stat.setWordWrap(True)
+            lay.addWidget(stat)
+        self.view = QPlainTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setPlainText(parallel_mod.read_diff(job)
+                               or "(no file changes)")
+        lay.addWidget(self.view, 1)
+        row = QHBoxLayout()
+        self.approve_btn = QPushButton("Approve merge")
+        self.approve_btn.clicked.connect(self._approve)
+        self.discard_btn = QPushButton("Discard job")
+        self.discard_btn.clicked.connect(self._discard)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        row.addWidget(self.approve_btn)
+        row.addWidget(self.discard_btn)
+        row.addStretch(1)
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+
+    def _approve(self):
+        landed, message = self._owner.approve_parallel_job(
+            self._job["id"])
+        QMessageBox.information(self, "Parallel job", message)
+        self.accept()
+
+    def _discard(self):
+        self._owner.discard_parallel_job(self._job["id"])
+        self.accept()
+
+
+class ParallelDispatchDialog(QDialog):
+    """Start parallel jobs: a task of your own, or steps ticked
+    from a filed plan. Starting a job IS the approval for that
+    job's work — it runs in an isolated copy of the project and
+    nothing it makes lands without the merge gate in Mission
+    Control."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self._owner = owner
+        self.setWindowTitle("New parallel job")
+        self.resize(640, 560)
+        lay = QVBoxLayout(self)
+        note = QLabel(
+            "A code job works in its own git copy of the project — "
+            "it cannot touch your real files, and its changes land "
+            "only if you approve the merge. A read-only job answers "
+            "a question using reading tools only. Inside a job, "
+            "tool calls run without asking, because the copy is a "
+            "throwaway sandbox and the merge is the gate.")
+        note.setObjectName("muted"); note.setWordWrap(True)
+        lay.addWidget(note)
+        form = QFormLayout()
+        self.project_combo = QComboBox()
+        projects = [str(x) for x in owner.projects]
+        ws = str(getattr(owner, "workspace", "") or "")
+        if ws and ws not in projects:
+            projects.insert(0, ws)
+        self.project_combo.addItems(projects)
+        form.addRow("Project", self.project_combo)
+        self.model_combo = QComboBox()
+        src = owner.model_combo
+        self.model_combo.addItems(
+            [src.itemText(i) for i in range(src.count())])
+        form.addRow("Model", self.model_combo)
+        self.kind_code = QRadioButton("Code job (isolated copy)")
+        self.kind_code.setChecked(True)
+        self.kind_read = QRadioButton("Read-only job")
+        kind_row = QHBoxLayout()
+        kind_row.addWidget(self.kind_code)
+        kind_row.addWidget(self.kind_read)
+        form.addRow("Kind", kind_row)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["research", "design", "review"])
+        self.mode_combo.setEnabled(False)
+        form.addRow("File result under", self.mode_combo)
+        self.kind_read.toggled.connect(self.mode_combo.setEnabled)
+        lay.addLayout(form)
+        lay.addWidget(QLabel("Task"))
+        self.task_edit = QPlainTextEdit()
+        self.task_edit.setMaximumHeight(90)
+        lay.addWidget(self.task_edit)
+        lay.addWidget(QLabel("…or tick steps from a filed plan:"))
+        self.plan_combo = QComboBox()
+        self.plan_combo.currentIndexChanged.connect(self._load_steps)
+        lay.addWidget(self.plan_combo)
+        self.steps_list = QListWidget()
+        lay.addWidget(self.steps_list, 1)
+        self.project_combo.currentIndexChanged.connect(
+            self._load_plans)
+        row = QHBoxLayout()
+        start_btn = QPushButton("Start job(s)")
+        start_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        row.addStretch(1)
+        row.addWidget(start_btn)
+        row.addWidget(cancel_btn)
+        lay.addLayout(row)
+        self._plans = []
+        self._load_plans()
+
+    def _plan_files(self):
+        root = Path(self.project_combo.currentText())
+        out = []
+        plans_dir = root / ".forge" / "plans"
+        if plans_dir.is_dir():
+            out += sorted(plans_dir.glob("*.md"))
+        out += sorted(root.glob("PLAN*.md"))
+        return out
+
+    def _load_plans(self):
+        self._plans = self._plan_files()
+        self.plan_combo.clear()
+        self.plan_combo.addItems(
+            [p.name for p in self._plans] or ["(no filed plans)"])
+        self._load_steps()
+
+    def _load_steps(self):
+        self.steps_list.clear()
+        idx = self.plan_combo.currentIndex()
+        if not (0 <= idx < len(self._plans)):
+            return
+        try:
+            text = self._plans[idx].read_text(
+                encoding="utf-8", errors="replace")
+        except Exception:
+            return
+        for line in text.splitlines():
+            m = re.match(
+                r"\s*(?:[-*]\s*(?:\[ \]\s*)?|\d+[.)]\s+)(.+\S)",
+                line)
+            if m and len(m.group(1)) > 3:
+                item = QListWidgetItem(m.group(1).strip())
+                item.setCheckState(Qt.Unchecked)
+                self.steps_list.addItem(item)
+            if self.steps_list.count() >= 20:
+                break
+
+    def payloads(self):
+        """[(task, kind, mode), …] — the owner's ticked steps, or
+        the typed task."""
+        kind = "code" if self.kind_code.isChecked() else "readonly"
+        mode = self.mode_combo.currentText()             if kind == "readonly" else ""
+        out = []
+        for i in range(self.steps_list.count()):
+            item = self.steps_list.item(i)
+            if item.checkState() == Qt.Checked:
+                out.append((item.text(), kind, mode))
+        if not out:
+            task = self.task_edit.toPlainText().strip()
+            if task:
+                out.append((task, kind, mode))
+        return out
+
+
 class MissionControlWindow(QWidget):
     """Item #64: mission control — every agent workstream in one
     room. When parallel turns are enabled (Settings → Seats &
@@ -11410,6 +11586,54 @@ class MissionControlWindow(QWidget):
         btn_row.addStretch(1)
         btn_row.addWidget(self.refresh_btn)
         lay.addLayout(btn_row)
+        jobs_title = QLabel("PARALLEL JOBS")
+        jobs_title.setObjectName("section")
+        lay.addWidget(jobs_title)
+        jobs_blurb = QLabel(
+            "Agents working in isolated git copies of a project. "
+            "A job's changes land only when you approve its merge "
+            "here; Discard removes its copy and lands nothing.")
+        jobs_blurb.setObjectName("muted"); jobs_blurb.setWordWrap(True)
+        lay.addWidget(jobs_blurb)
+        self.jobs_list = QListWidget()
+        lay.addWidget(self.jobs_list, 1)
+        cap_row = QHBoxLayout()
+        cap_row.addWidget(QLabel("Max parallel jobs"))
+        self.jobs_cap = QSpinBox()
+        self.jobs_cap.setRange(1, 4)
+        self.jobs_cap.setValue(int(
+            getattr(owner, "settings", {}).get(
+                "parallel_jobs_concurrency", 2) or 2))
+        self.jobs_cap.valueChanged.connect(
+            lambda v: getattr(owner, "set_parallel_concurrency",
+                              lambda _v: None)(v))
+        cap_row.addWidget(self.jobs_cap)
+        cap_row.addStretch(1)
+        lay.addLayout(cap_row)
+        job_btn_row = QHBoxLayout()
+        self.new_job_btn = QPushButton("New job…")
+        self.new_job_btn.clicked.connect(self._new_job)
+        self.stop_job_btn = QPushButton("Stop job")
+        self.stop_job_btn.clicked.connect(self._stop_job)
+        self.stop_all_jobs_btn = QPushButton("Stop all")
+        self.stop_all_jobs_btn.clicked.connect(self._stop_all_jobs)
+        self.requeue_job_btn = QPushButton("Requeue")
+        self.requeue_job_btn.clicked.connect(self._requeue_job)
+        self.diff_job_btn = QPushButton("View diff")
+        self.diff_job_btn.clicked.connect(self._view_diff)
+        self.approve_job_btn = QPushButton("Approve merge")
+        self.approve_job_btn.clicked.connect(self._approve_job)
+        self.discard_job_btn = QPushButton("Discard")
+        self.discard_job_btn.clicked.connect(self._discard_job)
+        for b in (self.new_job_btn, self.stop_job_btn,
+                  self.stop_all_jobs_btn, self.requeue_job_btn,
+                  self.diff_job_btn, self.approve_job_btn,
+                  self.discard_job_btn):
+            job_btn_row.addWidget(b)
+        lay.addLayout(job_btn_row)
+        self.jobs_list.currentRowChanged.connect(
+            self._sync_job_buttons)
+        self._job_rows = []
         self.rows_list.currentRowChanged.connect(self._sync_buttons)
         self.rows_list.itemDoubleClicked.connect(lambda _i: self._jump())
         self._rows = []
@@ -11451,6 +11675,7 @@ class MissionControlWindow(QWidget):
         if rows:
             self.rows_list.setCurrentRow(target)
         self._sync_buttons()
+        self._refresh_jobs()
 
     def _selected(self):
         row = self.rows_list.currentRow()
@@ -11483,6 +11708,115 @@ class MissionControlWindow(QWidget):
         entry = self._selected()
         if entry is not None:
             self._owner.dismiss_stream(entry["id"])
+            self.refresh()
+
+
+    # -- parallel jobs (owner order, 2026-11-11) -------------------
+
+    def _refresh_jobs(self):
+        rows_fn = getattr(self._owner, "parallel_job_rows", None)
+        if rows_fn is None:
+            self._job_rows = []
+            self._sync_job_buttons()
+            return
+        rows = rows_fn()
+        selected = None
+        row = self.jobs_list.currentRow()
+        if 0 <= row < len(self._job_rows):
+            selected = self._job_rows[row]["id"]
+        self._job_rows = rows
+        self.jobs_list.clear()
+        for entry in rows:
+            self.jobs_list.addItem(QListWidgetItem(entry["line"]))
+        if not rows:
+            self.jobs_list.addItem(QListWidgetItem(
+                "No parallel jobs. Start one with New job… — it "
+                "works in an isolated copy of the project."))
+        target = 0
+        for i, entry in enumerate(rows):
+            if entry["id"] == selected:
+                target = i
+                break
+        if rows:
+            self.jobs_list.setCurrentRow(target)
+        self._sync_job_buttons()
+
+    def _selected_job(self):
+        row = self.jobs_list.currentRow()
+        if 0 <= row < len(self._job_rows):
+            return self._job_rows[row]
+        return None
+
+    def _sync_job_buttons(self):
+        entry = self._selected_job()
+        state = entry["state"] if entry else ""
+        live = state in ("queued", "running")
+        self.stop_job_btn.setEnabled(bool(entry) and live)
+        self.stop_all_jobs_btn.setEnabled(any(
+            r["state"] in ("queued", "running")
+            for r in self._job_rows))
+        self.requeue_job_btn.setEnabled(
+            state in ("interrupted", "stopped", "failed"))
+        has_diff = state in ("done", "merge_failed")
+        self.diff_job_btn.setEnabled(bool(entry) and has_diff)
+        self.approve_job_btn.setEnabled(bool(entry) and has_diff)
+        self.discard_job_btn.setEnabled(
+            bool(entry) and state in (
+                "done", "merge_failed", "stopped", "failed",
+                "interrupted"))
+
+    def _new_job(self):
+        dlg = ParallelDispatchDialog(self._owner)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        payloads = dlg.payloads()
+        if not payloads:
+            QMessageBox.information(
+                self, "Parallel job",
+                "Type a task or tick at least one plan step.")
+            return
+        started, error = self._owner.start_parallel_jobs(
+            payloads, dlg.project_combo.currentText(),
+            dlg.model_combo.currentText())
+        if error:
+            QMessageBox.warning(self, "Parallel job", error)
+        if started:
+            self.refresh()
+
+    def _stop_job(self):
+        entry = self._selected_job()
+        if entry is not None:
+            self._owner.stop_parallel_job(entry["id"])
+            self.refresh()
+
+    def _stop_all_jobs(self):
+        self._owner.stop_all_parallel_jobs()
+        self.refresh()
+
+    def _requeue_job(self):
+        entry = self._selected_job()
+        if entry is not None:
+            self._owner.requeue_parallel_job(entry["id"])
+            self.refresh()
+
+    def _view_diff(self):
+        entry = self._selected_job()
+        if entry is not None:
+            ParallelDiffDialog(self._owner, entry["job"]).exec()
+            self.refresh()
+
+    def _approve_job(self):
+        entry = self._selected_job()
+        if entry is not None:
+            _landed, message = self._owner.approve_parallel_job(
+                entry["id"])
+            QMessageBox.information(self, "Parallel job", message)
+            self.refresh()
+
+    def _discard_job(self):
+        entry = self._selected_job()
+        if entry is not None:
+            self._owner.discard_parallel_job(entry["id"])
             self.refresh()
 
 
@@ -18637,7 +18971,9 @@ class ForgeWindow(QMainWindow):
         worker.plan_goldfish.connect(self.on_plan_goldfish)
         worker.plan_document.connect(self.on_plan_document)
         worker.plan_ready.connect(self.on_plan_ready)
-        worker.research_progress.connect(self.on_research_progress)
+        _rp = getattr(worker, "research_progress", None)
+        if _rp is not None:
+            _rp.connect(self.on_research_progress)
         worker.plan_revised.connect(self.on_plan_revised)
         worker.plan_active.connect(self.on_plan_active)
         worker.plan_step_done.connect(self.on_plan_step_done)
@@ -19354,6 +19690,83 @@ class ForgeWindow(QMainWindow):
             self._streams.pop(stream_id, None)
             self._push_deck_streams()
             self._refresh_mission()
+
+    # -- parallel jobs (owner order, 2026-11-11) -------------------
+
+    def _parallel_manager(self):
+        mgr = getattr(self, "_parallel_mgr", None)
+        if mgr is None:
+            mgr = parallel_mod.ParallelManager(
+                client_factory=lambda model: self.client,
+                snapshot_fn=lambda: governor.snapshot(),
+                concurrency=int(self.settings.get(
+                    "parallel_jobs_concurrency", 2) or 2))
+            self._parallel_mgr = mgr
+            self._parallel_attached = set()
+        return mgr
+
+    def _parallel_attach(self):
+        mgr = self._parallel_manager()
+        roots = [str(p) for p in self.projects]
+        ws = str(getattr(self, "workspace", "") or "")
+        if ws and ws not in roots:
+            roots.append(ws)
+        for root in roots:
+            if root and root not in self._parallel_attached:
+                try:
+                    mgr.attach_project(root)
+                except Exception:
+                    pass
+                self._parallel_attached.add(root)
+
+    def parallel_job_rows(self):
+        mgr = self._parallel_manager()
+        self._parallel_attach()
+        mgr.pump()
+        return mgr.rows()
+
+    def start_parallel_jobs(self, payloads, project, model):
+        mgr = self._parallel_manager()
+        self._parallel_attach()
+        started, error = 0, ""
+        for task, kind, mode in payloads:
+            try:
+                mgr.submit(task, project, model, kind=kind, mode=mode)
+                started += 1
+            except Exception as exc:
+                error = str(exc)
+        if started:
+            self.log(f"Started {started} parallel job(s) on "
+                     f"{model} in {project}.")
+        return started, error
+
+    def stop_parallel_job(self, job_id):
+        self._parallel_manager().stop(job_id)
+        self._refresh_mission()
+
+    def stop_all_parallel_jobs(self):
+        self._parallel_manager().stop_all()
+        self._refresh_mission()
+
+    def requeue_parallel_job(self, job_id):
+        self._parallel_manager().requeue(job_id)
+        self._refresh_mission()
+
+    def approve_parallel_job(self, job_id):
+        landed, message = self._parallel_manager().approve(job_id)
+        self.log(f"Parallel job merge: {message}")
+        self._refresh_mission()
+        return landed, message
+
+    def discard_parallel_job(self, job_id):
+        self._parallel_manager().discard(job_id)
+        self.log("Parallel job discarded — nothing landed.")
+        self._refresh_mission()
+
+    def set_parallel_concurrency(self, value):
+        self.settings["parallel_jobs_concurrency"] = int(value)
+        self._parallel_manager().concurrency = max(1, int(value))
+        self.save_settings()
 
     def open_mission_control(self):
         """Mission control: single instance, refreshed on open, in
