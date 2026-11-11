@@ -1,0 +1,23 @@
+{
+ "access": "Reads /proc and Ollama's local status API. No writes.",
+ "description": "getcompute as a tool: measures RAM/CPU/Ollama and rules on whether a model fits before it is loaded.",
+ "id": "resource-governor",
+ "kind": "plugin",
+ "name": "Resource Governor",
+ "tools": [
+  {
+   "description": "Check whether a model fits right now (free RAM, CPU load, Ollama loaded). Omit model to check the selected one.",
+   "name": "check_resources",
+   "parameters": {
+    "properties": {
+     "model": {
+      "description": "Ollama model tag, e.g. maternion/minicpm5-heretic:2b",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "requires_approval": false
+  }
+ ]
+}

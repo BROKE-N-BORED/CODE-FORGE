@@ -1,0 +1,30 @@
+{
+ "access": "Runs a second local model session with file/command tools inside the active workspace.",
+ "description": "Note 9: hands work to a second AI that runs and stress-tests it in the workspace before the result is shipped.",
+ "id": "tester",
+ "kind": "plugin",
+ "name": "Tester Seat",
+ "tools": [
+  {
+   "description": "Delegate verification to the tester AI: give it a concrete test task; it runs tests in the workspace and returns a PASS/FAIL report with evidence. Use after building, before reporting done.",
+   "name": "run_tester",
+   "parameters": {
+    "properties": {
+     "model": {
+      "description": "Ignored. The tester model is chosen in Agent settings only — the driver does not pick who tests it (governing-seat rule).",
+      "type": "string"
+     },
+     "task": {
+      "description": "Exactly what to run and verify, e.g. 'Run python3 -m unittest in tests/ and report any failure verbatim'",
+      "type": "string"
+     }
+    },
+    "required": [
+     "task"
+    ],
+    "type": "object"
+   },
+   "requires_approval": true
+  }
+ ]
+}

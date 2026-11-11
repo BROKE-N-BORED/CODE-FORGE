@@ -1,0 +1,45 @@
+{
+ "access": "Read-only HTTPS calls to huggingface.co's public API.",
+ "config_keys": ["hf_token"],
+ "description": "Connector (first pair, Note 6): search Hugging Face and inspect model repos, including GGUF file sizes — the model's supply line.",
+ "id": "huggingface",
+ "kind": "connector",
+ "name": "Hugging Face",
+ "tools": [
+  {
+   "description": "Search Hugging Face models by text. Returns names, downloads, task.",
+   "name": "hf_search_models",
+   "parameters": {
+    "properties": {
+     "limit": {
+      "type": "integer"
+     },
+     "query": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "query"
+    ],
+    "type": "object"
+   },
+   "requires_approval": false
+  },
+  {
+   "description": "Inspect one HF repo (owner/name): license, downloads, files with sizes — GGUFs especially.",
+   "name": "hf_model_info",
+   "parameters": {
+    "properties": {
+     "repo_id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "repo_id"
+    ],
+    "type": "object"
+   },
+   "requires_approval": false
+  }
+ ]
+}

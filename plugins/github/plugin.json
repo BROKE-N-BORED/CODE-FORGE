@@ -1,0 +1,45 @@
+{
+ "access": "Read-only HTTPS calls to api.github.com. A token in connectors.json (github_token) only raises rate limits — never required for public data.",
+ "config_keys": ["github_token"],
+ "description": "Connector (first pair, Note 6): look up GitHub repos and search code home — the far end of clone-and-promote.",
+ "id": "github",
+ "kind": "connector",
+ "name": "GitHub",
+ "tools": [
+  {
+   "description": "Look up a public GitHub repo (owner/name): description, stars, language, license, last push.",
+   "name": "github_repo_info",
+   "parameters": {
+    "properties": {
+     "repo": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "repo"
+    ],
+    "type": "object"
+   },
+   "requires_approval": false
+  },
+  {
+   "description": "Search public GitHub repositories by text.",
+   "name": "github_search_repos",
+   "parameters": {
+    "properties": {
+     "limit": {
+      "type": "integer"
+     },
+     "query": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "query"
+    ],
+    "type": "object"
+   },
+   "requires_approval": false
+  }
+ ]
+}

@@ -1,0 +1,18690 @@
+"""CODE FORGE v2.5 — Linux Forge Agent shell.
+
+Built from Joshua's v1 on his design record (forge-update-notes.md):
+Note 1 house rules + project instructions · Note 2 backend event log ·
+Note 4 skills + plugins · Note 5 dark forge bench UI, ember indicator,
+header gauges, rebuilt approval dialog · Note 6 connectors (GitHub,
+Hugging Face) · Note 7 uploads inbox + audio · Note 8 project source
+files · Note 9 tester seat · Note 10 resource governor ·
+F1 arg validation · F3 timeouts · F4 shell receipts · F5 real model
+names · F6 conversation<->model memory · F8 pause-the-clock approvals.
+"""
+from __future__ import annotations
+import base64
+import copy
+import difflib
+import filecmp
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from string import Template
+
+from PySide6.QtCore import Qt, QByteArray, QEvent, QRectF, QStringListModel, QThread, QTime, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QCompleter, QDialog, QDialogButtonBox,
+    QInputDialog, QListWidget, QListWidgetItem,
+    QButtonGroup, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
+    QPushButton, QRadioButton, QScrollArea, QSlider, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QTabBar, QTableWidget, QTableWidgetItem, QToolButton,
+    QTabWidget, QTextBrowser, QTextEdit,
+    QTimeEdit, QVBoxLayout, QWidget)
+try:
+    from PySide6.QtSvg import QSvgRenderer
+except Exception:
+    # A PySide6 build without QtSvg: the UI builder's svg widgets
+    # degrade to placeholder boxes on the canvas instead of breaking
+    # this module's import. Sweep R96: say so where a human can see
+    # it — the degradation used to be completely silent.
+    print("note: PySide6 QtSvg is unavailable — UI-builder SVG "
+          "widgets will show as placeholder boxes.", file=sys.stderr)
+    QSvgRenderer = None
+
+from . import governor, hooks as hooks_mod, permissions as perm_mod, macros as macros_mod, projects as proj, repomap, scheduler as sched, update as upd, voice as voice_mod, watch as watch_mod
+from . import create_ext as create_mod
+from . import qr as qr_mod
+from . import mentions as mentions_mod
+from . import completion as completion_mod
+from . import templates as templates_mod
+from . import bench as bench_mod
+from . import recipes as recipes_mod
+from . import planning as planning_mod
+from . import goldfish as goldfish_mod
+from . import context as context_mod
+from . import notes as notes_mod
+from . import runwindow as run_mod
+from . import runfiles as runfiles_mod
+from . import debugger as debugger_mod
+from . import gitpanel as gitpanel_mod
+from . import artifacts as artifacts_mod
+from . import diffview as diff_mod
+from . import snapshots as snap_mod
+from . import checkpoints as ckpt_mod
+from . import uibuilder as uib_mod
+from . import palette as palette_mod
+from . import layout as layout_mod
+from . import council as council_mod
+from . import seats as seats_mod
+from . import monitor as monitor_mod
+from . import timeline as timeline_mod
+from . import maintenance as maint_mod
+from . import providers as providers_mod
+from . import modelfit as modelfit_mod
+from . import modes as modes_mod
+from . import self_maintenance as self_maint_mod
+from . import testcadence as cadence_mod
+from . import testview as testview_mod
+from . import design_canvas as design_canvas_mod
+from . import production as prod_mod
+from .providers import ProviderClient
+from . import vault as vault_mod
+from . import fileperms
+from .deck import DeckError, DeckServer, lan_ip, resolve_project
+from .eventlog import EventLog
+from .ollama_client import (OllamaClient, OllamaError, client_accepts_cancel,
+                            normalize_history, ollama_url_warning)
+from .plugins import (BUNDLED_PLUGIN_IDS, PluginContext,
+                      load_connector_config, load_plugins)
+from .skills import LOAD_SKILL_SCHEMA, index_text as skills_index_text
+from .skills import make_load_skill_handler, scan_skills
+from .storage import ConversationStore
+from .tools import describe_tool_full, describe_tool_short, TOOL_SCHEMAS
+from .worker import LONG_TURN_TOOL, AgentWorker
+
+APP_DIR = Path.home() / ".local" / "share" / "linux-forge-agent-shell"
+try:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+except OSError as exc:
+    # Sweep R96: the app cannot run without its data folder — fail
+    # with the path and the reason named, not a bare traceback from
+    # deep inside pathlib.
+    raise RuntimeError(
+        f"Code Forge cannot create its data folder {APP_DIR}: {exc}"
+    ) from exc
+# S2: the app dir holds the vault, keys, settings, history and logs —
+# it is owner-only (0700) from the moment the app starts.
+fileperms.ensure_private_dir(APP_DIR)
+DB_FILE = APP_DIR / "settings.json"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+SKILLS_DIR = ROOT_DIR / "skills"
+TEMPLATES_DIR = ROOT_DIR / "templates"
+PLUGINS_DIR = ROOT_DIR / "plugins"
+COMMANDS_DIR = ROOT_DIR / "commands"
+# The one version the app presents as current — the window title and
+# the event log's app_start stamp both read it from here.
+APP_VERSION = "2.5"
+
+# Owner's donation link (2026-11-10): Code Forge is free; the
+# welcome screen's donate button and QR both point here — the
+# owner's Cash App page. One constant, so a future cashtag change
+# is a one-line edit.
+DONATE_URL = "https://cash.app/$XPRNC8"
+DONATE_CASHTAG = "$XPRNC8"
+
+SYSTEM_PROMPT = """You are LINUX FORGE, a capable local Linux desktop agent. Be precise and task-focused. You can inspect and modify files only inside the active workspace and run shell commands there. Use tools when useful. Every tool call requires user approval. Explain risky operations before requesting them. Never claim an operation succeeded unless its tool result confirms it."""
+
+HOUSE_RULES = """House rules (set by the owner, always in force):
+1. Answer in chat. Only write a file when the owner explicitly asks for a file.
+2. Announce a tool before you use it: say what you are about to do, then call it.
+3. Show the full answer in chat — never hide the substance inside a file.
+4. When you deliver a file, state its name and location. The shell issues its own receipt from the tool result; never invent one."""
+
+# Dark Glass Minimal (E1 + theme pass, locked 2026-11-07;
+# palette RE-BASED 2026-11-09 at the owner's order — the original
+# base theme carried a blue/slate cast that was never approved:
+# every surface, text and border value now sits in the warm
+# family (hue 30–45°), at the lightness it always had):
+# base #12100d · glass panels #221f1a / #201c17 with a top sheen ·
+# amber rim light rgba(255,179,71,0.30) where panels meet the
+# workspace · chat glass #201d18, rim rgba(255,179,71,0.38).
+# G7 (GUIFX Research Brief #1, 2026-11-09): that palette is now
+# mechanized — TOKENS is the one documented home for every surface,
+# rim, text, accent and border color, every border radius and every
+# padding the global stylesheet uses, and STYLE is GENERATED from
+# the tokens via _STYLE_TEMPLATE. The generated STYLE is
+# byte-identical to the pre-G7 literal (TokensTests in
+# tests/test_core.py pins the pre-G7 snapshot). Change a value by
+# changing its token, never by editing the template's prose. A few
+# tokens (accent_amber, the compose-frame surfaces and radius,
+# state_idle) are not used by STYLE itself; they exist for the
+# inline stylesheets elsewhere in this file that share the palette.
+TOKENS = {
+    "surface_base": "#12100d",
+    "surface_glass_top": "#332e26",
+    "surface_glass_mid": "#221f1a",
+    "surface_glass_bottom": "#201c17",
+    "surface_chat": "#201d18",
+    "surface_input": "#1b1814",
+    "surface_menu": "#231f1a",
+    "surface_combo_view": "#27231d",
+    "surface_button_top": "#38322a",
+    "surface_button_bottom": "#2d2922",
+    "surface_button_hover": "#433c31",
+    "surface_nav_hover": "#312c25",
+    "surface_nav_active": "#2e2a20",
+    "surface_topbar_checked": "#40392f",
+    "surface_menu_selected": "#383229",
+    "surface_splitter": "#3f382e",
+    "surface_compose_top": "#2c2720",
+    "surface_compose_bottom": "#201d18",
+    "rim": "rgba(255,179,71,0.30)",
+    "rim_hover": "rgba(255,179,71,0.45)",
+    "rim_focus": "rgba(255,179,71,0.55)",
+    "rim_chat": "rgba(255,179,71,0.38)",
+    "rim_soft": "rgba(255,179,71,0.18)",
+    "text_base": "#eae6df",
+    "text_brand": "#f3ede0",
+    "text_muted": "#a39a8b",
+    "text_section": "#c9aa7f",
+    "text_big": "#f8f7f5",
+    "text_button": "#f0ede7",
+    "text_nav": "#c4bdae",
+    "text_white": "white",
+    "text_amber_light": "#ffd9ae",
+    "text_accordion_hover": "#e2c9a9",
+    "text_progress": "#e0dacf",
+    "accent_amber": "#ffb347",
+    "accent_primary_top": "#c2611a",
+    "accent_primary_bottom": "#a34d12",
+    "border_button": "#554c3e",
+    "border_input": "#453e33",
+    "border_menu": "#4a4236",
+    "progress_chunk": "#b47f4a",
+    "progress_hot": "#d97a26",
+    "progress_crit": "#c0392b",
+    "state_idle": "#b8ac9a",
+    "radius_control": "7px",
+    "radius_card": "12px",
+    "radius_progress": "5px",
+    "radius_chunk": "3px",
+    "radius_compose": "16px",
+    "padding_button": "8px 12px",
+    "padding_nav": "9px 10px",
+    "padding_input": "9px",
+    "padding_chat": "12px",
+    "padding_accordion": "4px 2px",
+    "padding_topbar": "5px 10px",
+    "padding_menu_item": "7px 22px 7px 12px",
+}
+
+_STYLE_TEMPLATE = Template("""
+QWidget { background:$surface_base; color:$text_base; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }
+QMainWindow { background:$surface_base; }
+QFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 $surface_glass_top, stop:0.05 $surface_glass_mid, stop:1 $surface_glass_bottom); border:0; }
+QFrame#sidebar { border-right:1px solid $rim; }
+QFrame#inspector { border-left:1px solid $rim; }
+QFrame#header { background:$surface_glass_mid; border-bottom:1px solid $rim; }
+QLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:$text_brand; }
+QLabel#stamp { color:$text_section; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }
+QLabel#muted { color:$text_muted; }
+QLabel#section { color:$text_section; font-size:10px; font-weight:700; letter-spacing:1.6px; }
+QLabel#big { font-size:15px; font-weight:700; color:$text_big; }
+QPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 $surface_button_top, stop:1 $surface_button_bottom); border:1px solid $border_button; border-radius:$radius_control; padding:$padding_button; color:$text_button; }
+QPushButton:hover { background:$surface_button_hover; border-color:$rim_hover; }
+QPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 $accent_primary_top, stop:1 $accent_primary_bottom); border-color:$accent_primary_top; color:$text_white; font-weight:700; }
+QPushButton#primary:hover { background:$accent_primary_top; }
+QPushButton#nav { text-align:left; background:transparent; border:0; padding:$padding_nav; color:$text_nav; }
+QPushButton#nav:hover { background:$surface_nav_hover; color:$text_white; }
+QPushButton#navActive { text-align:left; background:$surface_nav_active; border:1px solid $accent_primary_bottom; border-radius:$radius_control; padding:$padding_nav; color:$text_amber_light; }
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:$surface_input; border:1px solid $border_input; border-radius:$radius_control; padding:$padding_input; selection-background-color:$accent_primary_bottom; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:$rim_focus; }
+QTextBrowser { background:$surface_chat; border:1px solid $rim_chat; border-radius:$radius_card; padding:$padding_chat; }
+QComboBox QAbstractItemView { background:$surface_combo_view; selection-background-color:$accent_primary_bottom; }
+QProgressBar { background:$surface_input; border:1px solid $rim_soft; border-radius:$radius_progress; height:10px; text-align:center; font-size:9px; color:$text_progress; }
+QProgressBar::chunk { background:$progress_chunk; border-radius:$radius_chunk; }
+QProgressBar#hot::chunk { background:$progress_hot; }
+QProgressBar#crit::chunk { background:$progress_crit; }
+QStatusBar { background:$surface_glass_bottom; color:$text_muted; }
+QSplitter::handle { background:$surface_splitter; width:1px; }
+QPushButton#accordion { text-align:left; background:transparent; border:0; padding:$padding_accordion; color:$text_section; font-size:10px; font-weight:700; letter-spacing:1.6px; }
+QPushButton#accordion:hover { color:$text_accordion_hover; background:transparent; }
+QPushButton#topbarBtn { padding:$padding_topbar; }
+QPushButton#topbarBtn:checked { background:$surface_topbar_checked; border-color:$accent_primary_bottom; color:$text_amber_light; }
+QScrollArea#historyScroll { background:$surface_glass_bottom; border:0; }
+QWidget#historyContent { background:$surface_glass_bottom; }
+QMenu { background:$surface_menu; border:1px solid $border_menu; }
+QMenu::item { padding:$padding_menu_item; color:$text_base; }
+QMenu::item:selected { background:$surface_menu_selected; }
+QMenu::separator { height:1px; background:$surface_splitter; margin:4px 8px; }
+""")
+STYLE = _STYLE_TEMPLATE.substitute(TOKENS)
+
+# G5 (GUIFX Research Brief #1, 2026-11-09): the Compact density is a
+# pure token swap over the SAME template — every padding token gets
+# a tighter value (roughly 60–70% of Comfortable per axis), and
+# build_style() substitutes the merged table. Structure, colors and
+# layout code never change; Comfortable stays the default and its
+# output stays byte-identical to STYLE (TokensTests' pre-G7 pin).
+# Floors: no component below 1px, and horizontal padding on buttons
+# / inputs never below 8px so controls stay tappable. Coverage is
+# the stylesheet's paddings ONLY: the ~43 setSpacing /
+# setContentsMargins layout gaps in Python code and the widget-level
+# inline stylesheets keep their values in both densities. The one
+# literal spacing left in the template — QMenu::separator's
+# margin:4px 8px — is NOT density-driven: TokensTests pins TOKENS'
+# key set and the template's placeholder set exactly, so it cannot
+# become a token without breaking the G7 contract; it stays literal.
+TOKENS_COMPACT = {
+    "padding_button": "5px 8px",
+    "padding_nav": "6px 8px",
+    "padding_input": "6px 8px",
+    "padding_chat": "8px",
+    "padding_accordion": "3px 1px",
+    "padding_topbar": "3px 8px",
+    "padding_menu_item": "5px 14px 5px 8px",
+}
+
+
+def build_style(density="comfortable"):
+    """The global stylesheet for a density ("comfortable" default).
+
+    Comfortable — and any unknown value — returns exactly STYLE;
+    "compact" substitutes TOKENS overridden by TOKENS_COMPACT."""
+    if density == "compact":
+        merged = dict(TOKENS)
+        merged.update(TOKENS_COMPACT)
+        return _STYLE_TEMPLATE.substitute(merged)
+    return _STYLE_TEMPLATE.substitute(TOKENS)
+
+# U1 (UI review, 2026-11-07): the phone deck's page is generated from
+# this same TOKENS table — forge.deck holds the page as a template
+# with @{token}@ placeholders and the built page is bound here, at
+# the first point where TOKENS exists (deck is imported above,
+# before the table is defined, so the build cannot happen at deck
+# import time). One palette home for both surfaces; the deck cannot
+# drift from the desktop again. The deck always binds the BASE
+# table: TOKENS_COMPACT (G5, above) overrides padding values only
+# and holds no colors, so density never reaches the deck palette.
+from . import deck as _deck_mod
+_deck_mod.PAGE = _deck_mod.build_page(TOKENS)
+
+class WindowHeader(QFrame):
+    """G4 (GUIFX Research Brief #1, 2026-11-09): the standard header
+    for every closable Forge window. Anatomy, left to right: the
+    window's title (prominent — the #big label in the #header glass
+    frame the global stylesheet already styles) · a status slot ·
+    a slot for the window's own primary controls · an overflow (⋯)
+    menu grouping the SECONDARY actions · a Details toggle, only
+    where the window already has a details region to show/hide.
+
+    No window grows a second button row to escape this standard:
+    secondary actions live in the overflow menu, bound to the SAME
+    callables they always called — moved, never removed. Styling
+    comes from the objectNames STYLE already knows plus TOKENS
+    values inline; the rendered STYLE string is untouched by G4.
+    """
+
+    def __init__(self, parent, title, status_text=None,
+                 overflow_actions=None, details_callback=None):
+        super().__init__(parent)
+        self.setObjectName("header")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 6, 8, 6); lay.setSpacing(8)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("big")
+        lay.addWidget(self.title_label)
+        lay.addStretch()
+        self.status_label = None
+        if status_text is not None:
+            self.status_label = QLabel(status_text)
+            self.status_label.setObjectName("muted")
+            lay.addWidget(self.status_label)
+        # The window's own primary controls (a gate's buttons, a
+        # filter combo) slot in here, before the overflow control.
+        self.slot_layout = QHBoxLayout(); self.slot_layout.setSpacing(6)
+        lay.addLayout(self.slot_layout)
+        self.overflow_btn = None
+        self.overflow_menu = None
+        if overflow_actions:
+            self.overflow_menu = QMenu(self)
+            for spec in overflow_actions:
+                act = self.overflow_menu.addAction(spec[0], spec[1])
+                if len(spec) > 2:
+                    act.setEnabled(bool(spec[2]))
+            self.overflow_btn = QToolButton(self)
+            self.overflow_btn.setText("⋯")
+            self.overflow_btn.setToolTip("More actions")
+            self.overflow_btn.setStyleSheet(
+                f"background:transparent; border:1px solid "
+                f"{TOKENS['border_button']}; border-radius:"
+                f"{TOKENS['radius_control']}; padding:2px 8px;")
+            self.overflow_btn.setPopupMode(QToolButton.InstantPopup)
+            self.overflow_btn.setMenu(self.overflow_menu)
+            lay.addWidget(self.overflow_btn)
+        self.details_btn = None
+        if details_callback is not None:
+            self.details_btn = QPushButton("Details")
+            self.details_btn.setCheckable(True)
+            self.details_btn.setChecked(True)
+            self.details_btn.setToolTip("Show or hide the details")
+            # clicked(checked) — the callback receives the new state.
+            self.details_btn.clicked.connect(details_callback)
+            lay.addWidget(self.details_btn)
+
+
+def build_window_header(parent, title, status_text=None,
+                        overflow_actions=None, details_callback=None):
+    """Build the G4 standard window header (see WindowHeader).
+    overflow_actions: [(label, callable)] or [(label, callable,
+    enabled)]. details_callback, when given, is called with the
+    toggle's checked state. Returns the WindowHeader frame."""
+    return WindowHeader(parent, title, status_text=status_text,
+                        overflow_actions=overflow_actions,
+                        details_callback=details_callback)
+
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac"}
+
+# Finish smoke, at the phone deck's standard (Notes 23/27 — the deck
+# got the real treatment in v2.5 and the bench kept a faint wisp; this
+# is the parity fix). When a turn finishes, the ember cools through a
+# ~4 s smoke phase: gray PIXEL puffs (the deck's rgb 150,155,165 — no
+# smooth ellipses) spawn across the coal span at the deck's ~55% per
+# tick, rise ~1.3 px/tick, drift, and fade; then the bed settles.
+# Pure function over plain dicts so the tests can drive it without Qt.
+SMOKE_PHASE_TICKS = 80          # ~4 s at the ember's 50 ms tick
+SMOKE_SPAWN_P = 0.55
+SMOKE_GRAY = (150, 155, 165)
+
+
+def step_smoke(puffs: list, phase_ticks: int, rng) -> tuple:
+    """Advance the finish smoke one tick. rng() returns floats in
+    [0, 1). Puff: {frac across the tray, rise px, drift px, life}."""
+    if phase_ticks > 0:
+        phase_ticks -= 1
+        if rng() < SMOKE_SPAWN_P:
+            puffs = puffs + [{"frac": 0.136 + rng() * 0.728, "rise": 0.0,
+                              "drift": 0.0, "life": 1.0}]
+    out = []
+    for p in puffs:
+        p = dict(p)
+        p["rise"] += 1.3
+        p["drift"] += (rng() - 0.5) * 2.4
+        p["life"] -= 0.045
+        if p["life"] > 0.05:
+            out.append(p)
+    return out, phase_ticks
+
+
+def _brand_spark_pixmap():
+    """The wordmark's pixel spark-cluster (theme pass): a 5x5 grid of
+    hard 3px pixels in the ember palette — bright core, amber plus,
+    orange diagonals, deep sparks on the axes. Drawn once."""
+    cells = {(2, 2): "#fff0a8",
+             (2, 1): "#ffc92e", (1, 2): "#ffc92e",
+             (3, 2): "#ffc92e", (2, 3): "#ffc92e",
+             (1, 1): "#f28c13", (3, 1): "#f28c13",
+             (1, 3): "#f28c13", (3, 3): "#f28c13",
+             (2, 0): "#d95d0b", (0, 2): "#d95d0b",
+             (4, 2): "#d95d0b", (2, 4): "#d95d0b"}
+    pix = QPixmap(15, 15)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    for (x, y), hexcol in cells.items():
+        p.fillRect(x * 3, y * 3, 3, 3, QColor(hexcol))
+    p.end()
+    return pix
+
+
+class EmberWidget(QWidget):
+    """Note 5: the ember under the input box — a bed of coals, not a light bar.
+    Each coal pulses on its own offset, and a bright zone sweeps the bed, so
+    the color itself moves: a living gradient pulse driven by token flow.
+    Cold when idle · fast bright sweep while generating · PAUSED = slow deep
+    red breathing · tool run = flare · finish = coals drain + smoke wisp."""
+
+    # (position across the tray 0..1, oval width px, pulse offset) —
+    # small ovals spread over the whole bed. v2.2.2 (owner's screenshot):
+    # the old coals were 18-26px blobs clustered in the middle, with halos
+    # that spilled out of the 13px tray into one merged mass.
+    COALS = [(0.08, 8, 0.0), (0.19, 10, 1.3), (0.30, 9, 2.6), (0.41, 11, 0.7),
+             (0.52, 9, 3.9), (0.63, 10, 5.1), (0.74, 8, 4.4), (0.85, 10, 2.0),
+             (0.94, 9, 5.8)]
+
+    # Pixel fire (v2.3, owner's call): the bed is a grid of chunky
+    # cells running the classic fire simulation — heat seeded at the
+    # coals along the bottom, rising and cooling with jitter, quantized
+    # to a hard palette. No gradients, no antialiasing: it should look
+    # like a real fire the way a real fire looks in pixels.
+    # Fine grid (owner's detail pass, 2026-11-06): twice the cells in
+    # both dimensions at half the cell size — the same 330x12 bed,
+    # with finer flames. The per-row cooling is retuned so the flame
+    # height in pixels stays where it was (see _step_fire).
+    FIRE_COLS, FIRE_ROWS, FIRE_CELL = 220, 8, 1.5
+    FIRE_PALETTE = ["#200d05", "#400f03", "#6e1704", "#a52c06",
+                    "#d95d0b", "#f28c13", "#ffc92e", "#fff0a8"]
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(38)
+        self.mode = "idle"          # idle | thinking | paused | cooling
+        self.heat = 0.0
+        self.phase = 0.0
+        self._fire = [[0.0] * self.FIRE_COLS for _ in range(self.FIRE_ROWS)]
+        # Per-coal, per-column heat falloff, precomputed once: the fine
+        # grid has 4x the cells, so the seeding loop must not redo this
+        # trig-free but branchy math every tick.
+        self._coal_fall = [
+            [max(0.0, 1.0 - abs(c / (self.FIRE_COLS - 1) - rel_x) / 0.09)
+             for c in range(self.FIRE_COLS)]
+            for rel_x, _w, _off in self.COALS]
+        self._token_times: list[float] = []
+        self._smoke: list[dict] = []
+        self._smoke_ticks = 0
+        self._rng = 987654321
+        # Theme pass: cached firelight-glow pixmap (see paintEvent);
+        # rebuilt only when the widget size changes.
+        self._glow_pix = None
+        self._glow_size = None
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(50)
+
+    def _rand(self):
+        self._rng = (self._rng * 1103515245 + 12345) % (2 ** 31)
+        return self._rng / (2 ** 31)
+
+    def token_tick(self):
+        now = time.time()
+        self._token_times.append(now)
+        # Sweep R95: _tick prunes this list to its 2.5 s window —
+        # but _tick early-returns while the widget is hidden, so a
+        # generation streamed to a hidden bench grew the list for
+        # its whole length. Prune here too; the list is append-
+        # ordered by time, so stale entries are a prefix.
+        cut = 0
+        while cut < len(self._token_times) \
+                and now - self._token_times[cut] >= 2.5:
+            cut += 1
+        if cut:
+            del self._token_times[:cut]
+        # Audit B15 wake path: repaint at once instead of up to a tick
+        # later (the duty-cycle skip below may be holding the brush).
+        self.update()
+
+    def set_mode(self, mode: str):
+        self.mode = mode
+        if mode == "cooling":
+            # Turn finished: the ~4 s smoke phase begins (deck parity).
+            self._smoke_ticks = SMOKE_PHASE_TICKS
+        elif mode == "thinking":
+            self._smoke = []
+            self._smoke_ticks = 0
+        # Audit B15 wake path: a mode change exits the at-rest state;
+        # repaint now so the new state shows immediately.
+        self.update()
+
+    def flare(self):
+        self.heat = 1.0
+        # Audit B15 wake path: heat exits the at-rest state.
+        self.update()
+
+    def _at_rest(self) -> bool:
+        """Audit B15 (duty cycle): True when nothing on the bench can
+        change — idle mode, no heat, no smoke,
+        and the fire grid cold. Residue embers under the cold threshold
+        are snapped to exact zero so rest stays rest (no threshold
+        flicker re-waking the sim). Paused is a live breathing state
+        and cooling is a drain in progress: neither is ever rest."""
+        if self.mode != "idle" or self.heat > 0.0 or self._smoke \
+                or self._smoke_ticks > 0:
+            return False
+        hottest = max((max(row) for row in self._fire), default=0.0)
+        if hottest >= 0.004:
+            return False
+        if hottest > 0.0:
+            self._fire = [[0.0] * self.FIRE_COLS
+                          for _ in range(self.FIRE_ROWS)]
+        return True
+
+    def _tick(self):
+        # Audit B15 (duty cycle): an unseen widget does no work — no
+        # sim, no repaint. On re-show the
+        # ordinary ticks simply resume where things left off.
+        if not self.isVisible():
+            return
+        # Audit B15: a cold idle bench is a still picture. Skip the
+        # 20 fps sim/repaint until a wake path (set_mode, flare,
+        # token_tick) changes the state out from under the skip.
+        if self._at_rest():
+            return
+        now = time.time()
+        self._token_times = [t for t in self._token_times if now - t < 2.5]
+        rate = len(self._token_times) / 2.5
+        if self.mode == "thinking":
+            self.phase += 0.10 + rate * 0.30
+            target = min(1.0, 0.40 + rate * 0.55)
+            self.heat += (target - self.heat) * 0.12
+        elif self.mode == "paused":
+            self.phase += 0.022
+            self.heat += (0.5 - self.heat) * 0.05
+        elif self.mode == "cooling":
+            self.phase += 0.03
+            if self._smoke_ticks > 0:
+                # Smoke phase: the bed settles to the ember floor
+                # (0.10, the deck's rest heat) while puffs pour.
+                self.heat = max(0.10, self.heat - 0.028)
+            else:
+                self.heat = max(0.0, self.heat - 0.028)
+            self._smoke, self._smoke_ticks = step_smoke(
+                self._smoke, self._smoke_ticks, self._rand)
+            if self.heat <= 0.0 and not self._smoke and self._smoke_ticks <= 0:
+                self.mode = "idle"
+        else:
+            self.phase += 0.01
+            self.heat = max(0.0, self.heat - 0.05)
+        self._step_fire()
+        self.update()
+
+    @staticmethod
+    def _coal_color(b: float) -> QColor:
+        """deep red -> ember orange -> bright amber, by brightness b in 0..1."""
+        if b < 0.5:
+            t = b / 0.5
+            return QColor(int(70 + 150 * t), int(16 + 58 * t), int(6 + 12 * t))
+        t = (b - 0.5) / 0.5
+        return QColor(220 + int(35 * t), 74 + int(116 * t), 18 + int(80 * t))
+
+    def _step_fire(self):
+        """One frame of the fire simulation. Bottom row is seeded by the
+        coals (each pulsing on its own offset, scaled by the live heat);
+        every row above samples the row below with a sideways jitter and
+        a cooling factor, so flames lick, lean, and die like fire does."""
+        cols, rows = self.FIRE_COLS, self.FIRE_ROWS
+        old = [row[:] for row in self._fire]
+        intensity = self.heat
+        if self.mode == "paused":
+            intensity = min(intensity, 0.55)
+        bottom = self._fire[rows - 1]
+        pulses = [0.62 + 0.38 * _sin(self.phase * 1.7 + offset)
+                  for _x, _w, offset in self.COALS]
+        for c in range(cols):
+            best, total = 0.0, 0.0
+            for i, pulse in enumerate(pulses):
+                fp = self._coal_fall[i][c] * pulse
+                if fp > best:
+                    best = fp
+                total += fp
+            source = min(1.0, best + total * 0.35)  # hot cores on a continuous bed
+            value = source * intensity * (0.88 + 0.28 * self._rand())
+            if self._rand() < 0.03:
+                value = max(value, intensity * (0.6 + 0.4 * self._rand()))
+            bottom[c] = max(0.0, min(1.0, value))
+        for r in range(rows - 2, -1, -1):
+            below = old[r + 1]
+            row = self._fire[r]
+            for c in range(cols):
+                src = c + int(self._rand() * 3) - 1
+                src = 0 if src < 0 else (cols - 1 if src >= cols else src)
+                # Fine grid: twice the rows to climb, so each row keeps
+                # more heat — the flame's pixel height is unchanged.
+                row[c] = below[src] * (0.85 + 0.11 * self._rand())
+
+    @staticmethod
+    def _make_glow():
+        """The firelight glow (theme pass): one radial-gradient pixmap
+        — amber at the tray, fading out — cached by the painter and
+        re-laid every frame at a heat-driven opacity."""
+        pix = QPixmap(440, 120)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        grad = QRadialGradient(220, 60, 220)
+        grad.setColorAt(0, QColor(255, 150, 50, 120))
+        grad.setColorAt(1, QColor(255, 150, 50, 0))
+        p.fillRect(pix.rect(), grad)
+        p.end()
+        return pix
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        painter.fillRect(self.rect(), QColor("#12100d"))
+        cx, cy = w / 2, h * 0.66
+        # Theme pass: firelight spilling from the tray — under the
+        # tray/fire themselves. A whisper at
+        # rest (0.30), full strength at full heat.
+        if self._glow_pix is None or self._glow_size != (w, h):
+            self._glow_pix = self._make_glow()
+            self._glow_size = (w, h)
+        painter.setOpacity(0.30 + 0.70 * self.heat)
+        painter.drawPixmap(int(cx - 220), int(cy - 60), self._glow_pix)
+        painter.setOpacity(1.0)
+        # tray
+        painter.setPen(QPen(QColor("#33302c"), 1))
+        painter.setBrush(QColor("#1b1815"))
+        painter.drawRoundedRect(int(cx - 165), int(cy - 6), 330, 13, 6, 6)
+        # The tray is a hard boundary (v2.2.2, owner's screenshot): the
+        # pixel fire is clipped to it, so nothing can ever paint outside
+        # the meter. Pixels are drawn raw — no antialiasing, no gradients.
+        tray_path = QPainterPath()
+        tray_path.addRoundedRect(float(cx - 165), float(cy - 6), 330.0, 13.0, 6.0, 6.0)
+        painter.save()
+        painter.setClipPath(tray_path)
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(Qt.NoPen)
+        tray_x, tray_y = int(cx - 165), int(cy - 6)
+        for r in range(self.FIRE_ROWS):
+            row = self._fire[r]
+            # Half-pixel cells: cumulative rounding gives a regular
+            # 1px/2px Bresenham pattern — crisp, nothing dropped.
+            y0 = tray_y + int(r * self.FIRE_CELL)
+            y1 = tray_y + int((r + 1) * self.FIRE_CELL)
+            for c in range(self.FIRE_COLS):
+                idx = int((row[c] ** 0.75) * 8)  # hotter curve: mid heats read orange
+                if idx <= 0:
+                    continue
+                x0 = tray_x + int(c * self.FIRE_CELL)
+                x1 = tray_x + int((c + 1) * self.FIRE_CELL)
+                painter.fillRect(x0, y0, x1 - x0, y1 - y0,
+                                 QColor(self.FIRE_PALETTE[min(idx, 7)]))
+        painter.restore()
+        # Finish smoke: gray PIXEL puffs at the deck's standard — hard
+        # squares in rgb(150,155,165), alpha riding the puff's life.
+        # Drawn last so the smoke drifts over the fire too.
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(Qt.NoPen)
+        for p in self._smoke:
+            gray = QColor(SMOKE_GRAY[0], SMOKE_GRAY[1], SMOKE_GRAY[2],
+                          int(140 * max(0.0, p["life"])))
+            painter.fillRect(int(tray_x + p["frac"] * 330 + p["drift"]),
+                             int(tray_y - 2 - p["rise"]), 2, 2, gray)
+        painter.end()
+
+def _sin(x: float) -> float:
+    import math
+    return math.sin(x)
+
+
+def short_model(tag: str) -> str:
+    """maternion/minicpm5-heretic:2b -> minicpm5-heretic:2b (display only)."""
+    return tag.split("/")[-1] if tag else tag
+
+
+DIFF_SIDE_MIN_WIDTH = 880   # G3: side-by-side at/above this diff-area width
+
+
+def paired_diff_rows(body_lines):
+    """Pair unified-diff body lines into side-by-side rows (G3).
+
+    Returns a list of (left_text, right_text, left_kind, right_kind)
+    — one tuple per visual row of the two panes. A cell's text is
+    None when the row has no line on that side (a filler cell, shown
+    blank and untinted); kinds are "context", "del", "add",
+    "pair_del", "pair_add", "hunk", "note", or "filler" (the kind of
+    an empty cell). Per-cell kinds (rather than one kind per row) are
+    what the panes tint from: a positionally paired change row is a
+    "pair_del" on the left against a "pair_add" on the right, while
+    an unpaired deletion stays a plain "del" against a filler.
+
+    Pairing rules, derived from the unified body only:
+    - a context line (' ' prefix) appears on both sides;
+    - within a change block, the run of '-' lines and the run of
+      '+' lines that follows it pair positionally (zip); whichever
+      run is longer pads the extra rows against filler cells;
+    - a '-' run with no '+' run after it (and a '+' run with no
+      '-' run before it) pairs every line against a filler;
+    - an '@@' hunk header is a separator row present on both sides;
+    - anything else (the '… diff truncated' marker, '\\ No newline'
+      notes, unrecognized lines) passes through on both sides as a
+      "note" row, text untouched.
+    Display text has the one-char diff prefix stripped — in
+    side-by-side mode the pane a line sits in plus its tint carries
+    the meaning the prefix carried inline. Hunk and note rows keep
+    their full text.
+    """
+    rows = []
+    lines = list(body_lines)
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if line.startswith("@@"):
+            rows.append((line, line, "hunk", "hunk"))
+            i += 1
+        elif line.startswith(" "):
+            text = line[1:]
+            rows.append((text, text, "context", "context"))
+            i += 1
+        elif line.startswith("-"):
+            dels = []
+            while i < n and lines[i].startswith("-"):
+                dels.append(lines[i][1:])
+                i += 1
+            adds = []
+            while i < n and lines[i].startswith("+"):
+                adds.append(lines[i][1:])
+                i += 1
+            for k in range(max(len(dels), len(adds))):
+                if k < len(dels) and k < len(adds):
+                    rows.append((dels[k], adds[k], "pair_del", "pair_add"))
+                elif k < len(dels):
+                    rows.append((dels[k], None, "del", "filler"))
+                else:
+                    rows.append((None, adds[k], "filler", "add"))
+        elif line.startswith("+"):
+            rows.append((None, line[1:], "filler", "add"))
+            i += 1
+        else:
+            rows.append((line, line, "note", "note"))
+            i += 1
+    return rows
+
+
+def resolve_diff_mode(pref, width):
+    """G3 adaptive rule: the user's preference ("auto" / "side" /
+    "inline") resolved against a diff-area width in px. Forced modes
+    ignore the width; Auto picks side-by-side only when the area is
+    at least DIFF_SIDE_MIN_WIDTH wide."""
+    if pref == "side":
+        return "side"
+    if pref == "inline":
+        return "inline"
+    return "side" if width >= DIFF_SIDE_MIN_WIDTH else "inline"
+
+
+# -- H3: word-level spans + context collapse (pure rendering) ------
+#
+# Constants, chosen once and pinned by WordLevelDiffTests:
+DIFF_WORD_LINE_MAX = 400    # no word spans when either paired line is longer
+DIFF_WORD_MAX_PAIRS = 300   # no word spans when a diff pairs more changes
+DIFF_COLLAPSE_AFTER = 6     # a context run collapses when LONGER than this
+DIFF_CONTEXT_KEEP = 2       # context lines kept at each edge of a folded run
+
+_WORD_TOKEN_RE = re.compile(r"\s+|\w+|[^\w\s]")
+
+
+def word_diff_spans(old, new):
+    """(old_spans, new_spans) — char (start, end) ranges of the
+    differing tokens between two PAIRED diff lines, from
+    difflib.SequenceMatcher over word tokens (whitespace runs and
+    punctuation are tokens too, so offsets are exact). Pure: the
+    same two lines always give the same spans. Identical lines, and
+    lines over DIFF_WORD_LINE_MAX chars, get no spans. Unpaired
+    lines never reach this helper — word spans exist only where a
+    removed line and an added line pair up; a lone insertion's or
+    deletion's whole-line tint already says everything."""
+    if old == new or len(old) > DIFF_WORD_LINE_MAX \
+            or len(new) > DIFF_WORD_LINE_MAX:
+        return [], []
+    old_toks = [(m.start(), m.end()) for m in _WORD_TOKEN_RE.finditer(old)]
+    new_toks = [(m.start(), m.end()) for m in _WORD_TOKEN_RE.finditer(new)]
+    matcher = difflib.SequenceMatcher(
+        a=[old[s:e] for s, e in old_toks],
+        b=[new[s:e] for s, e in new_toks], autojunk=False)
+    old_spans, new_spans = [], []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete") and i2 > i1:
+            old_spans.append((old_toks[i1][0], old_toks[i2 - 1][1]))
+        if tag in ("replace", "insert") and j2 > j1:
+            new_spans.append((new_toks[j1][0], new_toks[j2 - 1][1]))
+    return old_spans, new_spans
+
+
+def diff_change_pairs(body_lines):
+    """(del_index, add_index) pairs of unified-body line indices:
+    within a change block the '-' run and the '+' run that follows
+    it pair positionally — the same pairing paired_diff_rows
+    renders side by side, expressed over body lines for the inline
+    renderer and the word-span pass."""
+    pairs = []
+    i, n = 0, len(body_lines)
+    while i < n:
+        if body_lines[i].startswith("-"):
+            dels = []
+            while i < n and body_lines[i].startswith("-"):
+                dels.append(i)
+                i += 1
+            adds = []
+            while i < n and body_lines[i].startswith("+"):
+                adds.append(i)
+                i += 1
+            pairs.extend(zip(dels, adds))
+        else:
+            i += 1
+    return pairs
+
+
+def diff_separator_text(hidden):
+    """The one-line stand-in for a folded run of context lines."""
+    return f"⋯ {hidden} unchanged lines ⋯"
+
+
+def _collapse_runs(items, is_context, separator):
+    """Fold long context runs in a render plan: a run longer than
+    DIFF_COLLAPSE_AFTER keeps DIFF_CONTEXT_KEEP items at each edge
+    and folds the middle into ONE separator item built by
+    separator(hidden_count). Shorter runs pass through whole."""
+    out = []
+    i, n = 0, len(items)
+    while i < n:
+        if is_context(items[i]):
+            j = i
+            while j < n and is_context(items[j]):
+                j += 1
+            run = items[i:j]
+            if len(run) > DIFF_COLLAPSE_AFTER:
+                keep = DIFF_CONTEXT_KEEP
+                out.extend(run[:keep])
+                out.append(separator(len(run) - 2 * keep))
+                out.extend(run[len(run) - keep:])
+            else:
+                out.extend(run)
+            i = j
+        else:
+            out.append(items[i])
+            i += 1
+    return out
+
+
+def inline_render_plan(body_lines, expanded=False):
+    """The inline renderer's plan for a unified body: ("line",
+    body_index) entries, one per shown body line in order, plus
+    ("sep", hidden_count) entries where a long context run folded.
+    Expanded is simply every line in order — the classic text."""
+    entries = [("line", i) for i in range(len(body_lines))]
+    if expanded:
+        return entries
+    return _collapse_runs(
+        entries,
+        lambda entry: body_lines[entry[1]].startswith(" "),
+        lambda hidden: ("sep", hidden))
+
+
+def collapse_side_rows(rows, expanded=False):
+    """paired_diff_rows output with long context runs folded: the
+    middle of a run becomes ONE separator row carrying the same
+    text and kind on both sides, so the two panes keep sharing row
+    indices (their alignment survives the fold)."""
+    if expanded:
+        return list(rows)
+    return _collapse_runs(
+        list(rows),
+        lambda row: row[2] == "context" and row[3] == "context",
+        lambda hidden: (diff_separator_text(hidden),
+                        diff_separator_text(hidden),
+                        "separator", "separator"))
+
+
+class ApprovalDialog(QDialog):
+    """Note 5 + F5 + F8: who is asking (real model name), what, where —
+    big and plain — the full content, and a PAUSED state with no clock.
+
+    Note 14 #4 (diff-first): when the caller passes a DiffResult the
+    dialog LEADS with the change — removed lines "−" on a red tint,
+    added lines "+" on an amber/steel tint (the owner's law is NO
+    GREEN anywhere; prefix + background carries the meaning) — and
+    the description below it shrinks to the one-line action summary.
+    Without a diff the dialog is exactly the classic one.
+
+    G3 (adaptive diff): the diff area renders side-by-side (old |
+    new panes) when it is wide enough and inline (the classic single
+    view, byte-identical text) when narrow, with an Auto / Side by
+    side / Inline override row. Pure rendering — the DiffResult and
+    every approve/deny flow are untouched.
+
+    H3 (word-level diff + context collapse): paired changed lines
+    also carry a stronger tint on just the tokens that differ, and
+    long runs of unchanged lines fold into a one-line count in both
+    renderings — the mode row's Expand all toggle unfolds them, and
+    expanded inline text is the classic full_text() byte for byte.
+    Still pure rendering, computed once per render."""
+
+    # Diff line tints (dark bench palette; deliberately no green).
+    DIFF_ADD_BG = QColor("#5f4a1a")    # amber/steel
+    DIFF_DEL_BG = QColor("#5e2422")    # red
+    DIFF_HUNK_BG = QColor("#373129")   # warm neutral (re-based from blue steel)
+    # H3: word-span tints — a stronger shade of each line tint's
+    # family, taken from TOKENS (the accent's primary top stop for
+    # added words, the critical-progress red for removed words);
+    # never a new hue, never green. Separator lines wear muted text.
+    DIFF_ADD_WORD_BG = QColor(TOKENS["accent_primary_top"])   # #c2611a
+    DIFF_DEL_WORD_BG = QColor(TOKENS["progress_crit"])        # #c0392b
+    DIFF_SEP_FG = QColor(TOKENS["text_muted"])
+
+    def __init__(self, parent, model: str, tool_name: str, target: str, description: str,
+                 show_remember: bool = True, diff=None, workspace: str | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Tool approval — PAUSED")
+        self.setMinimumWidth(560)
+        self.approved = False
+        self.remember = False
+        self.diff = diff
+        # H2 (trust completion): the risk line and the sensitive-call
+        # handling exist only when the caller names the project the
+        # call belongs to (request_approval does; the maintenance
+        # dialog and older constructions don't, and stay exactly the
+        # classic dialog). Static text computed once here — no timers.
+        self.workspace = workspace
+        self.risk_text = ""
+        self.risk_label = None
+        self.remember_btn = None
+        self.sensitive_note = None
+        self.sensitive = bool(workspace is not None
+                              and perm_mod.is_sensitive_call(tool_name, target))
+        self.diff_view = None
+        # G3: adaptive-diff surface (only built when a diff is shown).
+        self.diff_area = None
+        self.diff_head = None
+        self.diff_side = None
+        self.diff_left = None
+        self.diff_right = None
+        self._diff_mode_btns = {}
+        self._diff_pref = "auto"
+        self._diff_resolved = None
+        self._diff_scroll_sync = False
+        # H3: context runs start folded; Expand all unfolds them.
+        self._diff_expanded = False
+        self._diff_expand_btn = None
+        lay = QVBoxLayout(self)
+        state = QLabel("⏸  PAUSED — waiting on you. No clock is running on your decision.")
+        state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
+        lay.addWidget(state)
+        who = QLabel(f"{model}  requests:  {tool_name}")
+        who.setObjectName("big"); who.setWordWrap(True)
+        # Sweep R68: this dialog's whole job is showing the TRUE
+        # target — model and tool names are data, and a QLabel's
+        # default AutoText would render markup-looking text in
+        # them as rich text, letting a crafted name visually
+        # disguise what is being approved. Plain text, always.
+        who.setTextFormat(Qt.PlainText)
+        lay.addWidget(who)
+        if target:
+            tgt = QLabel("Target: " + target)
+            tgt.setTextFormat(Qt.PlainText)
+            tgt.setStyleSheet(f"font-size:14px;color:{TOKENS['text_amber_light']};")
+            tgt.setWordWrap(True)
+            lay.addWidget(tgt)
+        if workspace is not None:
+            # H2: one-line risk label under the target, from the
+            # shared classifier (the deck's pending card shows the
+            # same words). Amber for the caution classes, muted for
+            # the reversible/read-only ones — never green.
+            self.risk_text, risk_kind = perm_mod.classify_risk(
+                tool_name, target, workspace)
+            risk = QLabel(self.risk_text)
+            risk.setWordWrap(True)
+            risk.setStyleSheet(
+                "font-size:13px;font-weight:700;color:"
+                + (TOKENS["accent_amber"] if risk_kind == "caution"
+                   else TOKENS["text_muted"]) + ";")
+            self.risk_label = risk
+            lay.addWidget(risk)
+        if diff is not None:
+            # G3: mode override row — Auto follows the width rule,
+            # the other two pin the layout. Small token-styled
+            # checkable buttons (the topbarBtn checked look).
+            mode_row = QHBoxLayout()
+            cap = QLabel("Diff view:")
+            cap.setStyleSheet(f"color:{TOKENS['text_muted']};")
+            mode_row.addWidget(cap)
+            mode_group = QButtonGroup(self)
+            for key, label, tip in (
+                ("auto", "Auto",
+                 "Choose by width: side by side when the diff area is "
+                 f"at least {DIFF_SIDE_MIN_WIDTH} px wide, inline below that."),
+                ("side", "Side by side",
+                 "Always show the diff as two panes — old on the left, "
+                 "new on the right — whatever the window width."),
+                ("inline", "Inline",
+                 "Always show the diff as one unified list, exactly "
+                 "the classic view."),
+            ):
+                btn = QPushButton(label)
+                btn.setObjectName("topbarBtn")
+                btn.setCheckable(True)
+                btn.setToolTip(tip)
+                btn.setChecked(key == "auto")
+                mode_group.addButton(btn)
+                self._diff_mode_btns[key] = btn
+                mode_row.addWidget(btn)
+            mode_group.buttonClicked.connect(self._on_diff_mode_clicked)
+            # H3: Expand all — an independent toggle at the end of
+            # the mode row; the Auto/Side/Inline controls are
+            # untouched. Off (default) folds long unchanged runs.
+            self._diff_expand_btn = QPushButton("Expand all")
+            self._diff_expand_btn.setObjectName("topbarBtn")
+            self._diff_expand_btn.setCheckable(True)
+            self._diff_expand_btn.setToolTip(
+                "Show every line: long runs of unchanged lines fold "
+                "into a one-line count by default — expand to see "
+                "them all.")
+            self._diff_expand_btn.clicked.connect(
+                self._on_diff_expand_clicked)
+            mode_row.addWidget(self._diff_expand_btn)
+            mode_row.addStretch()
+            lay.addLayout(mode_row)
+            # The diff area: a head label (side mode only — inline
+            # keeps the head inside the text, as always), the classic
+            # single view, and the side-by-side pane pair. Exactly
+            # one of the two renderings is visible at a time.
+            self.diff_area = QWidget()
+            area_lay = QVBoxLayout(self.diff_area)
+            area_lay.setContentsMargins(0, 0, 0, 0)
+            self.diff_head = QLabel("\n".join(diff._head_lines()))
+            # Sweep R68 (merge harmonization): the head lines are
+            # DiffResult data (path, counts, note) — plain text like
+            # this dialog's other data labels, never rich text.
+            self.diff_head.setTextFormat(Qt.PlainText)
+            self.diff_head.setWordWrap(True)
+            self.diff_head.setStyleSheet(
+                f"font-size:14px;color:{TOKENS['text_amber_light']};")
+            area_lay.addWidget(self.diff_head)
+            self.diff_view = QPlainTextEdit()
+            self.diff_view.setReadOnly(True)
+            self.diff_view.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+            self.diff_view.setMinimumHeight(260)
+            area_lay.addWidget(self.diff_view)
+            # The panes are QTextEdit, NOT QPlainTextEdit, on
+            # purpose: the classic dialog's contract counts the
+            # dialog's QPlainTextEdit children (the inline diff view
+            # + the description body). QTextEdit is the sibling edit
+            # widget with the same document/block tint mechanics.
+            self.diff_side = QWidget()
+            side_lay = QHBoxLayout(self.diff_side)
+            side_lay.setContentsMargins(0, 0, 0, 0)
+            fixed = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+            self.diff_left = QTextEdit()
+            self.diff_left.setReadOnly(True)
+            self.diff_left.setFont(fixed)
+            self.diff_left.setMinimumHeight(260)
+            self.diff_right = QTextEdit()
+            self.diff_right.setReadOnly(True)
+            self.diff_right.setFont(fixed)
+            self.diff_right.setMinimumHeight(260)
+            side_lay.addWidget(self.diff_left)
+            side_lay.addWidget(self.diff_right)
+            area_lay.addWidget(self.diff_side)
+            lay.addWidget(self.diff_area)
+            self._render_diff()
+            # The two panes scroll together, both ways.
+            self.diff_left.verticalScrollBar().valueChanged.connect(
+                lambda v: self._sync_diff_scroll(self.diff_right, v))
+            self.diff_right.verticalScrollBar().valueChanged.connect(
+                lambda v: self._sync_diff_scroll(self.diff_left, v))
+        body = QPlainTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(description)
+        body.setMinimumHeight(240 if diff is None else 64)
+        lay.addWidget(body)
+        row = QHBoxLayout()
+        deny = QPushButton("Deny")
+        deny.clicked.connect(self.reject)
+        approve = QPushButton("Approve once")
+        approve.setObjectName("primary")
+        approve.clicked.connect(self._approve)
+        row.addStretch(); row.addWidget(deny)
+        if show_remember and self.sensitive:
+            # H2: a sensitive call can never become a remembered
+            # rule — the affordance is replaced by the reason, in
+            # the row where the button would have sat.
+            self.sensitive_note = QLabel("Sensitive files always ask — "
+                                         "this can't be remembered.")
+            self.sensitive_note.setStyleSheet(
+                f"color:{TOKENS['text_amber_light']};")
+            row.addWidget(self.sensitive_note)
+        elif show_remember:
+            remember_btn = QPushButton("Approve && remember")
+            if tool_name == "run_command":
+                # H2: the copy says what is actually remembered now —
+                # this exact command, in this project only.
+                remember_btn.setToolTip("Approve, and stop asking for this exact command in "
+                                        "this project (saved as a rule — manage rules in "
+                                        "Customize → Permissions)")
+            else:
+                remember_btn.setToolTip("Approve, and stop asking for this exact tool + target "
+                                        "(saved as a rule — manage rules in Customize → Permissions)")
+            remember_btn.clicked.connect(self._approve_remember)
+            self.remember_btn = remember_btn
+            row.addWidget(remember_btn)
+        row.addWidget(approve)
+        lay.addLayout(row)
+        if diff is not None:
+            # G3: a diff dialog opens wide enough for the
+            # side-by-side form when the screen allows — initial
+            # width clamp(1080, 560, screen available width); the
+            # 560 minimum stands. Dialogs without a diff keep the
+            # classic sizing, untouched.
+            avail = 0
+            try:
+                screen = self.screen()
+                if screen is not None:
+                    avail = screen.availableGeometry().width()
+            except Exception:
+                avail = 0
+            target = max(560, min(1080, avail)) if avail else 1080
+            self.resize(target, self.sizeHint().height())
+            self._apply_diff_mode()
+
+    #: Sweep R69: tinting stops here — a diff larger than this is
+    #: still SHOWN whole (setPlainText below is untouched); only
+    #: the per-line tint pass is capped, so a 2 MB diff cannot
+    #: stall the dialog's construction for seconds.
+    _DIFF_TINT_CAP = 5000
+
+    # -- G3 + H3: adaptive diff (rendering only) -------------------
+
+    def _diff_body_lines(self):
+        """The unified body the renderers work from: the
+        DiffResult's body plus, when the diff is capped, the same
+        truncation marker line full_text() appends, so both forms
+        carry the same information (the marker's format belongs to
+        diffview; it is mirrored, not moved)."""
+        lines = list(self.diff.body)
+        if self.diff.truncated:
+            lines.append(
+                f"… diff truncated — showing {len(self.diff.body)} of "
+                f"{self.diff.total_lines} lines "
+                f"(+{self.diff.added} −{self.diff.removed} total)")
+        return lines
+
+    def _render_diff(self):
+        """(Re)build both renderings of the diff — inline text and
+        side panes — honoring the Expand toggle. Called once at
+        construction and again only when the toggle flips; a mode
+        switch just swaps which rendering is visible. Word spans
+        and context folding are computed here, once per render,
+        never per keystroke."""
+        if self.diff is None:
+            return
+        body = self._diff_body_lines()
+        self._render_inline(body)
+        self._render_side(body)
+
+    def _extra_selection(self, view, block_index, start, end,
+                         *, bg=None, fg=None):
+        """One extra selection (a char-range overlay that leaves the
+        document's own formats alone) over part of one block, or
+        None when the block doesn't exist."""
+        block = view.document().findBlockByNumber(block_index)
+        if not block.isValid():
+            return None
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position() + start)
+        cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+        fmt = QTextCharFormat()
+        if bg is not None:
+            fmt.setBackground(bg)
+        if fg is not None:
+            fmt.setForeground(fg)
+        # Both edit widgets take QTextEdit.ExtraSelection (PySide6
+        # exposes the type only there, even for QPlainTextEdit).
+        sel = QTextEdit.ExtraSelection()
+        sel.cursor = cursor
+        sel.format = fmt
+        return sel
+
+    def _render_inline(self, body):
+        """Fill the classic single view and tint each line's
+        background by its diff prefix: '+' added (amber/steel),
+        '−' removed (red), '@@' hunk header (steel). The prefix is
+        part of the text, so the meaning survives a copy-paste; the
+        tint is emphasis. Expanded, the text is the DiffResult's
+        full_text() byte for byte (the G3 property); collapsed,
+        long context runs fold into muted separator lines — head
+        lines, hunk headers, notes and the truncation marker always
+        pass through. H3 word spans land as extra selections over
+        the paired lines' differing tokens, offset by the one-char
+        diff prefix the inline text keeps. (Merged-tree note: the
+        line-tint pass below keeps the sweep R69 discipline — one
+        edit block, capped at _DIFF_TINT_CAP visited blocks.)"""
+        view = self.diff_view
+        head = self.diff._head_lines()
+        plan = inline_render_plan(body, self._diff_expanded)
+        texts = list(head)
+        block_of_body = {}
+        sep_blocks = []
+        for entry in plan:
+            if entry[0] == "sep":
+                sep_blocks.append(len(texts))
+                texts.append(diff_separator_text(entry[1]))
+            else:
+                block_of_body[entry[1]] = len(texts)
+                texts.append(body[entry[1]])
+        view.setPlainText("\n".join(texts))
+        # Sweep R69 discipline, kept on this merged renderer: the
+        # tint pass is ONE edit block and is capped at
+        # _DIFF_TINT_CAP visited blocks, so a huge diff cannot
+        # stall the dialog; past the cap the text stands untinted.
+        cursor = QTextCursor(view.document())
+        cursor.beginEditBlock()
+        try:
+            block = view.document().firstBlock()
+            visited = 0
+            while block.isValid() and visited < self._DIFF_TINT_CAP:
+                visited += 1
+                line = block.text()
+                bg = None
+                if line.startswith("+"):
+                    bg = self.DIFF_ADD_BG
+                elif line.startswith("-"):
+                    bg = self.DIFF_DEL_BG
+                elif line.startswith("@@"):
+                    bg = self.DIFF_HUNK_BG
+                if bg is not None:
+                    fmt = QTextBlockFormat()
+                    fmt.setBackground(bg)
+                    QTextCursor(block).setBlockFormat(fmt)
+                block = block.next()
+        finally:
+            cursor.endEditBlock()
+        sels = []
+        for b in sep_blocks:
+            text = view.document().findBlockByNumber(b).text()
+            sel = self._extra_selection(view, b, 0, len(text),
+                                        fg=self.DIFF_SEP_FG)
+            if sel is not None:
+                sels.append(sel)
+        pairs = diff_change_pairs(body)
+        if len(pairs) <= DIFF_WORD_MAX_PAIRS:
+            for del_i, add_i in pairs:
+                old_spans, new_spans = word_diff_spans(body[del_i][1:],
+                                                       body[add_i][1:])
+                # +1: the inline text keeps the line's -/+ prefix.
+                for start, end in old_spans:
+                    sel = self._extra_selection(
+                        view, block_of_body[del_i], start + 1, end + 1,
+                        bg=self.DIFF_DEL_WORD_BG)
+                    if sel is not None:
+                        sels.append(sel)
+                for start, end in new_spans:
+                    sel = self._extra_selection(
+                        view, block_of_body[add_i], start + 1, end + 1,
+                        bg=self.DIFF_ADD_WORD_BG)
+                    if sel is not None:
+                        sels.append(sel)
+        view.setExtraSelections(sels)
+
+    def _render_side(self, body):
+        """Populate the old | new panes from the DiffResult's
+        unified body via paired_diff_rows. Per-line tints reuse the
+        dialog's own diff colors; filler cells stay blank and
+        untinted. When collapsed, long context runs fold into ONE
+        separator row present on both sides at the same row index,
+        so the panes' alignment survives. H3 word spans land on the
+        pair rows' differing tokens."""
+        rows = collapse_side_rows(paired_diff_rows(body),
+                                  self._diff_expanded)
+        self.diff_left.setPlainText(
+            "\n".join("" if left is None else left
+                      for left, _r, _lk, _rk in rows))
+        self.diff_right.setPlainText(
+            "\n".join("" if right is None else right
+                      for _l, right, _lk, _rk in rows))
+        self._tint_pane(self.diff_left, [lk for _l, _r, lk, _rk in rows])
+        self._tint_pane(self.diff_right, [rk for _l, _r, _lk, rk in rows])
+        left_sels, right_sels = [], []
+        pair_rows = [(i, row) for i, row in enumerate(rows)
+                     if row[2] == "pair_del" and row[3] == "pair_add"]
+        word_ok = len(pair_rows) <= DIFF_WORD_MAX_PAIRS
+        for i, row in enumerate(rows):
+            if row[2] == "separator":
+                for view, acc in ((self.diff_left, left_sels),
+                                  (self.diff_right, right_sels)):
+                    sel = self._extra_selection(view, i, 0, len(row[0]),
+                                                fg=self.DIFF_SEP_FG)
+                    if sel is not None:
+                        acc.append(sel)
+        if word_ok:
+            for i, (left, right, _lk, _rk) in pair_rows:
+                old_spans, new_spans = word_diff_spans(left, right)
+                for start, end in old_spans:
+                    sel = self._extra_selection(
+                        self.diff_left, i, start, end,
+                        bg=self.DIFF_DEL_WORD_BG)
+                    if sel is not None:
+                        left_sels.append(sel)
+                for start, end in new_spans:
+                    sel = self._extra_selection(
+                        self.diff_right, i, start, end,
+                        bg=self.DIFF_ADD_WORD_BG)
+                    if sel is not None:
+                        right_sels.append(sel)
+        self.diff_left.setExtraSelections(left_sels)
+        self.diff_right.setExtraSelections(right_sels)
+
+    def _tint_pane(self, view, kinds):
+        bg_by_kind = {"del": self.DIFF_DEL_BG, "pair_del": self.DIFF_DEL_BG,
+                      "add": self.DIFF_ADD_BG, "pair_add": self.DIFF_ADD_BG,
+                      "hunk": self.DIFF_HUNK_BG}
+        # Sweep R69 (merge harmonization): the pane tint pass runs
+        # under the same discipline as _paint_diff — ONE edit block
+        # for the whole pass, and the same _DIFF_TINT_CAP on visited
+        # blocks, so a huge diff cannot stall the side panes either.
+        # The pane TEXT above is set whole regardless; only tinting
+        # is capped, exactly as in the inline view.
+        cursor = QTextCursor(view.document())
+        cursor.beginEditBlock()
+        try:
+            block = view.document().firstBlock()
+            visited = 0
+            for kind in kinds:
+                if not block.isValid() or visited >= self._DIFF_TINT_CAP:
+                    break
+                visited += 1
+                bg = bg_by_kind.get(kind)
+                if bg is not None:
+                    fmt = QTextBlockFormat()
+                    fmt.setBackground(bg)
+                    QTextCursor(block).setBlockFormat(fmt)
+                block = block.next()
+        finally:
+            cursor.endEditBlock()
+
+    def _sync_diff_scroll(self, other, value):
+        """Keep the side panes' vertical scrollbars locked together
+        (the re-entrancy guard stops the two signals chasing each
+        other)."""
+        if self._diff_scroll_sync:
+            return
+        self._diff_scroll_sync = True
+        try:
+            other.verticalScrollBar().setValue(value)
+        finally:
+            self._diff_scroll_sync = False
+
+    def _on_diff_mode_clicked(self, button):
+        for key, btn in self._diff_mode_btns.items():
+            if btn is button:
+                self._diff_pref = key
+                break
+        self._apply_diff_mode()
+
+    def _on_diff_expand_clicked(self):
+        """H3: flip the fold and re-render both forms in place; the
+        resolved mode (and which rendering is visible) is unchanged."""
+        self._diff_expanded = bool(self._diff_expand_btn.isChecked())
+        self._render_diff()
+
+    def _apply_diff_mode(self):
+        """Resolve the preference against the diff area's current
+        width and swap which rendering is visible — only when the
+        resolved mode actually changed, so a resize drag doesn't
+        re-render on every pixel."""
+        if self.diff is None or self.diff_area is None:
+            return
+        width = self.diff_area.width()
+        if width <= 0:
+            width = self.width()
+        resolved = resolve_diff_mode(self._diff_pref, width)
+        if resolved == self._diff_resolved:
+            return
+        self._diff_resolved = resolved
+        side = resolved == "side"
+        self.diff_side.setVisible(side)
+        self.diff_head.setVisible(side)
+        self.diff_view.setVisible(not side)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.diff is not None:
+            self._apply_diff_mode()
+
+    def _approve(self):
+        self.approved = True
+        self.accept()
+
+    def _approve_remember(self):
+        self.approved = True
+        self.remember = True
+        self.accept()
+
+
+class CustomizeDialog(QDialog):
+    """One home for skills, plugins and connectors (the pattern every modern
+    agent tool converged on): each item listed with its tools and an on/off
+    switch; connector tokens live here too. Off = its tools leave the
+    agent's hands immediately."""
+
+    TOKEN_KEYS = {"github": "github_token", "huggingface": "hf_token"}
+
+    def __init__(self, parent, skills, plugins, disabled_skills, disabled_plugins, config, rules=None,
+                 skribe_writes=True, project_local=None, on_house=None,
+                 tools=None, disabled_tools=None, goldfish_review=True):
+        super().__init__(parent)
+        self.setWindowTitle("Customize — skills · plugins · connectors")
+        self.setMinimumWidth(600)
+        self.config = dict(config or {})
+        self._rules = [dict(r) for r in (rules or [])]
+        # Note 22: project-local extensions found in the workspace, and
+        # the window's housing callback (moves them into the app folders).
+        self._local_items = list(project_local or [])
+        self._on_house = on_house
+        self._skill_boxes = {}
+        self._plugin_boxes = {}
+        self._tool_boxes = {}
+        # Window rule (2026-11-09): New…/Edit… buttons for skills and
+        # plugins. The editors are full windows, and this dialog is
+        # modal, so a button records the request here and accepts;
+        # ForgeWindow.open_customize opens the editor window the
+        # moment this dialog closes.
+        self.requested_editor = None
+        self._skill_edit_btns = {}
+        self._plugin_edit_btns = {}
+        # Item #52: capture the tools argument NOW — the plugins
+        # loop below reuses the name `tools` for a label string.
+        self._tool_rows = list(tools or [])
+        self._token_edits = {}
+        # Secrets vault (GUIFX V1): per-field stored-state labels and
+        # the set of secret keys marked for clearing on Save.
+        self._secret_status = {}
+        self._clear_secrets = set()
+        # S2: secret fields whose vault write/delete FAILED on Save —
+        # reported to the owner, never swallowed (was a bare
+        # except/pass in V1).
+        self._secret_vault_failures = []
+        tabs = QTabWidget(self)
+        # skills
+        skills_page = QWidget(); sk_lay = QVBoxLayout(skills_page)
+        for s in skills:
+            box = QCheckBox(f"{s.name} — {s.description}")
+            box.setChecked(s.name not in disabled_skills)
+            self._skill_boxes[s.name] = box
+            row = QHBoxLayout()
+            row.addWidget(box, 1)
+            edit_btn = QPushButton("Edit…")
+            edit_btn.setToolTip(f"Open the editor window for skill '{s.name}'. "
+                                "This dialog closes (saving the toggles above, "
+                                "exactly like Save) and the window opens.")
+            edit_btn.clicked.connect(
+                lambda _=False, item=s: self._request_editor("skill", item))
+            self._skill_edit_btns[s.name] = edit_btn
+            row.addWidget(edit_btn)
+            sk_lay.addLayout(row)
+        new_skill_row = QHBoxLayout()
+        self._new_skill_btn = QPushButton("New skill…")
+        self._new_skill_btn.setToolTip("Open the New Skill window — a roomy editor "
+                                       "that creates the skill in the Forge's own "
+                                       "skills folder, available in every project.")
+        self._new_skill_btn.clicked.connect(lambda: self._request_editor("skill", None))
+        new_skill_row.addWidget(self._new_skill_btn)
+        new_skill_row.addStretch()
+        sk_lay.addLayout(new_skill_row)
+        note = QLabel("Skills are folders in the app's skills/ directory. Edit a SKILL.md to change one; "
+                      "the Skill Creator skill makes new ones.")
+        note.setObjectName("muted"); note.setWordWrap(True); sk_lay.addWidget(note)
+        # Note 20: SKRIBE-gated writes toggle.
+        self._skribe_box = QCheckBox("SKRIBE-gated writes — grade every file the agent writes "
+                                     "before the turn counts as done")
+        self._skribe_box.setChecked(bool(skribe_writes))
+        sk_lay.addWidget(self._skribe_box)
+        skribe_note = QLabel("Grading runs on the session model itself — no other model judges "
+                             "(governing-seat rule). One batched pass per turn that writes; a "
+                             "\"revise\" verdict bounces the file back once, then unverified "
+                             "files are reported, never dropped. Off = writes behave as before. "
+                             "Turning the SKRIBE skill itself off above also disables the gate.")
+        skribe_note.setObjectName("muted"); skribe_note.setWordWrap(True); sk_lay.addWidget(skribe_note)
+        # Item #56: Goldfish spec review toggle — packaged like the
+        # SKRIBE gate above (a skill + this toggle; the values()
+        # tuple keeps its shape, so the state rides goldfish_on(),
+        # the same side door requested_editor uses).
+        self._goldfish_box = QCheckBox("Goldfish plan review — a fresh reviewer-seat pass "
+                                       "reads each Plan-mode draft before the approval gate")
+        self._goldfish_box.setChecked(bool(goldfish_review))
+        sk_lay.addWidget(self._goldfish_box)
+        goldfish_note = QLabel("The reviewer sees ONLY the plan and the files it names — no "
+                               "conversation (the firewall that makes the review worth having). "
+                               "Two stages (Zoom Out, Comprehension) plus a mechanical check that "
+                               "named files/functions exist; findings are advisory and never block "
+                               "approval. Cost: each stage is a full extra local generation — "
+                               "minutes on this PC — and a Blocker/Major earns one revision "
+                               "round. Turning the goldfish skill itself off above also "
+                               "disables the pass.")
+        goldfish_note.setObjectName("muted"); goldfish_note.setWordWrap(True); sk_lay.addWidget(goldfish_note)
+        sk_lay.addStretch()
+        tabs.addTab(skills_page, "Skills")
+        # plugins + connectors
+        for kind, title in (("plugin", "Plugins"), ("connector", "Connectors")):
+            page = QWidget(); lay = QVBoxLayout(page)
+            for p in plugins:
+                if p.kind != kind:
+                    continue
+                tools = ", ".join(t.get("name", "") for t in p.tools) or "no tools"
+                box = QCheckBox(f"{p.name} — {p.description}")
+                box.setChecked(p.pid not in disabled_plugins)
+                box.setToolTip("Tools: " + tools)
+                self._plugin_boxes[p.pid] = box
+                if kind == "plugin":
+                    row = QHBoxLayout()
+                    row.addWidget(box, 1)
+                    edit_btn = QPushButton("Edit…")
+                    edit_btn.setToolTip(f"Open the editor window for plugin '{p.name}'. "
+                                        "This dialog closes (saving the toggles above, "
+                                        "exactly like Save) and the window opens.")
+                    edit_btn.clicked.connect(
+                        lambda _=False, item=p: self._request_editor("plugin", item))
+                    self._plugin_edit_btns[p.pid] = edit_btn
+                    row.addWidget(edit_btn)
+                    lay.addLayout(row)
+                else:
+                    lay.addWidget(box)
+                tools_lab = QLabel("    tools: " + tools)
+                tools_lab.setObjectName("muted"); lay.addWidget(tools_lab)
+                if kind == "connector" and p.pid in self.TOKEN_KEYS:
+                    key = self.TOKEN_KEYS[p.pid]
+                    row = QHBoxLayout()
+                    row.addWidget(QLabel("    token (optional):"))
+                    edit = QLineEdit(self.config.get(key, ""))
+                    edit.setEchoMode(QLineEdit.Password)
+                    edit.setPlaceholderText("saved = higher rate limits; empty = public access")
+                    self._token_edits[key] = edit
+                    row.addWidget(edit)
+                    status, clear_btn = self._secret_widgets(key, edit)
+                    row.addWidget(status)
+                    row.addWidget(clear_btn)
+                    lay.addLayout(row)
+            if kind == "plugin":
+                new_plugin_row = QHBoxLayout()
+                self._new_plugin_btn = QPushButton("New plugin…")
+                self._new_plugin_btn.setToolTip(
+                    "Open the New Plugin window — a roomy editor that creates the "
+                    "plugin in the Forge's own plugins folder. A new plugin starts "
+                    "DISABLED; tick its box here to enable it.")
+                self._new_plugin_btn.clicked.connect(
+                    lambda: self._request_editor("plugin", None))
+                new_plugin_row.addWidget(self._new_plugin_btn)
+                new_plugin_row.addStretch()
+                lay.addLayout(new_plugin_row)
+            lay.addStretch()
+            tabs.addTab(page, title)
+        # Item #52: the per-tool kill switch. One checkbox per tool
+        # the window can hand the agent — the built-ins plus every
+        # extension tool, labeled with where it comes from. Off =
+        # the tool leaves the agent's hands everywhere: it is not
+        # offered to the model and a call to it is refused.
+        tools_page = QWidget(); tl_lay = QVBoxLayout(tools_page)
+        disabled_tools = set(disabled_tools or ())
+        for name, group in self._tool_rows:
+            box = QCheckBox(f"{name} — {group}")
+            box.setChecked(name not in disabled_tools)
+            self._tool_boxes[name] = box
+            tl_lay.addWidget(box)
+        tools_note = QLabel("A tool switched off here is off everywhere: its schema is never "
+                            "offered to the model, and a call naming it is refused before "
+                            "approval. Applies from the next turn.")
+        tools_note.setObjectName("muted"); tools_note.setWordWrap(True); tl_lay.addWidget(tools_note)
+        tl_lay.addStretch()
+        tabs.addTab(tools_page, "Tools")
+        # Providers tab (items #59–#62 + the #69 maintenance engine):
+        # hosted model providers, their keys, the maintenance models,
+        # and the model registry — which provider models exist, where
+        # they may run (project / maintenance / both), and which roles
+        # they may fill. Local Ollama stays the default everywhere.
+        prov_page = QWidget(); prov_lay = QVBoxLayout(prov_page)
+        prov_form = QFormLayout()
+        self.provider_groq_enabled_box = QCheckBox("Enable Groq")
+        self.provider_groq_enabled_box.setChecked(
+            providers_mod.provider_enabled(self.config, "groq"))
+        prov_form.addRow(self.provider_groq_enabled_box)
+        self.provider_groq_key_edit = QLineEdit(
+            self.config.get("groq_api_key", ""))
+        self.provider_groq_key_edit.setEchoMode(QLineEdit.Password)
+        self.provider_groq_key_edit.setPlaceholderText(
+            "Groq API key (empty = Groq off)")
+        groq_status, groq_clear = self._secret_widgets(
+            "groq_api_key", self.provider_groq_key_edit)
+        groq_row = QWidget(); groq_row_lay = QHBoxLayout(groq_row)
+        groq_row_lay.setContentsMargins(0, 0, 0, 0)
+        groq_row_lay.addWidget(self.provider_groq_key_edit, 1)
+        groq_row_lay.addWidget(groq_clear)
+        prov_form.addRow("Groq API key", groq_row)
+        prov_form.addRow("", groq_status)
+        self.maintenance_groq_model_edit = QLineEdit(
+            self.config.get("maintenance_groq_model", ""))
+        self.maintenance_groq_model_edit.setPlaceholderText(
+            "e.g. llama-3.3-70b-versatile — the Groq model the "
+            "maintenance engineer drives")
+        prov_form.addRow("Maintenance Groq model",
+                         self.maintenance_groq_model_edit)
+        self.provider_gemini_enabled_box = QCheckBox("Enable Gemini")
+        self.provider_gemini_enabled_box.setChecked(
+            providers_mod.provider_enabled(self.config, "gemini"))
+        prov_form.addRow(self.provider_gemini_enabled_box)
+        self.provider_gemini_key_edit = QLineEdit(
+            self.config.get("gemini_api_key", ""))
+        self.provider_gemini_key_edit.setEchoMode(QLineEdit.Password)
+        self.provider_gemini_key_edit.setPlaceholderText(
+            "Gemini API key (empty = Gemini off)")
+        gemini_status, gemini_clear = self._secret_widgets(
+            "gemini_api_key", self.provider_gemini_key_edit)
+        gemini_row = QWidget(); gemini_row_lay = QHBoxLayout(gemini_row)
+        gemini_row_lay.setContentsMargins(0, 0, 0, 0)
+        gemini_row_lay.addWidget(self.provider_gemini_key_edit, 1)
+        gemini_row_lay.addWidget(gemini_clear)
+        prov_form.addRow("Gemini API key", gemini_row)
+        prov_form.addRow("", gemini_status)
+        self.maintenance_gemini_model_edit = QLineEdit(
+            self.config.get("maintenance_gemini_model", ""))
+        self.maintenance_gemini_model_edit.setPlaceholderText(
+            "e.g. gemini-2.5-flash — the Gemini model the "
+            "maintenance engineer drives")
+        prov_form.addRow("Maintenance Gemini model",
+                         self.maintenance_gemini_model_edit)
+        self.provider_exaone_enabled_box = QCheckBox("Enable EXAONE")
+        self.provider_exaone_enabled_box.setChecked(
+            providers_mod.provider_enabled(self.config, "exaone"))
+        prov_form.addRow(self.provider_exaone_enabled_box)
+        self.provider_exaone_key_edit = QLineEdit(
+            self.config.get("exaone_api_key", ""))
+        self.provider_exaone_key_edit.setEchoMode(QLineEdit.Password)
+        self.provider_exaone_key_edit.setPlaceholderText(
+            "EXAONE API key (empty = EXAONE off)")
+        exaone_status, exaone_clear = self._secret_widgets(
+            "exaone_api_key", self.provider_exaone_key_edit)
+        exaone_row = QWidget(); exaone_row_lay = QHBoxLayout(exaone_row)
+        exaone_row_lay.setContentsMargins(0, 0, 0, 0)
+        exaone_row_lay.addWidget(self.provider_exaone_key_edit, 1)
+        exaone_row_lay.addWidget(exaone_clear)
+        prov_form.addRow("EXAONE API key", exaone_row)
+        prov_form.addRow("", exaone_status)
+        self.maintenance_exaone_model_edit = QLineEdit(
+            self.config.get("maintenance_exaone_model", ""))
+        self.maintenance_exaone_model_edit.setPlaceholderText(
+            "e.g. k-exaone_v2.5 — the EXAONE model the "
+            "maintenance engineer drives")
+        prov_form.addRow("Maintenance EXAONE model",
+                         self.maintenance_exaone_model_edit)
+        # Secrets vault (GUIFX V1): the owner's PC (sudo) password.
+        # Vault-only — it never enters the config dict or
+        # connectors.json.  Used only when he approves a command
+        # that runs with sudo; Forge feeds it to sudo behind the
+        # scenes and the model never sees it.
+        self.sudo_password_edit = QLineEdit()
+        self.sudo_password_edit.setEchoMode(QLineEdit.Password)
+        self.sudo_password_edit.setPlaceholderText(
+            "PC (sudo) password — kept in the encrypted vault only")
+        sudo_status, sudo_clear = self._secret_widgets(
+            "sudo_password", self.sudo_password_edit)
+        sudo_row = QWidget(); sudo_row_lay = QHBoxLayout(sudo_row)
+        sudo_row_lay.setContentsMargins(0, 0, 0, 0)
+        sudo_row_lay.addWidget(self.sudo_password_edit, 1)
+        sudo_row_lay.addWidget(sudo_clear)
+        prov_form.addRow("PC (sudo) password", sudo_row)
+        prov_form.addRow("", sudo_status)
+        sudo_note = QLabel(
+            "Used only when you approve a command that runs with "
+            "sudo: Forge feeds the password to sudo behind the "
+            "scenes — it is never shown to the model.")
+        sudo_note.setObjectName("muted"); sudo_note.setWordWrap(True)
+        prov_form.addRow(sudo_note)
+        prov_lay.addLayout(prov_form)
+        prov_lay.addWidget(QLabel(
+            "Model registry — one row per provider model "
+            "(groq:… / gemini:… / exaone:…). Scope says where it may run; the "
+            "role boxes say what it may do there. A provider model "
+            "with no row is enabled for driving in both scopes, and "
+            "nothing else."))
+        self.provider_registry_table = QTableWidget(0, 7)
+        self.provider_registry_table.setHorizontalHeaderLabels(
+            ["Enabled", "Model", "Scope", "Driver", "Reviewer",
+             "Tester", "Grader"])
+        self.provider_registry_table.setSelectionBehavior(
+            QTableWidget.SelectRows)
+        for entry in providers_mod.registry_entries(self.config):
+            self._provider_registry_add_row(entry)
+        prov_lay.addWidget(self.provider_registry_table, 1)
+        registry_btns = QHBoxLayout()
+        self.provider_registry_add_btn = QPushButton("Add row")
+        self.provider_registry_add_btn.clicked.connect(
+            lambda: self._provider_registry_add_row())
+        registry_btns.addWidget(self.provider_registry_add_btn)
+        self.provider_registry_remove_btn = QPushButton("Remove selected")
+        self.provider_registry_remove_btn.clicked.connect(
+            self._provider_registry_remove_selected)
+        registry_btns.addWidget(self.provider_registry_remove_btn)
+        registry_btns.addStretch()
+        prov_lay.addLayout(registry_btns)
+        providers_note = QLabel(
+            "Keys and the PC password are stored in the app's "
+            "encrypted vault (vault.json in the app folder) — never "
+            "in connectors.json. The vault's key file sits beside "
+            "it on this PC, so this protects against casual reading "
+            "and accidental leaks, not against someone who already "
+            "has full access to your files. The real gate: secrets "
+            "are only ever used by actions you approve, and the "
+            "model never sees them. "
+            "Choosing a cloud model sends that session's prompts and "
+            "code to that provider; local models send nothing anywhere. "
+            "Governing seats (reviewer, tester, grader) remain guarded "
+            "by the seat roster in forge/seats.py: a registry role "
+            "alone never promotes a cloud model into a governing seat.")
+        providers_note.setObjectName("muted")
+        providers_note.setWordWrap(True)
+        prov_lay.addWidget(providers_note)
+        tabs.addTab(prov_page, "Providers")
+        # permissions tab
+        perm_page = QWidget(); perm_lay = QVBoxLayout(perm_page)
+        perm_lay.addWidget(QLabel("Saved permission rules (from “Approve & remember”). "
+                                  "Deny beats allow. Select a rule and remove it if it should stop applying."))
+        self._rules_list = QListWidget()
+        self._refresh_rules_list()
+        perm_lay.addWidget(self._rules_list)
+        remove_btn = QPushButton("Remove selected rule")
+        remove_btn.clicked.connect(self._remove_rule)
+        perm_lay.addWidget(remove_btn)
+        tabs.addTab(perm_page, "Permissions")
+        lay_root = QVBoxLayout(self)
+        lay_root.addWidget(tabs)
+        # Note 22: housing for project-local skills/plugins. Moving files
+        # is an owner act: the button confirms first, then reports.
+        house_row = QHBoxLayout()
+        self._house_label = QLabel(self._house_label_text())
+        self._house_label.setObjectName("muted")
+        house_row.addWidget(self._house_label)
+        self._house_btn = QPushButton("House project skills/plugins globally")
+        self._house_btn.setEnabled(bool(self._local_items) and self._on_house is not None)
+        self._house_btn.setToolTip("Move skills/plugins that were saved inside the current "
+                                   "project folder into the Forge's own folders, so they are "
+                                   "available in every project. Name collisions are skipped.")
+        self._house_btn.clicked.connect(self._do_house)
+        house_row.addWidget(self._house_btn)
+        lay_root.addLayout(house_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        lay_root.addWidget(buttons)
+
+    def _house_label_text(self):
+        if not self._local_items:
+            return "Project-local extensions in this workspace: none."
+        names = ", ".join(f"{i['kind']} '{i['name']}'" for i in self._local_items)
+        return f"Project-local (this project only): {names}"
+
+    def _do_house(self):
+        if not self._local_items or self._on_house is None:
+            return
+        answer = QMessageBox.question(
+            self, "House project skills/plugins globally",
+            f"Move {len(self._local_items)} extension(s) out of the project folder and "
+            "into the Forge's own skills/plugins folders?\n\nThey become available in "
+            "every project. Items whose name already exists globally are skipped.")
+        if answer != QMessageBox.Yes:
+            return
+        # Sweep R70: a housing failure used to propagate out of the
+        # slot as a bare exception — and the state updates below
+        # (items cleared, button disabled) must only run when the
+        # housing actually happened.
+        try:
+            report = self._on_house()
+        except Exception as exc:
+            QMessageBox.critical(self, "Housing failed", str(exc))
+            return
+        self._local_items = []
+        self._house_btn.setEnabled(False)
+        self._house_label.setText("Project-local extensions in this workspace: none.")
+        QMessageBox.information(self, "Housing result", report)
+
+    def _request_editor(self, kind, item):
+        """A New…/Edit… button (window rule): the editor is a full
+        top-level window, and this dialog is modal — a window opened
+        now could not be typed in until this dialog closes. So the
+        request is recorded and the dialog accepts, saving the
+        owner's toggles exactly as Save does; ForgeWindow's
+        open_customize opens the editor window the moment this
+        dialog is gone. `item` is the Skill/Plugin to edit, or None
+        for a new one."""
+        self.requested_editor = (kind, item)
+        self.accept()
+
+    # ---------- Providers tab: registry table ----------
+
+    @staticmethod
+    def _check_item(checked):
+        item = QTableWidgetItem()
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+        return item
+
+    def _provider_registry_add_row(self, entry=None):
+        entry = dict(entry or {})
+        table = self.provider_registry_table
+        row = table.rowCount()
+        table.insertRow(row)
+        table.setItem(row, 0, self._check_item(
+            bool(entry.get("enabled", True))))
+        table.setItem(row, 1, QTableWidgetItem(str(entry.get("id", ""))))
+        scope_box = QComboBox()
+        scope_box.addItems(["project", "maintenance", "both"])
+        scope = str(entry.get("scope") or "both")
+        scope_box.setCurrentText(
+            scope if scope in providers_mod.VALID_SCOPES else "both")
+        table.setCellWidget(row, 2, scope_box)
+        roles = entry.get("roles") or ["driver"]
+        for col, role in enumerate(
+                ("driver", "reviewer", "tester", "grader"), start=3):
+            table.setItem(row, col, self._check_item(role in roles))
+        return row
+
+    def _provider_registry_remove_selected(self):
+        row = self.provider_registry_table.currentRow()
+        if row >= 0:
+            self.provider_registry_table.removeRow(row)
+
+    def _provider_registry_values(self):
+        table = self.provider_registry_table
+        # Dynamic context windows (2026-11-10): the table has no
+        # column for a stated context_window, but saving here must
+        # not silently destroy one an entry already carries — it is
+        # carried through from the config this dialog opened with
+        # (already sanitized on the way in).
+        carried = {entry["id"]: entry["context_window"]
+                   for entry in providers_mod.registry_entries(self.config)
+                   if entry.get("context_window") is not None}
+        rows = []
+        for row in range(table.rowCount()):
+            model_item = table.item(row, 1)
+            model_id = model_item.text().strip() if model_item else ""
+            if not model_id:
+                continue
+            enabled_item = table.item(row, 0)
+            enabled = bool(enabled_item is not None
+                           and enabled_item.checkState() == Qt.Checked)
+            scope_box = table.cellWidget(row, 2)
+            scope = scope_box.currentText() if scope_box is not None \
+                else "both"
+            roles = []
+            for col, role in enumerate(
+                    ("driver", "reviewer", "tester", "grader"), start=3):
+                item = table.item(row, col)
+                if item is not None and item.checkState() == Qt.Checked:
+                    roles.append(role)
+            row_entry = {"id": model_id, "enabled": enabled,
+                         "scope": scope, "roles": roles}
+            if model_id in carried:
+                row_entry["context_window"] = carried[model_id]
+            rows.append(row_entry)
+        entries = providers_mod.sanitize_model_registry(rows)
+        # A maintenance model field naming a model with no row earns
+        # its row here: maintenance scope, driver role — the field IS
+        # the owner's statement that this model serves the engineer.
+        known = {entry["id"] for entry in entries}
+        for provider, edit in (
+                ("groq", self.maintenance_groq_model_edit),
+                ("gemini", self.maintenance_gemini_model_edit),
+                ("exaone", self.maintenance_exaone_model_edit)):
+            full = providers_mod.provider_model_id(provider, edit.text())
+            if full and full not in known:
+                entries.append({"id": full, "enabled": True,
+                                "scope": "maintenance",
+                                "roles": ["driver"]})
+                known.add(full)
+        return providers_mod.sanitize_model_registry(entries)
+
+    def _refresh_rules_list(self):
+        self._rules_list.clear()
+        for r in self._rules:
+            self._rules_list.addItem(QListWidgetItem(
+                f"{str(r.get('action', 'ask')).upper()} · {r.get('tool', '*')} · {r.get('pattern', '*')} · {r.get('scope', 'global')}"))
+
+    def _remove_rule(self):
+        row = self._rules_list.currentRow()
+        if 0 <= row < len(self._rules):
+            del self._rules[row]
+            self._refresh_rules_list()
+
+    def goldfish_on(self):
+        """Item #56: the Goldfish toggle's state. Read by
+        ForgeWindow.open_customize after the dialog closes — the
+        values() tuple keeps its long-standing 6-element shape."""
+        return bool(self._goldfish_box.isChecked())
+
+    def _secret_widgets(self, key, edit):
+        """Stored-state label + Clear button for one secret field
+        (Secrets vault, GUIFX V1).  A value already sitting in the
+        config dict (not yet migrated) prefills the field as it
+        always has; a value that lives only in the vault is NEVER
+        placed in the field — the field stays empty, its placeholder
+        says a value is stored, and the label shows the state."""
+        status = QLabel()
+        status.setObjectName("muted")
+        self._secret_status[key] = status
+        clear_btn = QPushButton("Clear")
+        clear_btn.setToolTip("Remove this stored secret from the "
+                             "vault when you save")
+        clear_btn.clicked.connect(
+            lambda: self._mark_secret_clear(key, edit))
+        edit.textChanged.connect(
+            lambda _text, k=key: self._clear_secrets.discard(k))
+        if edit.text():
+            status.setText("● Stored — moves into the encrypted "
+                           "vault when you save")
+            return status, clear_btn
+        stored = False
+        try:
+            stored = vault_mod.Vault(APP_DIR).has(key)
+        except Exception:
+            stored = False
+        if stored:
+            edit.setPlaceholderText(
+                "Stored in the vault — type a new value to replace "
+                "it, or Clear to remove it")
+            status.setText("● Stored in the vault")
+        else:
+            status.setText("○ Not stored")
+        return status, clear_btn
+
+    def _mark_secret_clear(self, key, edit):
+        edit.clear()
+        self._clear_secrets.add(key)
+        status = self._secret_status.get(key)
+        if status is not None:
+            status.setText("○ Will be removed from the vault when "
+                           "you save")
+
+    def _apply_secret_vault_ops(self):
+        """On Save: typed secrets go into the encrypted vault and
+        Clear marks are applied.  The config dict still carries any
+        typed keys for the caller (its shape is unchanged) — the
+        caller strips them into the vault before anything reaches
+        connectors.json.  The sudo password is vault-only: it never
+        enters the config dict at all.
+
+        S2: a failed vault write/delete is REPORTED (collected in
+        _secret_vault_failures for the caller to surface), never
+        swallowed — a silent failure here used to leave keys in
+        plain text with no sign anything went wrong."""
+        self._secret_vault_failures = []
+        try:
+            vault = vault_mod.Vault(APP_DIR)
+        except Exception:
+            self._secret_vault_failures = [
+                "groq_api_key", "gemini_api_key", "exaone_api_key",
+                "sudo_password", *sorted(self._token_edits)]
+            return
+        fields = dict(self._token_edits)
+        fields["groq_api_key"] = self.provider_groq_key_edit
+        fields["gemini_api_key"] = self.provider_gemini_key_edit
+        fields["exaone_api_key"] = self.provider_exaone_key_edit
+        fields["sudo_password"] = self.sudo_password_edit
+        for key, edit in fields.items():
+            try:
+                if key in self._clear_secrets:
+                    vault.delete(key)
+                else:
+                    value = edit.text().strip()
+                    if value:
+                        vault.set(key, value)
+            except Exception:
+                self._secret_vault_failures.append(key)
+
+    def values(self):
+        disabled_skills = {name for name, box in self._skill_boxes.items() if not box.isChecked()}
+        disabled_plugins = {pid for pid, box in self._plugin_boxes.items() if not box.isChecked()}
+        disabled_tools = {name for name, box in self._tool_boxes.items() if not box.isChecked()}
+        self._apply_secret_vault_ops()
+        config = dict(self.config)
+        for key, edit in self._token_edits.items():
+            value = edit.text().strip()
+            if value:
+                config[key] = value
+            else:
+                config.pop(key, None)
+        # Providers tab: keys (empty clears), provider enables, the
+        # maintenance model fields, and the registry all fold into
+        # the same config dict — the values() tuple shape is unchanged.
+        for key, edit in (("groq_api_key", self.provider_groq_key_edit),
+                          ("gemini_api_key", self.provider_gemini_key_edit),
+                          ("exaone_api_key", self.provider_exaone_key_edit),
+                          ("maintenance_groq_model",
+                           self.maintenance_groq_model_edit),
+                          ("maintenance_gemini_model",
+                           self.maintenance_gemini_model_edit),
+                          ("maintenance_exaone_model",
+                           self.maintenance_exaone_model_edit)):
+            value = edit.text().strip()
+            if value:
+                config[key] = value
+            else:
+                config.pop(key, None)
+        config["groq_enabled"] = bool(self.provider_groq_enabled_box.isChecked())
+        config["gemini_enabled"] = bool(
+            self.provider_gemini_enabled_box.isChecked())
+        config["exaone_enabled"] = bool(
+            self.provider_exaone_enabled_box.isChecked())
+        config["model_registry"] = self._provider_registry_values()
+        return (disabled_skills, disabled_plugins, config, list(self._rules),
+                self._skribe_box.isChecked(), disabled_tools)
+
+
+class ForkDialog(QDialog):
+    """Pick the message the fork branches from. The original conversation
+    is never modified."""
+
+    def __init__(self, parent, messages):
+        super().__init__(parent)
+        self.setWindowTitle("Fork conversation — branch from…")
+        self.setMinimumWidth(560)
+        self.index_by_row = []
+        self.list = QListWidget(self)
+        for i, m in enumerate(messages):
+            if m.get("role") not in ("user", "assistant"):
+                continue
+            # Sweep R65/R82: content is not always a usable string —
+            # a whitespace-only message made .splitlines()[0] raise
+            # (the dialog could not open at all), and an attachment-
+            # era list-form content has no .strip. Both read as the
+            # "(tool work)" placeholder the empty case already used.
+            content = m.get("content")
+            lines = content.strip().splitlines() \
+                if isinstance(content, str) and content.strip() else []
+            text = lines[0][:80] if lines else "(tool work)"
+            who = "YOU" if m["role"] == "user" else "FORGE"
+            self.list.addItem(QListWidgetItem(f"{who}  ·  {text}"))
+            self.index_by_row.append(i)
+        if self.index_by_row:
+            self.list.setCurrentRow(len(self.index_by_row) - 1)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("The fork copies everything up to the selected message into a new "
+                             "conversation. Try a different approach there; this one stays intact."))
+        lay.addWidget(self.list)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def selected_index(self):
+        row = self.list.currentRow()
+        return self.index_by_row[row] if 0 <= row < len(self.index_by_row) else None
+
+
+class ScheduleDialog(QDialog):
+    """Owner's scheduled jobs. A job that hits an approval PARKS at the
+    dialog until the owner answers — F8 makes that honest."""
+
+    def __init__(self, parent, jobs, workspace):
+        super().__init__(parent)
+        self.setWindowTitle("Scheduled runs")
+        self.setMinimumWidth(600)
+        # Sweep R83: jobs come from the owner's settings file —
+        # a non-dict entry used to raise right here and make the
+        # dialog unopenable. Non-dict entries are dropped, plainly.
+        self.jobs = [dict(j) for j in jobs if isinstance(j, dict)]
+        self.workspace = workspace
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Jobs fire when the bench is idle. Anything needing approval waits "
+                             "at the dialog for you — no timeout, by design."))
+        self.list = QListWidget()
+        self._refresh()
+        lay.addWidget(self.list)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(); form.addRow("Name", self.name_edit)
+        self.prompt_edit = QLineEdit(); form.addRow("Prompt", self.prompt_edit)
+        self.every_spin = QSpinBox(); self.every_spin.setRange(0, 10080); self.every_spin.setSuffix(" min (0 = use daily time)")
+        form.addRow("Every", self.every_spin)
+        self.daily_edit = QTimeEdit(); self.daily_edit.setDisplayFormat("HH:mm")
+        self.daily_edit.setTime(QTime(7, 30))
+        form.addRow("Daily at", self.daily_edit)
+        lay.addLayout(form)
+        row = QHBoxLayout()
+        add_btn = QPushButton("Add job"); add_btn.clicked.connect(self._add)
+        toggle_btn = QPushButton("Toggle enabled"); toggle_btn.clicked.connect(self._toggle_enabled)
+        del_btn = QPushButton("Delete selected"); del_btn.clicked.connect(self._delete)
+        row.addWidget(add_btn); row.addWidget(toggle_btn); row.addWidget(del_btn); row.addStretch()
+        lay.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _refresh(self):
+        self.list.clear()
+        for j in self.jobs:
+            when = f"every {j['every_minutes']} min" if j.get("every_minutes") else f"daily {j.get('daily', '?')}"
+            # Sweep R83: a stored prompt of None (hand-edited
+            # settings) sliced as None[:50] and raised.
+            self.list.addItem(QListWidgetItem(f"{'●' if j.get('enabled', True) else '○'}  {j.get('name', '?')} — {when} — {str(j.get('prompt') or '')[:50]}"))
+
+    def _add(self):
+        name = self.name_edit.text().strip() or "job"
+        prompt = self.prompt_edit.text().strip()
+        if not prompt:
+            return
+        # Sweep R66: the id was name + the CURRENT list length —
+        # delete a middle job, add one, and the new job reused a
+        # surviving job's id; mark_run then stamped the wrong job.
+        # Bump a counter until the id is free among the live jobs.
+        taken = {j.get("id") for j in self.jobs}
+        n = len(self.jobs)
+        while f"{name}-{n}" in taken:
+            n += 1
+        job = {"id": f"{name}-{n}", "name": name, "prompt": prompt,
+               "workspace": self.workspace, "enabled": True, "last_run": None, "next_run": None}
+        if self.every_spin.value() > 0:
+            job["every_minutes"] = self.every_spin.value()
+        else:
+            # The time picker always holds a real HH:mm, so a daily
+            # job from this dialog needs no validation round-trip
+            # (audit C28). Stored hand-edited times stay defended by
+            # sched.valid_daily in the engine itself.
+            job["daily"] = self.daily_edit.time().toString("HH:mm")
+        sched.ensure_next(job)
+        self.jobs.append(job)
+        self._refresh()
+
+    def _toggle_enabled(self):
+        row = self.list.currentRow()
+        if 0 <= row < len(self.jobs):
+            self.jobs[row]["enabled"] = not self.jobs[row].get("enabled", True)
+            self._refresh()
+            self.list.setCurrentRow(row)
+
+    def _delete(self):
+        row = self.list.currentRow()
+        if 0 <= row < len(self.jobs):
+            del self.jobs[row]
+            self._refresh()
+
+
+class UpdateDialog(QDialog):
+    """Note 19: pick an overlay zip (or none for a dependencies-only
+    refresh), confirm, and the Forge hands off to the external updater:
+    quit → install → relaunch → resume right where you left off."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Update & restart")
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("The Forge will save this conversation, quit, let the updater install, "
+                             "and relaunch into this same conversation. An interrupted task is "
+                             "prefilled in the input box so one Send resumes it."))
+        lay.addWidget(QLabel("Only install zips you built or that came from Code Forge itself."))
+        row = QHBoxLayout()
+        self.zip_edit = QLineEdit(); self.zip_edit.setPlaceholderText("Overlay .zip (leave empty for dependencies only)")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(lambda: self.zip_edit.setText(
+            QFileDialog.getOpenFileName(self, "Update overlay", "", "Zip files (*.zip)")[0] or self.zip_edit.text()))
+        row.addWidget(self.zip_edit); row.addWidget(browse)
+        lay.addLayout(row)
+        form = QFormLayout()
+        self.pip_edit = QLineEdit(); self.pip_edit.setPlaceholderText("e.g. somepackage another-package")
+        form.addRow("Extra pip packages", self.pip_edit)
+        lay.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def values(self):
+        zip_path = self.zip_edit.text().strip() or None
+        extras = [t for t in self.pip_edit.text().replace(",", " ").split() if t]
+        return zip_path, extras
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent, settings):
+        super().__init__(parent)
+        self.setWindowTitle("Agent settings")
+        self.setMinimumSize(580, 540)
+        root = QVBoxLayout(self)
+        # Owner directive (2026-11-08): this dialog was one endless,
+        # crowded form — every setting piled into a single column.
+        # It is organized into tabs now, one subject per tab; every
+        # field, default and caption is the same as before, just no
+        # longer stacked on top of each other. The sections below
+        # point `form` at their tab's layout as they build.
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+
+        def tab_form(title):
+            page = QWidget()
+            lay = QFormLayout(page)
+            # Each tab scrolls on its own — no tab's content can
+            # ever be clipped by the dialog's height.
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, title)
+            return lay
+
+        form_model = tab_form("Model")
+        form_prompt = tab_form("Prompt")
+        form_seats = tab_form("Seats & limits")
+        form_behavior = tab_form("Behavior")
+        form_voice = tab_form("Voice")
+
+        def caption(text):
+            lab = QLabel(text)
+            lab.setObjectName("muted")
+            lab.setWordWrap(True)
+            return lab
+
+        form = form_model
+        # Sweep R67: every value below is owner-editable JSON — a
+        # hand-edited settings.json can hold a string where a
+        # number belongs, and one wrong-typed value used to crash
+        # the whole dialog inside setValue/setPlainText. Coerce
+        # like the existing num_thread/min_p guards: a bad value
+        # falls back to the field's default, the dialog opens.
+        def _text(key, default=""):
+            value = settings.get(key, default)
+            return value if isinstance(value, str) else default
+
+        def _float(key, default, lo, hi):
+            try:
+                value = float(settings.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(lo, min(hi, value))
+
+        def _int(key, default, lo, hi):
+            try:
+                value = int(settings.get(key, default) or default)
+            except (TypeError, ValueError):
+                value = default
+            return max(lo, min(hi, value))
+
+        self.url = QLineEdit(_text("ollama_url", "http://127.0.0.1:11434"))
+        form.addRow("Ollama URL", self.url)
+        form.addRow("", caption("Where the local model server lives. Default is this PC."))
+        form = form_prompt
+        self.prompt = QTextEdit()
+        self.prompt.setPlainText(_text("system_prompt", SYSTEM_PROMPT))
+        self.prompt.setMinimumHeight(300)
+        form.addRow("System prompt", self.prompt)
+        form.addRow("", caption("The agent's standing orders. House rules and project instructions are added on top."))
+        form = form_model
+        self.temperature = QDoubleSpinBox()
+        self.temperature.setRange(0, 2); self.temperature.setSingleStep(.05)
+        self.temperature.setValue(_float("temperature", .7, 0.0, 2.0))
+        form.addRow("Temperature", self.temperature)
+        form.addRow("", caption("How wild answers get. 0 = strict and repeatable, 0.7 = balanced, higher = looser."))
+        self.max_tokens = QSpinBox()
+        self.max_tokens.setRange(128, 16384)
+        self.max_tokens.setValue(_int("num_predict", 2048, 128, 16384))
+        form.addRow("Maximum output tokens", self.max_tokens)
+        form.addRow("", caption("The longest single answer the model may write. Also caps how big one written file can be."))
+        self.context = QSpinBox()
+        self.context.setRange(2048, 32768); self.context.setSingleStep(1024)
+        self.context.setValue(_int("num_ctx", 8192, 2048, 32768))
+        form.addRow("Context window (tokens)", self.context)
+        form.addRow("", caption("How much the model can hold in mind at once. Bigger is not free — it eats RAM on this PC. 8192 is the tested size."))
+        self.num_thread = QSpinBox()
+        self.num_thread.setRange(0, 16)
+        try:
+            threads = int(settings.get("num_thread", 0) or 0)
+        except (TypeError, ValueError):
+            threads = 0
+        self.num_thread.setValue(max(0, min(16, threads)))
+        form.addRow("CPU threads (0 = auto)", self.num_thread)
+        form.addRow("", caption("How many CPU threads Ollama may use for one generation. 0 lets Ollama "
+                                "decide. On this 2-core / 4-thread PC, try 2 and 4 on the same prompt "
+                                "and compare the tok/s in the generation records to see which wins."))
+        self.min_p = QDoubleSpinBox()
+        self.min_p.setRange(-0.01, 1.0); self.min_p.setSingleStep(.01)
+        self.min_p.setDecimals(2)
+        # The bottom of the range is the UNSET sentinel, not a value:
+        # 0.0 is a real min_p (MiniCPM5's recommended setting), so
+        # "not set" cannot be 0 the way num_thread's auto is. The
+        # spin rests one step below zero showing "Not set", and
+        # values() reports None there — the send path then omits the
+        # key entirely, exactly as before this knob existed.
+        self.min_p.setSpecialValueText("Not set")
+        try:
+            saved_min_p = float(settings.get("min_p"))
+        except (TypeError, ValueError):
+            saved_min_p = None
+        if saved_min_p is None:
+            self.min_p.setValue(self.min_p.minimum())
+        else:
+            self.min_p.setValue(max(0.0, min(1.0, saved_min_p)))
+        form.addRow("Token probability floor (min_p)", self.min_p)
+        form.addRow("", caption("Ollama cuts candidate tokens whose probability falls below this "
+                                "fraction of the top token's before sampling. Most models are fine "
+                                "left Not set (their own default). MiniCPM5: set 0 to stop runaway "
+                                "repetition. Local models only — the cloud providers take no min_p."))
+        # Item #53: sub-agent limits — the caps that govern the
+        # Forge's sub-agent loops and per-result output size, in one
+        # visible place. The defaults ARE today's hard-coded
+        # constants (bench 8, tester 4, digest 24,000), so a
+        # settings file without these keys behaves exactly as
+        # before. The main turn deliberately has NO control here:
+        # the owner's law is that a turn runs until the model
+        # stops, with no cycle cap — these govern sub-agents only.
+        def _limit_value(key, default, lo, hi):
+            try:
+                value = int(settings.get(key, default) or default)
+            except (TypeError, ValueError):
+                value = default
+            return max(lo, min(hi, value))
+
+        form = form_seats
+        form.addRow("Sub-agent limits", caption(
+            "Bench/tester runs inside one turn are one-at-a-time. "
+            "The main turn itself has no cycle cap — these limits "
+            "govern sub-agents and output size only."))
+        self.bench_max_cycles = QSpinBox()
+        self.bench_max_cycles.setRange(1, 50)
+        self.bench_max_cycles.setValue(
+            _limit_value("bench_max_cycles", bench_mod.MAX_CYCLES, 1, 50))
+        form.addRow("Bench cycles per task", self.bench_max_cycles)
+        form.addRow("", caption("How many model cycles one forge-bench task may spend before "
+                                "it is scored as it stands."))
+        self.tester_max_cycles = QSpinBox()
+        self.tester_max_cycles.setRange(1, 50)
+        self.tester_max_cycles.setValue(
+            _limit_value("tester_max_cycles", 4, 1, 50))
+        form.addRow("Tester cycles per run", self.tester_max_cycles)
+        form.addRow("", caption("How many cycles one Tester Seat run may spend before it "
+                                "reports INCOMPLETE instead of a verdict."))
+        # C3 (auto-test cadence): the tester seat also runs
+        # ITSELF when enough untested change piles up — these are
+        # the pile-up sizes. The defaults are the cadence module's
+        # constants, so a settings file without these keys behaves
+        # exactly as the module documents. A plan-step boundary
+        # judges the tab sooner, at the module's fixed smaller
+        # floors (2 files / 60 lines), named in the caption.
+        self.test_cadence_files = QSpinBox()
+        self.test_cadence_files.setRange(1, 100)
+        self.test_cadence_files.setValue(
+            _limit_value("test_cadence_files",
+                         cadence_mod.FILES_THRESHOLD, 1, 100))
+        form.addRow("Auto-test after this many files change",
+                    self.test_cadence_files)
+        self.test_cadence_lines = QSpinBox()
+        self.test_cadence_lines.setRange(10, 10000)
+        self.test_cadence_lines.setSingleStep(50)
+        self.test_cadence_lines.setValue(
+            _limit_value("test_cadence_lines",
+                         cadence_mod.LINES_THRESHOLD, 10, 10000))
+        form.addRow("Auto-test after this many lines change",
+                    self.test_cadence_lines)
+        form.addRow("", caption("The Tester Seat runs on its own when untested changes since "
+                                "its last run reach either number — sooner when a plan step "
+                                "finishes (2 files / 60 lines). One-line fixes never trigger "
+                                "it. A run that doesn't pass leaves the changes on the tab "
+                                "until a passing run. 'Test now' in the command palette "
+                                "(Ctrl+K) runs the tester whenever you ask."))
+        self.tool_result_digest_chars = QSpinBox()
+        self.tool_result_digest_chars.setRange(2000, 200000)
+        self.tool_result_digest_chars.setSingleStep(1000)
+        self.tool_result_digest_chars.setValue(
+            _limit_value("tool_result_digest_chars", 24000, 2000, 200000))
+        form.addRow("Tool output kept per result (chars)",
+                    self.tool_result_digest_chars)
+        form.addRow("", caption("A tool result longer than this is kept in the model's view as a "
+                                "head + tail digest; the event log always keeps the full text."))
+        # Item #64: the parallel-turn cap lives with the other
+        # limits. 1 (the default) is the Forge's classic shape —
+        # one main turn, conversation switches refuse mid-turn.
+        # Raising it lets a turn keep running in the background
+        # when the owner switches conversations (Mission Control
+        # watches them all); a send past the cap is refused, never
+        # silently queued.
+        self.max_parallel_turns = QSpinBox()
+        self.max_parallel_turns.setRange(1, 4)
+        self.max_parallel_turns.setValue(
+            _limit_value("max_parallel_turns", 1, 1, 4))
+        form.addRow("Parallel turns", self.max_parallel_turns)
+        form.addRow("", caption("How many main turns may run at once, across conversations. "
+                                "Parallel turns share the one Ollama: two turns on the same "
+                                "model share its resident copy, different models each take "
+                                "their RAM — on a small PC they will be slower. Plan turns "
+                                "always run alone. Mission Control (View menu) shows every "
+                                "running turn and the gates waiting on you."))
+        # Item C9: the per-conversation SOFT token budget. The Turn
+        # timeline (View menu) totals each conversation's turns
+        # from the event log's own turn records; when a
+        # conversation's estimated tokens pass this total the bench
+        # notes it ONCE and the timeline flags it. Soft means soft:
+        # it never blocks a send and never stops a turn.
+        self.soft_token_budget = QSpinBox()
+        self.soft_token_budget.setRange(1_000, 100_000_000)
+        self.soft_token_budget.setSingleStep(1_000)
+        self.soft_token_budget.setValue(_limit_value(
+            "soft_token_budget", timeline_mod.DEFAULT_SOFT_TOKEN_BUDGET,
+            1_000, 100_000_000))
+        form.addRow("Conversation soft token budget",
+                    self.soft_token_budget)
+        form.addRow("", caption("A soft budget for ONE conversation, counted in the worker's "
+                                "estimated tokens across all its turns this session. Crossing it "
+                                "only flags the conversation (bench note + Turn timeline) — "
+                                "nothing is blocked, stopped, or sent anywhere."))
+        # Audit C31: the dictation microphone, picked by description.
+        # The list is what this PC reports NOW; a saved mic that is
+        # unplugged stays chosen (Dictate falls back to the system
+        # default until it returns) instead of being silently dropped.
+        # No mics at all → only "System default", disabled.
+        form = form_voice
+        self.mic = QComboBox()
+        self.mic.addItem("System default", "")
+        try:
+            mic_names = voice_mod.audio_input_descriptions()
+        except Exception:
+            # Sweep R85: a broken audio stack must not make
+            # Settings unopenable — "no microphones" is a state
+            # this dialog already renders (default only, disabled).
+            mic_names = []
+        for name in mic_names:
+            self.mic.addItem(name, name)
+        saved_mic = str(settings.get("mic_device", "") or "")
+        mic_index = self.mic.findData(saved_mic)
+        if mic_index < 0 and saved_mic:
+            self.mic.addItem(saved_mic + " (not connected)", saved_mic)
+            mic_index = self.mic.count() - 1
+        if mic_index >= 0:
+            self.mic.setCurrentIndex(mic_index)
+        self.mic.setEnabled(bool(mic_names))
+        form.addRow("Microphone", self.mic)
+        form.addRow("", caption("Which microphone 🎙 Dictate records from. \"System default\" follows "
+                                "the PC's own sound settings."))
+        form = form_seats
+        self.tester = QLineEdit(_text("tester_model", "eriktonon/bonsai-2-uncensored:2b"))
+        form.addRow("Tester model", self.tester)
+        form.addRow("", caption("Which model the Tester Seat (run_tester) uses. The fast seat belongs here."))
+        self.reviewer = QLineEdit(_text("reviewer_model", "dolphinlabs/qwen3.5-uncensored"))
+        form.addRow("Reviewer model", self.reviewer)
+        form.addRow("", caption("Which model the Reviewer Seat uses when Council is on for a turn: it critiques "
+                                "the finished turn and the driver revises once. The abliterated Qwen belongs here."))
+        self.watch = QLineEdit(_text("watch_model", ""))
+        form.addRow("Watch model", self.watch)
+        form.addRow("", caption("Which model the Watch Seat (C1 monitoring) uses when you ask it for a fix "
+                                "proposal for a run alert. It only ever PROPOSES — every proposal still "
+                                "passes your approval gate as a diff. Blank = the reviewer seat's roster "
+                                "default. Like the other governing seats, a non-roster name is refused "
+                                "to the default."))
+        form.addRow("", caption("Governing seats (reviewer, tester, SKRIBE grader) only accept roster models — "
+                                "others are refused at run time."))
+        self.roster = QTextEdit()
+        self.roster.setPlainText(_text("governing_roster", ""))
+        self.roster.setMinimumHeight(54)
+        form.addRow("Governing roster (extra models)", self.roster)
+        form.addRow("", caption("Models YOU vouch for as abliterated, one per line or comma-separated — they "
+                                "become eligible for governing seats. The built-in roster (MiniCPM Heretic, "
+                                "Erik's Bonsai, dolphin Qwen) is always eligible; stock models are not."))
+        form = form_behavior
+        self.council = QCheckBox("Start with Council on")
+        self.council.setChecked(bool(settings.get("council", False)))
+        form.addRow("Council default", self.council)
+        form.addRow("", caption("Only sets where the per-turn Council toggle (beside the mode selector) starts; "
+                                "the toggle itself has the last word each turn. Council costs one extra generation per turn."))
+        self.auto_summarize = QCheckBox("Summarize older messages when the window fills")
+        self.auto_summarize.setChecked(bool(settings.get("auto_summarize", True)))
+        form.addRow("Auto-summarize", self.auto_summarize)
+        form.addRow("", caption("When a conversation's estimated size passes ~80% of the context window "
+                                "(the CONTEXT gauge above the message box), the oldest turns fold into one "
+                                "summary before the next send, so long chats keep going instead of silently "
+                                "overflowing. The fold shows in the transcript. Off = conversations are "
+                                "never rewritten."))
+        self.fold_style = QComboBox()
+        self.fold_style.addItem("Prose summary", "prose")
+        self.fold_style.addItem("Structured scratchpad", "scratchpad")
+        _fold_style_idx = self.fold_style.findData(
+            str(settings.get("fold_style", "prose") or "prose"))
+        if _fold_style_idx >= 0:
+            self.fold_style.setCurrentIndex(_fold_style_idx)
+        form.addRow("Fold style", self.fold_style)
+        form.addRow("", caption("How the fold condenses older messages: a plain prose summary, or a "
+                                "structured scratchpad (Goal / Done / Files / Decisions / Open / Next) "
+                                "that keeps working state — what's done and what's next — explicit."))
+        self.auto_snapshot = QCheckBox("Snapshot before agent edits")
+        self.auto_snapshot.setChecked(bool(settings.get("auto_snapshot_edits", True)))
+        form.addRow("Auto-snapshot", self.auto_snapshot)
+        form.addRow("", caption("Once per turn, right before the agent's first edit lands, the Forge "
+                                "snapshots the project (git), so the whole turn can be rolled back from "
+                                "the Snapshots panel. Only projects you started tracking there are "
+                                "snapshotted — tracking is never started for you. A snapshot that fails "
+                                "never blocks an edit you approved. Off = snapshots are manual only."))
+        # Contained run (owner directive, 2026-11-09): the cage from
+        # the minimal-agent pattern — the tools may touch ONE folder.
+        self.contained_run = QCheckBox("Confine the agent to the project folder")
+        self.contained_run.setChecked(bool(settings.get("contained_run", False)))
+        form.addRow("Contained run", self.contained_run)
+        form.addRow("", caption("When on, the agent's file tools refuse any path outside the open "
+                                "project, and commands run with the project folder as their working "
+                                "directory; a command whose written text reaches outside the project "
+                                "is refused before it runs. Honest limit: this is a command filter "
+                                "at the tool layer, NOT a sandbox. It reads the paths written in "
+                                "the call — a command can still reach files anywhere on this PC, "
+                                "and the network, through anything the filter cannot see "
+                                "(variables, interpreters, paths it builds as it runs). It backs "
+                                "up your approvals; it does not replace them. "
+                                "Off = exactly as before."))
+        self.contained_docker = QCheckBox("Run contained commands in Docker when available")
+        self.contained_docker.setChecked(bool(settings.get("contained_docker", False)))
+        form.addRow("Docker cage", self.contained_docker)
+        form.addRow("", caption("Only matters when Contained run is on: commands run inside a Docker "
+                                "container with ONLY the project folder mounted (at /work) — a real "
+                                "filesystem cage: the container cannot see the rest of this PC's "
+                                "files. It still has network access; the cage is for files, not "
+                                "the network. If Docker isn't installed, contained commands just "
+                                "run locally inside the project folder and the result says so. "
+                                "Forge never requires Docker."))
+        self.contained_docker_image = QLineEdit(
+            _text("contained_docker_image", "python:3-slim"))
+        form.addRow("Docker image", self.contained_docker_image)
+        form.addRow("", caption("The container image contained commands run in when the Docker cage "
+                                "is used."))
+        # G5 (GUIFX Research Brief #1, 2026-11-09): the density
+        # toggle — a token swap over the global stylesheet (see
+        # TOKENS_COMPACT / build_style), applied by the window when
+        # this dialog saves, like every other Behavior setting.
+        self.density = QComboBox()
+        self.density.addItem("Comfortable", "comfortable")
+        self.density.addItem("Compact", "compact")
+        _density_idx = self.density.findData(
+            str(settings.get("density", "comfortable") or "comfortable"))
+        if _density_idx >= 0:
+            self.density.setCurrentIndex(_density_idx)
+        form.addRow("Interface density", self.density)
+        form.addRow("", caption("Compact tightens buttons, lists, menus and chat spacing. "
+                                "Panel layout gaps stay the same."))
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def values(self):
+        # Sweep R84: an emptied URL field saves the default, not ""
+        # — an empty base URL made every later request fail with a
+        # URL error far from its cause (the docker image below has
+        # always had this `or` guard; the URL gets the same).
+        return {"ollama_url": self.url.text().strip() or "http://127.0.0.1:11434", "system_prompt": self.prompt.toPlainText(),
+                "temperature": self.temperature.value(), "num_predict": self.max_tokens.value(),
+                "num_ctx": self.context.value(), "num_thread": self.num_thread.value(),
+                "min_p": (None if self.min_p.value() < 0
+                          else round(self.min_p.value(), 2)),
+                "bench_max_cycles": self.bench_max_cycles.value(),
+                "tester_max_cycles": self.tester_max_cycles.value(),
+                "test_cadence_files": self.test_cadence_files.value(),
+                "test_cadence_lines": self.test_cadence_lines.value(),
+                "tool_result_digest_chars": self.tool_result_digest_chars.value(),
+                "max_parallel_turns": self.max_parallel_turns.value(),
+                "soft_token_budget": self.soft_token_budget.value(),
+                "mic_device": str(self.mic.currentData() or ""),
+                "tester_model": self.tester.text().strip(),
+                "reviewer_model": self.reviewer.text().strip(),
+                "watch_model": self.watch.text().strip(),
+                "governing_roster": self.roster.toPlainText().strip(),
+                "council": self.council.isChecked(),
+                "auto_summarize": self.auto_summarize.isChecked(),
+                "fold_style": str(self.fold_style.currentData() or "prose"),
+                "auto_snapshot_edits": self.auto_snapshot.isChecked(),
+                "contained_run": self.contained_run.isChecked(),
+                "contained_docker": self.contained_docker.isChecked(),
+                "contained_docker_image": self.contained_docker_image.text().strip()
+                or "python:3-slim",
+                "density": str(self.density.currentData() or "comfortable")}
+
+
+class TranscribeThread(QThread):
+    done = Signal(str)
+    # Sweep R90: failures get their OWN signal. They used to ride
+    # `done` as a "Transcription failed …" message — and the
+    # dictation handler, seeing done, went and read the output
+    # file: on failure that file is stale or absent, so a PREVIOUS
+    # clip's transcript could be inserted as if it were the new
+    # one. done now means the transcript was written, only that.
+    failed = Signal(str)
+    # Note 25: the transcription package is missing. The window answers
+    # this by proposing the install as a maintenance command — never by
+    # printing install instructions at the owner.
+    missing_dep = Signal(str)
+    # Audit C31: a plain progress note for the log — today it carries
+    # the one-time model download, which used to happen silently
+    # inside this thread while the owner stared at "transcribing…".
+    note = Signal(str)
+
+    def __init__(self, audio_path: Path, out_path: Path, keep_model: bool = True):
+        super().__init__()
+        self.audio_path, self.out_path = audio_path, out_path
+        # Audit C31: keep_model rides the dictation_keep_model setting —
+        # the whisper model stays resident between clips instead of
+        # paying a full reload for every dictation.
+        self.keep_model = bool(keep_model)
+
+    def run(self):
+        try:
+            model = voice_mod.get_whisper_model(
+                keep=self.keep_model,
+                on_download=lambda: self.note.emit(
+                    "First use: downloading the tiny speech model (one time, ~40 MB)…"))
+            segments, _info = model.transcribe(str(self.audio_path))
+            text = " ".join(s.text for s in segments).strip()
+            self.out_path.write_text(text, encoding="utf-8")
+            self.done.emit(f"Transcribed {self.audio_path.name} → {self.out_path.name}")
+        except ImportError:
+            self.missing_dep.emit("faster_whisper")
+        except Exception as exc:
+            self.failed.emit(f"Transcription failed for {self.audio_path.name}: {exc}")
+
+
+class MaintenanceRunThread(QThread):
+    """Note 25: runs ONE owner-approved maintenance command in the
+    Forge's own terminal path, streaming output lines to the log.
+    Approval itself happens on the GUI thread before this starts."""
+    line = Signal(str)
+    finished_ok = Signal(bool, str)
+
+    def __init__(self, argv: list, cwd):
+        super().__init__()
+        self.argv = [str(a) for a in argv]
+        self.cwd = str(cwd)
+        self._proc = None
+
+    def stop(self):
+        """Sweep R91: terminate the running command. The thread had
+        no kill path at all — an owner-approved command (an
+        install, say) outlived every attempt to stop it, including
+        app shutdown, which now calls this before waiting."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    def run(self):
+        import subprocess
+        try:
+            proc = subprocess.Popen(self.argv, cwd=self.cwd,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace",
+                                    bufsize=1)
+            self._proc = proc
+            tail = ""
+            if proc.stdout is not None:
+                for raw in proc.stdout:
+                    text = raw.rstrip("\n")
+                    if text.strip():
+                        tail = text
+                        self.line.emit(text)
+                proc.stdout.close()
+            code = proc.wait()
+            self.finished_ok.emit(code == 0,
+                                  f"exit {code}" + (f" — last line: {tail}" if tail else ""))
+        except Exception as exc:
+            self.finished_ok.emit(False, f"could not run: {exc}")
+
+
+def _copy_tree(src, dest, dirs_exist_ok=False):
+    """The one copytree call behind clone/promote (audit B16):
+    factored at module level so CopyTreeThread can run it off the
+    GUI thread and tests can stand in for it. The ignore set is the
+    one clone/promote have always used."""
+    ignore = shutil.ignore_patterns(".venv", "__pycache__", "*.pyc")
+    shutil.copytree(src, dest, dirs_exist_ok=dirs_exist_ok, ignore=ignore)
+
+
+class CopyTreeThread(QThread):
+    """Audit B16: clone/promote copies run here, off the GUI thread —
+    a whole-project copytree used to freeze the window until it
+    finished. Emits done() / failed(why); the window owns the log
+    lines, records, and dialogs that follow either way."""
+
+    done = Signal()
+    failed = Signal(str)
+
+    def __init__(self, src, dest, dirs_exist_ok=False):
+        super().__init__()
+        self.src = Path(src)
+        self.dest = Path(dest)
+        self.dirs_exist_ok = dirs_exist_ok
+
+    def run(self):
+        try:
+            _copy_tree(self.src, self.dest, self.dirs_exist_ok)
+            self.done.emit()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ModelsThread(QThread):
+    """Audit B16: the Ollama /api/tags fetch behind refresh_models,
+    off the UI thread — a dead or slow Ollama (the fetch carries an
+    8 s timeout) must not delay the window's first paint or hitch a
+    manual refresh. Emits done(models) / failed(message); the window
+    applies either outcome through the same two methods the
+    synchronous refresh_models uses, so the combo ends up identical."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, client):
+        super().__init__()
+        self.client = client
+
+    def run(self):
+        try:
+            self.done.emit(self.client.tags())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class SummarizeThread(QThread):
+    """Note 14 #3: ONE summary generation on the session model with
+    tools off, run off the UI thread — a 2B model summarizing a long
+    history on this CPU takes a while, and the app must never freeze
+    doing it (the council review's shape, minus the seat machinery).
+    Emits done(summary) / failed(why) / cancelled(); the window owns
+    every decision about what happens with the result."""
+
+    done = Signal(str)
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, client, model: str, messages: list, options: dict):
+        super().__init__()
+        self.client = client
+        self.model = model
+        self.messages = messages
+        self.options = options
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        try:
+            chunks = []
+            # Sweep R4: thread this thread's own cancel event into
+            # the stream when the client accepts it, so Stop reaches
+            # a summary generation stalled mid-stream instead of
+            # waiting for the next event that may never come. The
+            # capability ask keeps fixed-signature test doubles on
+            # the legacy call, byte-for-byte.
+            stream_kwargs = {}
+            if client_accepts_cancel(self.client):
+                stream_kwargs["cancel_event"] = self._cancel
+            for event in self.client.chat_stream(self.model, self.messages,
+                                                 self.options, [],
+                                                 **stream_kwargs):
+                if self._cancel.is_set():
+                    self.cancelled.emit()
+                    return
+                content = event.get("message", {}).get("content", "")
+                if content:
+                    chunks.append(content)
+            if self._cancel.is_set():
+                self.cancelled.emit()
+                return
+            text = "".join(chunks).strip()
+            if not text:
+                self.failed.emit("the model returned an empty summary")
+                return
+            self.done.emit(text)
+        except Exception as exc:
+            if self._cancel.is_set():
+                self.cancelled.emit()
+                return
+            self.failed.emit(str(exc)[:300])
+
+
+class ProviderChatThread(QThread):
+    """Provider chat: ONE hosted-model generation with tools off,
+    streamed chunk by chunk — SummarizeThread's shape, kept alive
+    per chunk so the reply types itself into the ProviderChatWindow.
+    Emits chunk(text) as content arrives and done(full_text) at the
+    end (a Stop keeps whatever partial text already arrived); the
+    window owns every decision about what happens with the text."""
+
+    chunk = Signal(str)
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, client, model: str, messages: list):
+        super().__init__()
+        self.client = client
+        self.model = model
+        self.messages = messages
+        self._cancel = threading.Event()
+
+    def cancel(self):
+        self._cancel.set()
+
+    def run(self):
+        chunks = []
+        try:
+            # Sweep R4 (tree seam, adopted at the PC merge):
+            # thread this thread's own cancel event into the
+            # stream when the client accepts it, so Stop
+            # reaches a generation stalled mid-stream;
+            # fixed-signature test doubles keep the legacy
+            # call, byte-for-byte (SummarizeThread's shape).
+            stream_kwargs = {}
+            if client_accepts_cancel(self.client):
+                stream_kwargs["cancel_event"] = self._cancel
+            for event in self.client.chat_stream(self.model, self.messages,
+                                                 {}, [],
+                                                 **stream_kwargs):
+                if self._cancel.is_set():
+                    break
+                content = event.get("message", {}).get("content", "")
+                if content:
+                    chunks.append(content)
+                    self.chunk.emit(content)
+            self.done.emit("".join(chunks))
+        except Exception as exc:
+            if self._cancel.is_set():
+                self.done.emit("".join(chunks))
+                return
+            self.failed.emit(str(exc)[:300])
+
+
+class TesterRunThread(QThread):
+    """C3 (auto-test cadence): ONE tester-seat run — the existing
+    run_tester plugin handler, called with a task the shell wrote —
+    off the GUI thread: a tester run takes minutes on this CPU and
+    the bench must never freeze for it. Emits done(report) with the
+    handler's own report text, or failed(why); the window owns the
+    verdict bookkeeping (what a pass clears, what a fail leaves
+    owed). The handler brings its own caps and cancel plumbing —
+    this thread adds nothing but the thread."""
+
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, handler, task: str):
+        super().__init__()
+        self.handler = handler
+        self.task = task
+
+    def run(self):
+        try:
+            report = self.handler({"task": self.task})
+        except Exception as exc:
+            self.failed.emit(str(exc)[:300])
+            return
+        self.done.emit(str(report))
+
+
+class BenchThread(QThread):
+    """Audit D37: one forge-bench run, off the GUI thread — fifteen
+    tasks against a 2B model on this CPU takes minutes, and the app
+    must never freeze doing it. Emits task_done(record) as each task
+    is scored and bench_done(report) at the end (or failed(why));
+    the dialog owns the rows, the scorecard pane, and the saved
+    report. The owner's Stop rides the cancel event into the runner,
+    which checks it between streamed events and before every tool
+    execution."""
+
+    task_done = Signal(object)
+    bench_done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, model: str, client, disabled_tools=None,
+                 bench_max_cycles=None):
+        super().__init__()
+        self.model = model
+        self.client = client
+        # Item #52: the owner's kill switch applies to the bench
+        # belt too — the dialog hands the live setting through.
+        self.disabled_tools = list(disabled_tools or [])
+        # Item #53: the owner's per-task cycle cap rides through the
+        # same way (settings `bench_max_cycles`); None keeps the
+        # bench module's own default.
+        self.bench_max_cycles = bench_max_cycles
+        self.cancel_event = threading.Event()
+
+    def stop(self):
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            report = bench_mod.run_bench(
+                self.model, self.client,
+                cancel_event=self.cancel_event,
+                on_task=self.task_done.emit,
+                disabled_tools=self.disabled_tools,
+                max_cycles=self.bench_max_cycles)
+            self.bench_done.emit(report)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class GitThread(QThread):
+    """Item #51: one commit or push for the run surface's git
+    panel, off the GUI thread — a push can block on the network
+    for its full timeout, and even a local commit must never hitch
+    the window. The action and its inputs ride in; done(ok, output)
+    carries gitpanel's result back verbatim, and the panel shows
+    that output whether it succeeded or not.
+
+    Sweep R120: stage / unstage / init ride this thread too — they
+    used to run synchronously on the GUI thread inside the Run
+    window (a slow disk or a big index froze the whole bench), while
+    commit/push right beside them were threaded."""
+
+    done = Signal(bool, str)
+
+    def __init__(self, action: str, root, message: str = "", path: str = ""):
+        super().__init__()
+        self.action = action            # "commit" | "push" | "stage" | "unstage" | "init"
+        self.root = root
+        self.message = message
+        self.path = path
+
+    def run(self):
+        try:
+            if self.action == "commit":
+                ok, out = gitpanel_mod.commit(self.root, self.message)
+            elif self.action == "push":
+                ok, out = gitpanel_mod.push(self.root)
+            elif self.action == "stage":
+                ok, out = gitpanel_mod.stage(self.root, self.path)
+            elif self.action == "unstage":
+                ok, out = gitpanel_mod.unstage(self.root, self.path)
+            elif self.action == "init":
+                try:
+                    snap_mod.init_repo(self.root)
+                    ok, out = True, ""
+                except snap_mod.SnapshotError as exc:
+                    ok, out = False, str(exc)
+            else:
+                # Sweep R93: anything that is not "commit" used to
+                # fall into the else and become a network PUSH —
+                # a typo'd action must never publish.
+                ok, out = False, f"unknown git action: {self.action}"
+        except Exception as exc:  # gitpanel returns data; belt and braces
+            ok, out = False, str(exc)
+        self.done.emit(ok, out)
+
+
+class GitScanThread(QThread):
+    """The run window's git READS, off the GUI thread (owner upgrade,
+    2026-11-08: the run window must work properly — the U2 defect was
+    refresh_git() running repo_state + changes synchronously, several
+    git spawns per call, several calls per window open, all on the
+    GUI thread: opening the window hitched the whole bench, worst on
+    the owner's HDD machine). One thread either scans (repo_state +
+    changes) or loads one change's diff; the window coalesces repeat
+    requests and discards results whose project is no longer current,
+    so a stale scan can never paint the wrong project's changes."""
+
+    scanned = Signal(str, str, list)   # root, state, changes
+    diff_loaded = Signal(str, str)     # path, diff text
+
+    def __init__(self, root, change=None):
+        super().__init__()
+        self.root = root
+        self.change = change
+
+    def run(self):
+        try:
+            if self.change is not None:
+                text = gitpanel_mod.diff_for(self.root, self.change)
+                self.diff_loaded.emit(self.change.get("path", ""), text)
+            else:
+                state = gitpanel_mod.repo_state(self.root)
+                changes = (gitpanel_mod.changes(self.root)
+                           if state == "ok" else [])
+                self.scanned.emit(self.root, state, changes)
+        except Exception as exc:  # gitpanel returns data; belt and braces
+            if self.change is not None:
+                self.diff_loaded.emit(self.change.get("path", ""), str(exc))
+            else:
+                self.scanned.emit(self.root, "no_git", [])
+
+
+class AccordionSection(QWidget):
+    """Note 24: a titled section whose body folds away on a header click.
+
+    The header is a flat button styled like the old section labels. An
+    optional *pinned* widget sits between header and body and stays
+    visible when folded — the Conversations section uses it so folding
+    the chat list can never hide New Chat (owner's amendment)."""
+
+    toggled = Signal(str, bool)
+
+    def __init__(self, key: str, title: str, parent=None):
+        super().__init__(parent)
+        self.key = key
+        self.title_text = title
+        self._open = True
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        self.header = QPushButton()
+        self.header.setObjectName("accordion")
+        self.header.setCursor(Qt.PointingHandCursor)
+        self.header.clicked.connect(lambda: self.set_open(not self._open, notify=True))
+        lay.addWidget(self.header)
+        self.body = QWidget()
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(0, 0, 0, 0); self.body_layout.setSpacing(6)
+        lay.addWidget(self.body, 1)
+        self._sync_header()
+
+    def set_pinned(self, widget):
+        """Insert a widget between header and body; never folded away."""
+        self.layout().insertWidget(1, widget)
+
+    def _sync_header(self):
+        self.header.setText(("▾  " if self._open else "▸  ") + self.title_text)
+
+    def set_open(self, open_, notify=False):
+        self._open = bool(open_)
+        self.body.setVisible(self._open)
+        self._sync_header()
+        if notify:
+            self.toggled.emit(self.key, self._open)
+
+    def is_open(self):
+        return self._open
+
+
+_UI_PREVIEW_CLASSES = {}
+
+
+def _apply_builder_text(widget, entry):
+    """Give a real widget its design text/value — the same per-type
+    semantics forge/uibuilder.py's exporter emits (group box title,
+    combo items, numeric values, frame shapes, plain text)."""
+    wtype, text = entry["type"], entry["text"]
+    if wtype == "svg":
+        widget.load(QByteArray(str(entry.get("svg") or "").encode("utf-8")))
+    elif wtype == "text_edit":
+        if text:
+            widget.setPlainText(text)
+    elif wtype == "group_box":
+        if text:
+            widget.setTitle(text)
+    elif wtype == "combo_box":
+        items = uib_mod.combo_items(text)
+        if items:
+            widget.addItems(items)
+    elif wtype in ("spin_box", "slider", "progress_bar"):
+        value = uib_mod._int_value(text)
+        if value is not None:
+            widget.setValue(value)
+    elif wtype in ("h_line", "v_line"):
+        widget.setFrameShape(QFrame.Shape.HLine if wtype == "h_line"
+                             else QFrame.Shape.VLine)
+        widget.setFrameShadow(QFrame.Shadow.Sunken)
+    elif text:
+        widget.setText(text)
+
+
+def _apply_builder_style(widget, entry):
+    """Apply a design entry's styling to a real widget — the shared
+    stylesheet plus a QFont built from the model's font spec, the
+    same two things the generated file applies."""
+    css = uib_mod.widget_stylesheet(entry)
+    if css:
+        widget.setStyleSheet(css)
+    spec = uib_mod.widget_font(entry)
+    if spec is not None:
+        font = QFont()
+        if spec["family"]:
+            font.setFamily(spec["family"])
+        if spec["size"]:
+            font.setPointSize(spec["size"])
+        if spec["bold"]:
+            font.setBold(True)
+        if spec["italic"]:
+            font.setItalic(True)
+        widget.setFont(font)
+
+
+def build_ui_preview(design, parent=None):
+    """A REAL window from a builder design (Note 13B): actual PySide6
+    widgets with the design's types, names, text and geometry — the
+    same construction the exported file performs. Fields can be typed
+    in and buttons clicked; no logic is wired, it is a layout."""
+    if not _UI_PREVIEW_CLASSES:
+        _UI_PREVIEW_CLASSES.update({
+            "QLabel": QLabel, "QPushButton": QPushButton,
+            "QLineEdit": QLineEdit, "QTextEdit": QTextEdit,
+            "QCheckBox": QCheckBox, "QRadioButton": QRadioButton,
+            "QComboBox": QComboBox, "QSpinBox": QSpinBox,
+            "QSlider": QSlider, "QProgressBar": QProgressBar,
+            "QGroupBox": QGroupBox, "QFrame": QFrame})
+        try:
+            from PySide6.QtSvgWidgets import QSvgWidget
+            _UI_PREVIEW_CLASSES["QSvgWidget"] = QSvgWidget
+        except Exception:
+            pass  # no QtSvgWidgets: svg entries are skipped below
+    design = uib_mod.sanitize_design(design) or uib_mod.new_design()
+    win = QWidget(parent)
+    win.setWindowTitle(design["title"])
+    win.resize(design["width"], design["height"])
+    for entry in design["widgets"]:
+        cls = _UI_PREVIEW_CLASSES.get(uib_mod.WIDGET_TYPES[entry["type"]][0])
+        if cls is None:
+            continue
+        widget = cls(win)
+        widget.setObjectName(entry["name"])
+        _apply_builder_text(widget, entry)
+        widget.setGeometry(entry["x"], entry["y"], entry["w"], entry["h"])
+        _apply_builder_style(widget, entry)
+        widget.show()
+        setattr(win, entry["name"], widget)
+    return win
+
+
+class BuilderCanvas(QWidget):
+    """The Note 13B design surface: the design painted as boxes,
+    each in its own styling (colors, font, border from the entry's
+    style dict). Pick a part in the palette, click here to place it;
+    press-drag a box to move it; drag any of the selected box's
+    eight handles (edges and corners) to resize it; Delete removes
+    the selected box. The model lives in forge/uibuilder.py — this
+    widget only paints it and reports gestures back to the dialog."""
+
+    changed = Signal()
+    selection_changed = Signal()
+
+    HANDLE_SIZE = 10       # px square at each of the 8 handle spots
+    _PEN_STYLES = {"solid": Qt.SolidLine, "dashed": Qt.DashLine,
+                   "dotted": Qt.DotLine}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.design = uib_mod.new_design()
+        self.armed = None      # widget type waiting to be placed
+        self.selected = None   # name of the selected widget
+        self._drag = None      # (name, grab dx, grab dy) while dragging
+        self._resize = None    # (name, handle, press x, press y,
+                               #  start x, start y, start w, start h)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._sync_size()
+
+    def _sync_size(self):
+        self.setFixedSize(self.design["width"], self.design["height"])
+
+    def set_design(self, design):
+        self.design = design
+        self.selected = None
+        self._drag = None
+        self._resize = None
+        self._sync_size()
+        self.update()
+        self.selection_changed.emit()
+
+    def resize_design(self):
+        """The window size changed: re-clamp every widget inside it."""
+        for entry in list(self.design["widgets"]):
+            uib_mod.move_widget(self.design, entry["name"],
+                                entry["x"], entry["y"])
+        self._sync_size()
+        self.update()
+
+    def arm(self, wtype):
+        self.armed = wtype
+
+    def selected_entry(self):
+        if self.selected is None:
+            return None
+        return uib_mod.find_widget(self.design, self.selected)
+
+    def _on_resize_handle(self, pos):
+        """(entry, handle) when *pos* lands on one of the selected
+        box's 8 resize handles (the pure hit-test lives in
+        forge/uibuilder.py), else None. Only the selected box has
+        handles, so a press anywhere else — including another box's
+        corner — is an ordinary press."""
+        entry = self.selected_entry()
+        if entry is None:
+            return None
+        handle = uib_mod.handle_at(entry, pos.x(), pos.y(),
+                                   self.HANDLE_SIZE)
+        if handle is None:
+            return None
+        return entry, handle
+
+    def _svg_renderer(self, entry):
+        """A valid QSvgRenderer for an svg entry's payload, or None —
+        no QtSvg in this PySide6 build, a missing payload, or bytes
+        QtSvg rejects all mean the entry paints as a placeholder box
+        instead of a picture."""
+        if QSvgRenderer is None:
+            return None
+        payload = entry.get("svg")
+        if not isinstance(payload, str) or not payload.strip():
+            return None
+        # Sweep R78: paintEvent asks for a renderer per SVG entry
+        # per repaint, and construction is a full XML parse — the
+        # same payload used to be re-parsed on every paint. Cache
+        # by payload (an edited payload is a new key and parses
+        # fresh); the cache is small and resets when it grows.
+        cache = getattr(self, "_svg_cache", None)
+        if cache is None:
+            cache = self._svg_cache = {}
+        if payload in cache:
+            return cache[payload]
+        renderer = QSvgRenderer(QByteArray(payload.encode("utf-8")))
+        result = renderer if renderer.isValid() else None
+        if len(cache) >= 32:
+            cache.clear()
+        cache[payload] = result
+        return result
+
+    def delete_selected(self):
+        if self.selected is None:
+            return False
+        gone = uib_mod.remove_widget(self.design, self.selected)
+        if gone:
+            self.selected = None
+            self.update()
+            self.changed.emit()
+            self.selection_changed.emit()
+        return gone
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        pos = event.position().toPoint()
+        if self.armed:
+            entry = uib_mod.add_widget(self.design, self.armed,
+                                       pos.x(), pos.y())
+            self.armed = None
+            if entry is not None:
+                self.selected = entry["name"]
+                self.changed.emit()
+                self.selection_changed.emit()
+            self.update()
+            return
+        hit_handle = self._on_resize_handle(pos)
+        if hit_handle is not None:
+            entry, handle = hit_handle
+            self._resize = (entry["name"], handle, pos.x(), pos.y(),
+                            entry["x"], entry["y"],
+                            entry["w"], entry["h"])
+            self.update()
+            return
+        hit = uib_mod.widget_at(self.design, pos.x(), pos.y())
+        self.selected = hit["name"] if hit else None
+        if hit:
+            self._drag = (hit["name"], pos.x() - hit["x"], pos.y() - hit["y"])
+        self.selection_changed.emit()
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        pos = event.position().toPoint()
+        if self._resize is not None:
+            name, handle, press_x, press_y, sx, sy, sw, sh = self._resize
+            rect = uib_mod.drag_rect(sx, sy, sw, sh, handle,
+                                     pos.x() - press_x,
+                                     pos.y() - press_y)
+            uib_mod.set_geometry(self.design, name, *rect)
+            self.update()
+            return
+        if self._drag is None:
+            return
+        name, dx, dy = self._drag
+        uib_mod.move_widget(self.design, name, pos.x() - dx, pos.y() - dy)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self._resize is not None:
+            self._resize = None
+            self.changed.emit()
+        elif self._drag is not None:
+            self._drag = None
+            self.changed.emit()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete and self.selected is not None:
+            self.delete_selected()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        base_font = painter.font()
+        painter.fillRect(self.rect(), QColor("#312c25"))
+        painter.setPen(QPen(QColor("#665b4a"), 1))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        for entry in self.design["widgets"]:
+            rect = (entry["x"], entry["y"], entry["w"], entry["h"])
+            is_sel = entry["name"] == self.selected
+            style = uib_mod.widget_style(entry)
+            rendered = False
+            if entry["type"] == "svg":
+                renderer = self._svg_renderer(entry)
+                if renderer is not None:
+                    if style["bg"]:
+                        painter.fillRect(*rect, QColor(style["bg"]))
+                    # The renderer's default KeepAspectRatio letterboxes
+                    # the picture inside the widget's rect.
+                    renderer.render(painter, QRectF(*rect))
+                    rendered = True
+            if not rendered:
+                painter.fillRect(*rect, QColor(style["bg"] or "#3f382e"))
+            # The widget's own border when it has one; the plain box
+            # outline (amber when selected) stands in when it hasn't,
+            # and still marks the selection over a styled border.
+            has_border = (style["border_width"] > 0
+                          and style["border_style"] != "none")
+            if has_border:
+                painter.setPen(QPen(
+                    QColor(style["border_color"]
+                           or uib_mod.BORDER_FALLBACK_COLOR),
+                    style["border_width"],
+                    self._PEN_STYLES[style["border_style"]]))
+                painter.drawRect(entry["x"], entry["y"],
+                                 entry["w"] - 1, entry["h"] - 1)
+            if not has_border or is_sel:
+                painter.setPen(QPen(QColor("#e8a33d" if is_sel else "#81735d"),
+                                    2 if is_sel else 1))
+                painter.drawRect(entry["x"], entry["y"],
+                                 entry["w"] - 1, entry["h"] - 1)
+            if not rendered:
+                if entry["type"] in ("h_line", "v_line"):
+                    painter.setPen(QPen(
+                        QColor(style["fg"] or "#b8ac9a"), 2))
+                    if entry["type"] == "h_line":
+                        mid = entry["y"] + entry["h"] // 2
+                        painter.drawLine(entry["x"] + 2, mid,
+                                         entry["x"] + entry["w"] - 2, mid)
+                    else:
+                        mid = entry["x"] + entry["w"] // 2
+                        painter.drawLine(mid, entry["y"] + 2,
+                                         mid, entry["y"] + entry["h"] - 2)
+                else:
+                    painter.setPen(QPen(QColor("#b8ac9a"), 1))
+                    painter.drawText(entry["x"] + 4, entry["y"] + 12,
+                                     entry["type"])
+                    spec = uib_mod.widget_font(entry)
+                    if spec is not None:
+                        font = QFont()
+                        if spec["family"]:
+                            font.setFamily(spec["family"])
+                        if spec["size"]:
+                            font.setPointSize(spec["size"])
+                        if spec["bold"]:
+                            font.setBold(True)
+                        if spec["italic"]:
+                            font.setItalic(True)
+                        painter.setFont(font)
+                    painter.setPen(QPen(
+                        QColor(style["fg"] or "#eae6df"), 1))
+                    painter.drawText(entry["x"] + 6, entry["y"] + 14,
+                                     entry["w"] - 12, entry["h"] - 18,
+                                     Qt.AlignLeft | Qt.AlignBottom,
+                                     "SVG" if entry["type"] == "svg"
+                                     else entry["text"] or entry["name"])
+                    painter.setFont(base_font)
+            if is_sel:
+                for hx, hy, hw, hh in uib_mod.handle_rects(
+                        entry, self.HANDLE_SIZE).values():
+                    painter.fillRect(hx, hy, hw, hh, QColor("#e8a33d"))
+        painter.end()
+
+
+class UiBuilderDialog(QDialog):
+    """Note 13B: lay out a window visually, preview it as a real
+    window, export it as a runnable PySide6 file, and save the design
+    itself as a .json in the project. A dialog, not a dock — the
+    bench's docks are bottom strips sized for text panes, and a
+    design canvas needs a window of its own."""
+
+    _PALETTE = (("label", "Label"), ("button", "Button"),
+                ("line_edit", "Line edit"), ("text_edit", "Text edit"),
+                ("checkbox", "Checkbox"), ("radio_button", "Radio button"),
+                ("combo_box", "Combo box"), ("spin_box", "Spin box"),
+                ("slider", "Slider"), ("progress_bar", "Progress bar"),
+                ("group_box", "Group box"), ("h_line", "H line"),
+                ("v_line", "V line"))
+
+    def __init__(self, parent, workspace):
+        super().__init__(parent)
+        self.setWindowTitle("UI Builder — lay out a window")
+        self.resize(980, 700)
+        self.workspace = str(workspace)
+        self.design = uib_mod.new_design()
+        self._preview = None
+        lay = QVBoxLayout(self)
+        head = QLabel("UI BUILDER — LAYOUT"); head.setObjectName("section")
+        lay.addWidget(head)
+        caption = QLabel("Layout only: the preview is a real window — its fields "
+                         "and buttons work as widgets, but no logic is wired. "
+                         "Export writes a standalone .py that runs.")
+        caption.setObjectName("muted"); caption.setWordWrap(True)
+        lay.addWidget(caption)
+        meta = QHBoxLayout()
+        meta.addWidget(QLabel("Window title"))
+        self.title_edit = QLineEdit(self.design["title"])
+        self.title_edit.textChanged.connect(self._title_changed)
+        meta.addWidget(self.title_edit, 1)
+        meta.addWidget(QLabel("Width"))
+        self.width_spin = QSpinBox(); self.width_spin.setRange(80, 4000)
+        self.width_spin.setValue(self.design["width"])
+        self.width_spin.valueChanged.connect(self._size_changed)
+        meta.addWidget(self.width_spin)
+        meta.addWidget(QLabel("Height"))
+        self.height_spin = QSpinBox(); self.height_spin.setRange(80, 4000)
+        self.height_spin.setValue(self.design["height"])
+        self.height_spin.valueChanged.connect(self._size_changed)
+        meta.addWidget(self.height_spin)
+        lay.addLayout(meta)
+        body = QHBoxLayout()
+        palette_box = QVBoxLayout()
+        palette_box.addWidget(QLabel("PARTS"))
+        self._palette_group = QButtonGroup(self)
+        self._palette_group.setExclusive(True)
+        self._palette_btns = {}
+        for wtype, label in self._PALETTE:
+            btn = QPushButton(label); btn.setCheckable(True)
+            btn.clicked.connect(lambda _checked=False, t=wtype: self._palette_picked(t))
+            self._palette_group.addButton(btn)
+            self._palette_btns[wtype] = btn
+            palette_box.addWidget(btn)
+        self.svg_import_btn = QPushButton("Import SVG…")
+        self.svg_import_btn.clicked.connect(self._import_svg)
+        palette_box.addWidget(self.svg_import_btn)
+        palette_box.addWidget(QLabel("Pick a part,\nthen click\nthe canvas."))
+        palette_box.addStretch()
+        body.addLayout(palette_box)
+        scroll = QScrollArea(); scroll.setWidgetResizable(False)
+        self.canvas = BuilderCanvas()
+        scroll.setWidget(self.canvas)
+        body.addWidget(scroll, 1)
+        lay.addLayout(body, 1)
+        props = QHBoxLayout()
+        props.addWidget(QLabel("Selected"))
+        self.prop_name = QLineEdit(); self.prop_name.setPlaceholderText("name")
+        self.prop_name.setEnabled(False)
+        self.prop_name.editingFinished.connect(self._name_edited)
+        props.addWidget(self.prop_name)
+        self.prop_text = QLineEdit(); self.prop_text.setPlaceholderText("displayed text")
+        self.prop_text.setEnabled(False)
+        self.prop_text.textChanged.connect(self._text_edited)
+        props.addWidget(self.prop_text, 1)
+        self.prop_delete = QPushButton("✕ Delete")
+        self.prop_delete.setEnabled(False)
+        self.prop_delete.clicked.connect(self.canvas.delete_selected)
+        props.addWidget(self.prop_delete)
+        lay.addLayout(props)
+        lay.addLayout(self._build_style_inspector())
+        self.builder_status = QLabel(""); self.builder_status.setObjectName("muted")
+        lay.addWidget(self.builder_status)
+        buttons = QHBoxLayout()
+        new_btn = QPushButton("New"); new_btn.clicked.connect(self._new_design)
+        buttons.addWidget(new_btn)
+        open_btn = QPushButton("Open design…"); open_btn.clicked.connect(self._open_design)
+        buttons.addWidget(open_btn)
+        save_btn = QPushButton("Save design…"); save_btn.clicked.connect(self._save_design)
+        buttons.addWidget(save_btn)
+        buttons.addStretch()
+        preview_btn = QPushButton("Preview"); preview_btn.clicked.connect(self.show_preview)
+        buttons.addWidget(preview_btn)
+        export_btn = QPushButton("Export .py…"); export_btn.setObjectName("primary")
+        export_btn.clicked.connect(self._export_code)
+        buttons.addWidget(export_btn)
+        close_btn = QPushButton("Close"); close_btn.clicked.connect(self.accept)
+        buttons.addWidget(close_btn)
+        lay.addLayout(buttons)
+        self.canvas.changed.connect(self._on_canvas_changed)
+        self.canvas.selection_changed.connect(self._on_selection_changed)
+        self.canvas.set_design(self.design)
+        self._refresh_status()
+
+    # ---------- style inspector ----------
+    def _build_style_inspector(self):
+        """The per-widget properties rows: colors (text, background,
+        border), font (family, size, bold, italic), border (width,
+        style) and padding. Every control writes straight into the
+        selected entry's style dict through the model, and the
+        canvas repaints — the styling is visible as it is picked."""
+        outer = QVBoxLayout()
+        self._style_controls = []
+
+        def color_field(label, key):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            swatch = QPushButton("default")
+            swatch.setEnabled(False)
+            swatch.clicked.connect(
+                lambda _checked=False, k=key: self._pick_color(k))
+            row.addWidget(swatch)
+            clear = QPushButton("✕")
+            clear.setEnabled(False)
+            clear.setToolTip(f"Clear the {label.lower()} color")
+            clear.clicked.connect(
+                lambda _checked=False, k=key: self._apply_style(**{k: ""}))
+            row.addWidget(clear)
+            self._style_controls += [swatch, clear]
+            return row, swatch
+
+        colors = QHBoxLayout()
+        row, self.style_fg_btn = color_field("Text", "fg")
+        colors.addLayout(row)
+        row, self.style_bg_btn = color_field("Background", "bg")
+        colors.addLayout(row)
+        row, self.style_border_color_btn = color_field("Border", "border_color")
+        colors.addLayout(row)
+        colors.addStretch()
+        outer.addLayout(colors)
+
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Font"))
+        self.style_family = QComboBox(); self.style_family.setEditable(True)
+        self.style_family.addItems(
+            ["", "Arial", "Courier New", "Georgia", "Helvetica",
+             "Monospace", "Sans Serif", "Serif", "Times New Roman",
+             "Verdana"])
+        self.style_family.setEnabled(False)
+        self.style_family.currentTextChanged.connect(
+            lambda text: self._apply_style(font_family=text.strip()))
+        font_row.addWidget(self.style_family, 1)
+        self.style_size = QSpinBox()
+        self.style_size.setRange(0, uib_mod.MAX_FONT_SIZE)
+        self.style_size.setSpecialValueText("default")
+        self.style_size.setEnabled(False)
+        self.style_size.valueChanged.connect(
+            lambda v: self._apply_style(font_size=v))
+        font_row.addWidget(self.style_size)
+        self.style_bold = QPushButton("B"); self.style_bold.setCheckable(True)
+        self.style_bold.setEnabled(False)
+        self.style_bold.toggled.connect(
+            lambda on: self._apply_style(bold=on))
+        font_row.addWidget(self.style_bold)
+        self.style_italic = QPushButton("I"); self.style_italic.setCheckable(True)
+        self.style_italic.setEnabled(False)
+        self.style_italic.toggled.connect(
+            lambda on: self._apply_style(italic=on))
+        font_row.addWidget(self.style_italic)
+        font_row.addWidget(QLabel("Padding"))
+        self.style_padding = QSpinBox()
+        self.style_padding.setRange(0, uib_mod.MAX_PADDING)
+        self.style_padding.setEnabled(False)
+        self.style_padding.valueChanged.connect(
+            lambda v: self._apply_style(padding=v))
+        font_row.addWidget(self.style_padding)
+        self._style_controls += [self.style_family, self.style_size,
+                                 self.style_bold, self.style_italic,
+                                 self.style_padding]
+        outer.addLayout(font_row)
+
+        border_row = QHBoxLayout()
+        border_row.addWidget(QLabel("Border width"))
+        self.style_border_width = QSpinBox()
+        self.style_border_width.setRange(0, uib_mod.MAX_BORDER_WIDTH)
+        self.style_border_width.setEnabled(False)
+        self.style_border_width.valueChanged.connect(
+            lambda v: self._apply_style(border_width=v))
+        border_row.addWidget(self.style_border_width)
+        border_row.addWidget(QLabel("Border style"))
+        self.style_border_style = QComboBox()
+        self.style_border_style.addItems(list(uib_mod.BORDER_STYLES))
+        self.style_border_style.setEnabled(False)
+        self.style_border_style.currentTextChanged.connect(
+            lambda text: self._apply_style(border_style=text))
+        border_row.addWidget(self.style_border_style)
+        border_row.addStretch()
+        self._style_controls += [self.style_border_width,
+                                 self.style_border_style]
+        outer.addLayout(border_row)
+        return outer
+
+    def _pick_color(self, key):
+        entry = self.canvas.selected_entry()
+        if entry is None:
+            return
+        current = uib_mod.widget_style(entry)[key]
+        color = QColorDialog.getColor(
+            QColor(current) if current else QColor("#ffffff"),
+            self, "Pick a color")
+        if color.isValid():
+            self._apply_style(**{key: color.name()})
+
+    def _apply_style(self, **changes):
+        entry = self.canvas.selected_entry()
+        if entry is None:
+            return
+        if uib_mod.set_widget_style(self.design, entry["name"],
+                                     **changes) is None:
+            self._refresh_status("style refused — invalid value")
+            self._refresh_style_controls()
+            return
+        self.canvas.update()
+        self._refresh_style_controls()
+
+    def _refresh_style_controls(self):
+        entry = self.canvas.selected_entry()
+        style = (uib_mod.widget_style(entry) if entry is not None
+                 else uib_mod.default_style())
+        for ctl in self._style_controls:
+            ctl.setEnabled(entry is not None)
+        for btn, key in ((self.style_fg_btn, "fg"),
+                         (self.style_bg_btn, "bg"),
+                         (self.style_border_color_btn, "border_color")):
+            value = style[key]
+            btn.setText(value or "default")
+            btn.setStyleSheet(
+                f"background-color: {value};" if value else "")
+        for ctl, apply in (
+                (self.style_family,
+                 lambda: self.style_family.setCurrentText(
+                     style["font_family"])),
+                (self.style_size,
+                 lambda: self.style_size.setValue(style["font_size"])),
+                (self.style_bold,
+                 lambda: self.style_bold.setChecked(style["bold"])),
+                (self.style_italic,
+                 lambda: self.style_italic.setChecked(style["italic"])),
+                (self.style_padding,
+                 lambda: self.style_padding.setValue(style["padding"])),
+                (self.style_border_width,
+                 lambda: self.style_border_width.setValue(
+                     style["border_width"])),
+                (self.style_border_style,
+                 lambda: self.style_border_style.setCurrentText(
+                     style["border_style"]))):
+            ctl.blockSignals(True)
+            apply()
+            ctl.blockSignals(False)
+
+    # ---------- palette / meta ----------
+    # ---------- svg import ----------
+    def import_svg_from(self, path) -> bool:
+        """Import an .svg file as a new widget carrying the file's
+        text as its payload. Refusals (unreadable, not an SVG, over
+        the size cap) land in the status line and add nothing."""
+        try:
+            # Sweep R79: the read itself is capped — the size check
+            # below used to run only AFTER the whole file was in
+            # memory, so a multi-GB "svg" was read fully to be
+            # refused. read(n) on a text file bounds the characters
+            # taken; one past the cap is enough to refuse by.
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read(uib_mod.MAX_SVG_CHARS + 1)
+        except (OSError, UnicodeDecodeError) as exc:
+            self._refresh_status(f"could not read {path}: {exc}")
+            return False
+        if not text.strip().startswith("<") or "<svg" not in text.lower():
+            self._refresh_status(f"not an SVG file: {path}")
+            return False
+        if len(text) > uib_mod.MAX_SVG_CHARS:
+            self._refresh_status(
+                f"SVG too large: {len(text)} chars (limit "
+                f"{uib_mod.MAX_SVG_CHARS}) — nothing imported")
+            return False
+        entry = uib_mod.add_widget(self.design, "svg", 20, 20)
+        if entry is None:
+            return False
+        entry["svg"] = text
+        self.canvas.selected = entry["name"]
+        self.canvas.update()
+        self.canvas.selection_changed.emit()
+        self._refresh_status(f"imported SVG → {entry['name']}")
+        return True
+
+    def _import_svg(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import SVG", self.workspace, "SVG images (*.svg)")
+        if path:
+            self.import_svg_from(path)
+
+    def _palette_picked(self, wtype):
+        btn = self._palette_btns[wtype]
+        self.canvas.arm(wtype if btn.isChecked() else None)
+        self._refresh_status("click the canvas to place the "
+                             + wtype.replace("_", " ") if btn.isChecked() else None)
+
+    def _title_changed(self, text):
+        self.design["title"] = text
+
+    def _size_changed(self):
+        self.design["width"] = self.width_spin.value()
+        self.design["height"] = self.height_spin.value()
+        self.canvas.resize_design()
+        self._refresh_status()
+
+    # ---------- canvas sync ----------
+    def _on_canvas_changed(self):
+        if self.canvas.armed is None:
+            for btn in self._palette_btns.values():
+                btn.setChecked(False)
+        self._refresh_status()
+
+    def _on_selection_changed(self):
+        entry = self.canvas.selected_entry()
+        for widget in (self.prop_name, self.prop_text, self.prop_delete):
+            widget.setEnabled(entry is not None)
+        self.prop_name.blockSignals(True)
+        self.prop_text.blockSignals(True)
+        self.prop_name.setText(entry["name"] if entry else "")
+        self.prop_text.setText(entry["text"] if entry else "")
+        self.prop_name.blockSignals(False)
+        self.prop_text.blockSignals(False)
+        self._refresh_style_controls()
+
+    def _name_edited(self):
+        entry = self.canvas.selected_entry()
+        if entry is None:
+            return
+        new_name = self.prop_name.text().strip()
+        if uib_mod.rename_widget(self.design, entry["name"], new_name) is None:
+            self._refresh_status("name refused — must be a plain identifier "
+                                 "(letters, digits, _) and not already used")
+            self.prop_name.setText(entry["name"])
+            return
+        self.canvas.selected = new_name
+        self.canvas.update()
+        self._refresh_status()
+
+    def _text_edited(self, text):
+        entry = self.canvas.selected_entry()
+        if entry is None:
+            return
+        uib_mod.set_widget_text(self.design, entry["name"], text)
+        self.canvas.update()
+
+    def _refresh_status(self, message=None):
+        if message:
+            self.builder_status.setText(message)
+            return
+        self.builder_status.setText(
+            f"{len(self.design['widgets'])} widget(s) · window "
+            f"{self.design['width']}×{self.design['height']}")
+
+    # ---------- designs on disk ----------
+    def _new_design(self):
+        self.design = uib_mod.new_design()
+        self.title_edit.setText(self.design["title"])
+        self.width_spin.setValue(self.design["width"])
+        self.height_spin.setValue(self.design["height"])
+        self.canvas.set_design(self.design)
+        self._refresh_status("new design")
+
+    def load_design_from(self, path) -> bool:
+        design = uib_mod.load_design(path)
+        if design is None:
+            self._refresh_status(f"could not read a design from {path}")
+            return False
+        self.design = design
+        self.title_edit.setText(design["title"])
+        self.width_spin.blockSignals(True); self.height_spin.blockSignals(True)
+        self.width_spin.setValue(design["width"])
+        self.height_spin.setValue(design["height"])
+        self.width_spin.blockSignals(False); self.height_spin.blockSignals(False)
+        self.canvas.set_design(design)
+        self._refresh_status(f"opened {path}")
+        return True
+
+    def _open_design(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open UI design", self.workspace, "Forge UI designs (*.json)")
+        if path:
+            self.load_design_from(path)
+
+    def save_design_to(self, path) -> None:
+        # Sweep R87: a failed save (a read-only folder, a full
+        # disk) used to raise out of the slot with no word — the
+        # status line is this dialog's error surface, as the SVG
+        # import beside it already does.
+        try:
+            uib_mod.save_design(path, self.design)
+        except Exception as exc:
+            self._refresh_status(f"could not save design to {path}: {exc}")
+            return
+        self._refresh_status(f"design saved → {path}")
+
+    def _save_design(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save UI design", str(Path(self.workspace) / "ui-design.json"),
+            "Forge UI designs (*.json)")
+        if path:
+            self.save_design_to(path)
+
+    # ---------- preview / export ----------
+    def show_preview(self):
+        if self._preview is not None:
+            self._preview.close()
+        self._preview = build_ui_preview(self.design)
+        self._preview.show()
+        self._refresh_status("preview open — a real window; no logic is wired")
+
+    def closeEvent(self, event):
+        # Sweep R88: the preview is a parentless top-level window —
+        # closing the builder used to leave it standing alone.
+        if self._preview is not None:
+            self._preview.close()
+            self._preview = None
+        super().closeEvent(event)
+
+    def export_code_to(self, path) -> None:
+        # Sweep R87: same law as save_design_to — failures land in
+        # the status line, never a bare slot exception.
+        try:
+            Path(path).write_text(uib_mod.generate_code(self.design), encoding="utf-8")
+        except Exception as exc:
+            self._refresh_status(f"could not export to {path}: {exc}")
+            return
+        self._refresh_status(f"exported → {path} (run it: python3 {Path(path).name})")
+
+    def _export_code(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export PySide6 code", str(Path(self.workspace) / "built_ui.py"),
+            "Python files (*.py)")
+        if path:
+            self.export_code_to(path)
+
+
+class SnapshotsDialog(QDialog):
+    """Note 14 item 1: git snapshots for the current project — take a
+    restore point, see the list, roll back. Every refresh re-reads
+    the folder through forge/snapshots.py, so the dialog always shows
+    the project as it is, never as it remembers it. The engine is an
+    injectable parameter only so tests can fake git honestly; the
+    window always passes the real module."""
+
+    def __init__(self, parent, workspace, git="git", engine=None):
+        super().__init__(parent)
+        self.workspace = str(workspace)
+        self.git_path = git
+        self.engine = engine if engine is not None else snap_mod
+        self._snaps = []
+        self._is_repo = False
+        self._note = None
+        self.setWindowTitle("Snapshots — " + Path(self.workspace).name)
+        self.setMinimumSize(580, 430)
+        lay = QVBoxLayout(self)
+        self.project_label = QLabel(self.workspace)
+        lay.addWidget(self.project_label)
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        lay.addWidget(self.status_label)
+        self.start_btn = QPushButton("Start tracking this project (git init)")
+        self.start_btn.setObjectName("primary")
+        self.start_btn.clicked.connect(self._start_tracking)
+        lay.addWidget(self.start_btn)
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self._selection_changed)
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("Label for the new snapshot (optional)")
+        row.addWidget(self.label_edit, 1)
+        self.take_btn = QPushButton("📸 Take snapshot")
+        self.take_btn.setObjectName("primary")
+        self.take_btn.clicked.connect(self._take)
+        row.addWidget(self.take_btn)
+        lay.addLayout(row)
+        row2 = QHBoxLayout()
+        self.restore_btn = QPushButton("Restore selected snapshot…")
+        self.restore_btn.clicked.connect(self._restore_selected)
+        row2.addWidget(self.restore_btn)
+        row2.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        row2.addWidget(close_btn)
+        lay.addLayout(row2)
+        self.refresh()
+
+    # ---------- state ----------
+    def refresh(self):
+        # Sweep R71: refresh runs in the constructor — an engine
+        # failure here (a broken git, a corrupt snapshot store)
+        # must land in the status label, not make the dialog
+        # unopenable with a traceback.
+        try:
+            self._refresh_state()
+        except Exception as exc:
+            self.status_label.setText(f"Snapshots unavailable: {exc}")
+
+    def _refresh_state(self):
+        state = self.engine.repo_state(self.workspace, self.git_path)
+        self.list.clear()
+        self._snaps = []
+        self._is_repo = bool(state["repo"])
+        if not state["git"]:
+            self.status_label.setText(
+                "Git isn't installed on this PC, so snapshots can't run.")
+            self.start_btn.setVisible(False)
+            self.label_edit.setEnabled(False)
+            self.take_btn.setEnabled(False)
+            self.restore_btn.setEnabled(False)
+            return
+        if not self._is_repo:
+            self.status_label.setText(
+                "Snapshots are restore points saved inside this project — "
+                "local only, nothing leaves this PC. This project isn't "
+                "being tracked yet.")
+            self.start_btn.setVisible(True)
+            self.label_edit.setEnabled(False)
+            self.take_btn.setEnabled(False)
+            self.restore_btn.setEnabled(False)
+            return
+        self.start_btn.setVisible(False)
+        self.label_edit.setEnabled(True)
+        self.take_btn.setEnabled(True)
+        self._snaps = self.engine.list_snapshots(self.workspace, self.git_path)
+        for snap in self._snaps:
+            self.list.addItem(f"{snap['label']}   ·   {snap['timestamp']}")
+        if self._note is not None:
+            self.status_label.setText(self._note)
+            self._note = None
+        elif self._snaps:
+            self.status_label.setText(
+                f"{len(self._snaps)} snapshot(s), newest first. Restoring one "
+                "first saves a safety snapshot of how things are right now.")
+        else:
+            self.status_label.setText("Tracking is on. No snapshots yet — take the first one.")
+        self._selection_changed(self.list.currentRow())
+
+    def _selection_changed(self, row):
+        self.restore_btn.setEnabled(
+            self._is_repo and 0 <= row < len(self._snaps))
+
+    # ---------- actions ----------
+    def _start_tracking(self):
+        try:
+            self.engine.init_repo(self.workspace, self.git_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Snapshots", str(exc))
+            return
+        self._note = "Tracking is on. Take the first snapshot whenever you're ready."
+        self.refresh()
+
+    def _take(self):
+        # Sweep R71: preflight sat outside the try its sibling
+        # engine calls live in — a preflight failure crashed the
+        # slot instead of landing in the error dialog.
+        try:
+            warnings = self.engine.preflight(self.workspace, self.git_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Snapshot error", str(exc))
+            return
+        if warnings:
+            answer = QMessageBox.question(
+                self, "Before the first snapshot",
+                "\n\n".join(warnings) + "\n\nTake the snapshot anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                self._note = ("Snapshot not taken — check the warnings "
+                              "above when you're ready.")
+                self.refresh()
+                return
+        try:
+            result = self.engine.take_snapshot(
+                self.workspace, self.label_edit.text(), self.git_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Snapshot error", str(exc))
+            return
+        self.label_edit.clear()
+        if result.get("created"):
+            self._note = f"Snapshot saved: {result.get('label', '')}"
+        else:
+            self._note = ("Nothing changed since the last snapshot — the "
+                          "current state is already captured.")
+        self.refresh()
+
+    def _restore_selected(self):
+        row = self.list.currentRow()
+        if row < 0 or row >= len(self._snaps):
+            return
+        snap = self._snaps[row]
+        answer = QMessageBox.question(
+            self, "Restore snapshot",
+            f"Restore “{snap['label']}” ({snap['timestamp']})?\n\n"
+            "The project's current files will be replaced with the "
+            "snapshot's. First, the Forge saves a safety snapshot of "
+            "how things are right now, so you can undo this restore "
+            "from this same list.\n\n"
+            "Files git is ignoring (like .venv) are never touched.")
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            result = self.engine.restore_snapshot(
+                self.workspace, snap["id"], self.git_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Restore error", str(exc))
+            return
+        if result.get("restored"):
+            self._note = (f"Restored “{snap['label']}”. The safety snapshot "
+                          "in the list is how things were just before.")
+        else:
+            self._note = ("Already at that snapshot — nothing to change. "
+                          "A safety snapshot was still taken.")
+        self.refresh()
+
+
+class CheckpointsDialog(QDialog):
+    """Audit D38: shadow checkpoints for the current project — the
+    restore points forge/checkpoints.py keeps in a shadow git repo
+    under the app data dir, with its work-tree pointed at the
+    project, so ANY project (tracked or not) can be rolled back per
+    step or per turn, and the project's own git is never touched.
+    The mode combo at the top IS the owner's `shadow_checkpoints`
+    setting: changing it writes through the window's save_settings
+    on the spot. Every refresh re-reads the shadow through the
+    engine, so the list shows checkpoints as they are. The engine
+    is an injectable parameter only so tests can fake git honestly;
+    the window always passes the real module."""
+
+    MODES = (("off", "Off"),
+             ("files", "Each file change"),
+             ("task", "Each turn"),
+             ("both", "Both — file changes and turns"))
+
+    def __init__(self, parent, workspace, app_dir, settings=None,
+                 save_settings=None, log=None, git="git", engine=None):
+        super().__init__(parent)
+        self.workspace = str(workspace)
+        self.app_dir = app_dir
+        self.git_path = git
+        self.engine = engine if engine is not None else ckpt_mod
+        self.settings = settings if settings is not None else {}
+        self._save_settings = save_settings
+        self._log_fn = log
+        self._ckpts = []
+        self._note = None
+        self.setWindowTitle("Checkpoints — " + Path(self.workspace).name)
+        self.setMinimumSize(580, 430)
+        lay = QVBoxLayout(self)
+        self.project_label = QLabel(self.workspace)
+        lay.addWidget(self.project_label)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Shadow checkpoints:"))
+        self.mode_combo = QComboBox()
+        for key, label in self.MODES:
+            self.mode_combo.addItem(label, key)
+        keys = [k for k, _l in self.MODES]
+        current = str(self.settings.get("shadow_checkpoints", "off") or "off")
+        self.mode_combo.setCurrentIndex(
+            keys.index(current) if current in keys else 0)
+        self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+        mode_row.addWidget(self.mode_combo, 1)
+        lay.addLayout(mode_row)
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        lay.addWidget(self.status_label)
+        self.list = QListWidget()
+        self.list.currentRowChanged.connect(self._selection_changed)
+        lay.addWidget(self.list, 1)
+        row = QHBoxLayout()
+        self.restore_btn = QPushButton("Restore selected checkpoint…")
+        self.restore_btn.clicked.connect(self._restore_selected)
+        row.addWidget(self.restore_btn)
+        row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+        self.refresh()
+
+    # ---------- state ----------
+    def refresh(self):
+        # Sweep R71: same law as SnapshotsDialog — an engine
+        # failure lands in the status label, never a constructor
+        # traceback that makes the dialog unopenable.
+        try:
+            self._refresh_state()
+        except Exception as exc:
+            self.status_label.setText(f"Checkpoints unavailable: {exc}")
+
+    def _refresh_state(self):
+        self.list.clear()
+        self._ckpts = []
+        if not self.engine.git_available(self.git_path):
+            self.status_label.setText(
+                "Git isn't installed on this PC, so checkpoints can't run.")
+            self.restore_btn.setEnabled(False)
+            return
+        self._ckpts = self.engine.list_checkpoints(
+            self.app_dir, self.workspace, self.git_path)
+        for entry in self._ckpts:
+            self.list.addItem(f"{entry['label']}   ·   {entry['timestamp']}")
+        if self._note is not None:
+            self.status_label.setText(self._note)
+            self._note = None
+        elif self._ckpts:
+            self.status_label.setText(
+                f"{len(self._ckpts)} checkpoint(s), newest first. Restoring one "
+                "first saves a safety checkpoint of how things are right now.")
+        else:
+            self.status_label.setText(
+                "No checkpoints yet. Shadow checkpoints live OUTSIDE this "
+                "project, in the Forge's own data folder — the project's own "
+                "git (if any) is never touched. Each checkpoint stores the "
+                "project's current files in that shadow history, so it costs "
+                "disk space — very roughly the project's size each time. "
+                "Turn them on above and the agent's turns will lay them down.")
+        self._selection_changed(self.list.currentRow())
+
+    def _selection_changed(self, row):
+        self.restore_btn.setEnabled(0 <= row < len(self._ckpts))
+
+    # ---------- actions ----------
+    def _mode_changed(self, _index):
+        self.settings["shadow_checkpoints"] = self.mode_combo.currentData()
+        if self._save_settings is not None:
+            self._save_settings()
+
+    def _restore_selected(self):
+        row = self.list.currentRow()
+        if row < 0 or row >= len(self._ckpts):
+            return
+        entry = self._ckpts[row]
+        answer = QMessageBox.question(
+            self, "Restore checkpoint",
+            f"Restore “{entry['label']}” ({entry['timestamp']})?\n\n"
+            "The project's current files will be replaced with the "
+            "checkpoint's, and files created after the checkpoint "
+            "will be REMOVED. First, the Forge saves a safety "
+            "checkpoint of how things are right now, so you can undo "
+            "this restore from this same list.\n\n"
+            "Ignored files (like .venv) are never touched, and the "
+            "project's own git history is not affected.")
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.engine.restore_checkpoint(
+                self.app_dir, self.workspace, entry["id"], self.git_path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Restore error", str(exc))
+            return
+        self._note = (f"Restored “{entry['label']}”. The safety checkpoint "
+                      "at the top of the list is how things were just before.")
+        if self._log_fn is not None:
+            self._log_fn(f"Checkpoint restored: {entry['label']} "
+                         f"({entry['timestamp']})")
+        self.refresh()
+
+
+class BenchDialog(QDialog):
+    """Audit D37: forge-bench — fifteen fixed tasks, each scored by a
+    planted check, run against the chosen model in throwaway folders.
+    The seat race becomes numbers: per-task pass/fail, wall time,
+    cycles, and eval tokens, saved as a JSON report under
+    APP_DIR/bench-results/ and shown as a plain-text scorecard.
+    The run happens on BenchThread; this dialog never runs the bench
+    itself."""
+
+    def __init__(self, parent, models, client, log=None, current=None,
+                 disabled_tools=None, bench_max_cycles=None):
+        super().__init__(parent)
+        self.client = client
+        self._log = log
+        self.disabled_tools = list(disabled_tools or [])
+        # Item #53: the owner's per-task cycle cap (settings
+        # `bench_max_cycles`), handed to the run thread untouched;
+        # None keeps the bench module's default.
+        self.bench_max_cycles = bench_max_cycles
+        self._thread = None
+        self._row_by_id = {}
+        self.setWindowTitle("Forge Bench — fifteen fixed, scored tasks")
+        self.setMinimumSize(640, 540)
+        lay = QVBoxLayout(self)
+        intro = QLabel(
+            "Forge-bench runs 15 fixed tasks against the chosen model in "
+            "throwaway folders and scores each one with a planted check. "
+            "The bench runs the model's commands in those folders WITHOUT "
+            "per-command approvals — the model's tools run contained to "
+            "the task folder (contained-run rules: paths outside it are "
+            "refused — a tool-layer guardrail, not an OS sandbox), and "
+            "each task's folder is kept so you "
+            "can inspect what the model did.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(
+            [str(m) for m in models if str(m).strip()])
+        if current:
+            idx = self.model_combo.findText(str(current))
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+        row.addWidget(self.model_combo, 1)
+        self.run_btn = QPushButton("▶  Run bench")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.clicked.connect(self._start)
+        row.addWidget(self.run_btn)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._stop)
+        row.addWidget(self.stop_btn)
+        lay.addLayout(row)
+        self.list = QListWidget()
+        lay.addWidget(self.list, 1)
+        self.results = QPlainTextEdit()
+        self.results.setReadOnly(True)
+        self.results.setPlaceholderText(
+            "The scorecard lands here when the bench finishes.")
+        lay.addWidget(self.results, 1)
+        row2 = QHBoxLayout()
+        row2.addStretch()
+        close_btn = QPushButton("Close")
+        # Sweep R76: Close used to be wired straight to accept(),
+        # which skips closeEvent entirely — the bench thread's
+        # stop there never ran. Route through close() so the one
+        # shutdown path is the only path.
+        close_btn.clicked.connect(self.close)
+        row2.addWidget(close_btn)
+        lay.addLayout(row2)
+        if not self.model_combo.count():
+            self.run_btn.setEnabled(False)
+            self.results.setPlainText(
+                "No installed models found — is Ollama running? "
+                "Reopen the bench once the model list loads.")
+
+    # ---------- run control ----------
+    def _start(self):
+        model = self.model_combo.currentText().strip()
+        if not model or self._thread is not None:
+            return
+        self._row_by_id = {}
+        self.list.clear()
+        for task in bench_mod.TASKS:
+            self._row_by_id[task["id"]] = self.list.count()
+            self.list.addItem(f"•  {task['title']}")
+        self.results.clear()
+        self.run_btn.setEnabled(False)
+        self.model_combo.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self._thread = BenchThread(model, self.client,
+                                   disabled_tools=self.disabled_tools,
+                                   bench_max_cycles=self.bench_max_cycles)
+        self._thread.task_done.connect(self._on_task_done)
+        self._thread.bench_done.connect(self._on_bench_done)
+        self._thread.failed.connect(self._on_bench_failed)
+        self._thread.start()
+
+    def _stop(self):
+        if self._thread is not None:
+            self._thread.stop()
+            self.stop_btn.setEnabled(False)
+
+    def _finish_run(self):
+        self._thread = None
+        self.stop_btn.setEnabled(False)
+        self.run_btn.setEnabled(self.model_combo.count() > 0)
+        self.model_combo.setEnabled(True)
+
+    def closeEvent(self, event):
+        if self._thread is not None:
+            self._thread.stop()
+            # Sweep R76: stop() only SETS the cancel event — the
+            # dialog used to fall through immediately, returning
+            # while the bench thread still ran against it. Wait
+            # briefly for the thread to actually wind down.
+            self._thread.wait(2000)
+        super().closeEvent(event)
+
+    # ---------- thread outcomes ----------
+    def _on_task_done(self, record):
+        mark = ("✓" if record.get("passed") is True
+                else "✗" if record.get("passed") is False else "–")
+        line = (f"{mark}  {record.get('title', record.get('id', ''))} — "
+                f"{record.get('seconds', 0):.1f}s")
+        if record.get("passed") is not True and record.get("note"):
+            line += f" — {record['note']}"
+        row = self._row_by_id.get(record.get("id"))
+        if row is None:
+            self._row_by_id[record.get("id")] = self.list.count()
+            self.list.addItem(line)
+        else:
+            self.list.item(row).setText(line)
+
+    def _on_bench_done(self, report):
+        self.results.setPlainText(bench_mod.format_report(report))
+        self._finish_run()
+        if self._log is None:
+            return
+        path = self._save_report(report)
+        score = f"{report.get('passed', 0)}/{report.get('total', 0)}"
+        if path is not None:
+            self._log(f"🏁 Forge bench: {score} for {report.get('model')} "
+                      f"— report saved → {path}")
+        else:
+            # Sweep R86: the reason rides along — "could not be
+            # saved" with no cause sent the owner hunting blind.
+            reason = getattr(self, "_save_error", "") or "unknown error"
+            self._log(f"🏁 Forge bench: {score} for {report.get('model')} "
+                      f"— the report could not be saved ({reason}); "
+                      f"the scorecard is in the Bench dialog.")
+
+    def _on_bench_failed(self, message):
+        self.results.setPlainText(f"Bench failed: {message}")
+        self._finish_run()
+        if self._log is not None:
+            self._log(f"🏁 Forge bench failed: {message}")
+
+    def _save_report(self, report):
+        """Write the report JSON under APP_DIR/bench-results/;
+        returns the path, or None when the write failed."""
+        try:
+            folder = APP_DIR / "bench-results"
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            safe = "".join(ch if ch.isalnum() or ch in "._-" else "-"
+                           for ch in str(report.get("model", "model")))
+            path = folder / f"{stamp}-{safe}.json"
+            path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            return path
+        except Exception as exc:
+            # Sweep R86: keep the reason for the caller's log line.
+            self._save_error = str(exc)
+            return None
+
+
+class RecipesDialog(QDialog):
+    """Audit D41: recipes — the owner's parameterized prompt files
+    (forge/recipes.py), run with fresh values. The dialog lists the
+    recipes found in the app data dir's recipes/ folder, shows the
+    selected one's param form (one line edit per param, defaults
+    prefilled, required params starred), and Run renders the prompt
+    and hands it to the HOST WINDOW's normal send path: the mode is
+    switched through the window's own mode combo when the recipe
+    names one, the rendered text is placed in the input box, and
+    send_message() does the rest — macros, @mentions, the context
+    fold and every approval gate apply exactly as if the owner had
+    typed it. The dialog closes only when the send was accepted
+    (send_message clears the input box); a refused send — a turn
+    already running, a summary in flight — leaves the dialog open
+    with the reason in the status label. Load problems ride in as
+    data (the C30 pattern): the window logs each distinct one once
+    via the log_problems callback, and they are also named in the
+    note line at the bottom. Owner-launched only — nothing here is
+    reachable by the agent or the deck."""
+
+    def __init__(self, parent, app_dir, log_problems=None):
+        super().__init__(parent)
+        self.host = parent
+        self.app_dir = Path(app_dir)
+        self.recipes, self.problems = recipes_mod.load_recipes(self.app_dir)
+        if self.problems and log_problems is not None:
+            log_problems(self.problems)
+        self._fields: dict[str, QLineEdit] = {}
+        self.setWindowTitle("Recipes — parameterized prompts")
+        self.setMinimumSize(580, 460)
+        lay = QVBoxLayout(self)
+        intro = QLabel(
+            "A recipe is a prompt you author once as a JSON file and "
+            "run any time with fresh values. Running one goes through "
+            "the normal send path — every gate applies, exactly as if "
+            "you had typed the rendered prompt yourself.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        self.list = QListWidget()
+        for recipe in self.recipes:
+            label = recipe["name"]
+            if recipe["description"]:
+                label += f"   ·   {recipe['description']}"
+            self.list.addItem(label)
+        self.list.currentRowChanged.connect(self._selection_changed)
+        lay.addWidget(self.list, 1)
+        self.desc_label = QLabel("")
+        self.desc_label.setWordWrap(True)
+        lay.addWidget(self.desc_label)
+        self.form_box = QWidget()
+        self.form = QFormLayout(self.form_box)
+        self.form.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.form_box)
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        lay.addWidget(self.status_label)
+        row = QHBoxLayout()
+        self.run_btn = QPushButton("▶  Run recipe")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.clicked.connect(self._run)
+        row.addWidget(self.run_btn)
+        row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+        self.problems_label = QLabel("")
+        self.problems_label.setWordWrap(True)
+        if self.problems:
+            self.problems_label.setText(
+                "Skipped recipe file(s): " + "; ".join(self.problems))
+        lay.addWidget(self.problems_label)
+        if self.recipes:
+            self.list.setCurrentRow(0)
+        else:
+            self.run_btn.setEnabled(False)
+            self.desc_label.setText(
+                "No recipes yet. A recipe is one small JSON file per "
+                f"recipe in {self.app_dir / 'recipes'} — e.g. "
+                '{"name": "Release notes", "prompt": "Write release '
+                'notes for {{version}}.", "params": [{"name": '
+                '"version", "required": true}]}. Add the file and '
+                "reopen this dialog.")
+        self._selection_changed(self.list.currentRow())
+
+    # ---------- state ----------
+    def _selected_recipe(self):
+        row = self.list.currentRow()
+        if 0 <= row < len(self.recipes):
+            return self.recipes[row]
+        return None
+
+    def _selection_changed(self, row):
+        recipe = self._selected_recipe()
+        # Rebuild the param form for the newly selected recipe.
+        while self.form.rowCount():
+            self.form.removeRow(0)
+        self._fields = {}
+        if recipe is None:
+            self.run_btn.setEnabled(False)
+            return
+        self.run_btn.setEnabled(True)
+        bits = []
+        if recipe["description"]:
+            bits.append(recipe["description"])
+        if recipe["mode"]:
+            bits.append(f"Runs in {recipe['mode'].capitalize()} mode.")
+        if not recipe["params"]:
+            bits.append("No parameters — Run sends the prompt as written.")
+        self.desc_label.setText(" ".join(bits))
+        for param in recipe["params"]:
+            edit = QLineEdit()
+            if param["default"] is not None:
+                edit.setText(param["default"])
+            label = param["name"] + (" *" if param["required"] else "")
+            self.form.addRow(label, edit)
+            self._fields[param["name"]] = edit
+        self.status_label.setText("")
+
+    # ---------- actions ----------
+    def _run(self):
+        recipe = self._selected_recipe()
+        if recipe is None:
+            return
+        values = {name: edit.text() for name, edit in self._fields.items()}
+        try:
+            text = recipes_mod.render(recipe, values)
+        except recipes_mod.RecipeError as exc:
+            self.status_label.setText(str(exc))
+            return
+        if not text.strip():
+            self.status_label.setText(
+                "The rendered prompt is empty — nothing to send.")
+            return
+        if recipe["mode"]:
+            # The window's own mode-setting path: the mode combo is
+            # the door every other surface uses too. Sweep R89: the
+            # mode NAME comes from a recipe FILE — an unknown one
+            # used to KeyError out of this slot. Refuse in the
+            # status label (this dialog's own error surface)
+            # instead of crashing.
+            mode_title = {m: m.capitalize() for m in perm_mod.MODES}.get(
+                recipe["mode"])
+            if mode_title is None:
+                self.status_label.setText(
+                    f"Unknown mode '{recipe['mode']}' in this recipe "
+                    "— nothing was sent.")
+                return
+            self.host.mode_combo.setCurrentText(mode_title)
+        self.host.input.setPlainText(text)
+        self.host.send_message()
+        # send_message clears the input box exactly when the send
+        # was accepted (a pre-send fold may still be settling — the
+        # turn starts from its completion). Anything else left the
+        # text standing: the send was refused.
+        if self.host.input.toPlainText() == "":
+            self.accept()
+        else:
+            self.status_label.setText(
+                "Not sent — a turn is already running, or a summary "
+                "is in flight. Try again when the bench is idle.")
+
+
+class PaletteDialog(QDialog):
+    """Note 14 item 5: the command palette — Ctrl+K, type the
+    action, Enter. An overlay over the bench: a filter field and
+    the ranked list from forge/palette.py. The dialog owns no
+    behavior of its own — choosing an entry reports its id to the
+    window's on_run callback, which dispatches to the SAME method
+    the topbar / menu already calls. Disabled entries (state known
+    at open time: the stopped deck's Stop, the running deck's
+    Start, the current project, the current mode) are shown greyed
+    and run nothing.
+
+    G1 (GUIFX Research Brief #1): the list renders under group
+    headers (palette_mod.display_groups — a leading "Recent"
+    section on an empty query, then Windows / Run / Actions /
+    Go to / Models). Header rows are inert separators: not
+    enabled, not selectable, and Up/Down step over them (and over
+    disabled rows) instead of landing on them. Each entry row is
+    a small widget — title left, and on the right a keycap badge
+    showing the entry's hint ONLY when the hint is a real
+    shortcut (palette_mod.is_shortcut_hint); category-word hints
+    earn no badge. The dialog is 640 wide and sits top-anchored
+    against the parent window (~15% down from its top)."""
+
+    WIDTH = 640
+
+    def __init__(self, parent, entries, on_run, recents=None):
+        super().__init__(parent)
+        self._entries = list(entries)
+        self._on_run = on_run
+        self._recents = list(recents or [])
+        self._shown = []
+        self._row_entries = []
+        self.chosen_id = None
+        self.setWindowTitle("Command palette")
+        self.setMinimumSize(540, 400)
+        self.resize(self.WIDTH, 440)
+        lay = QVBoxLayout(self)
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText(
+            "Type an action — a panel, a dialog, a project, a mode…")
+        self.filter_edit.textChanged.connect(self._refilter)
+        lay.addWidget(self.filter_edit)
+        self.list = QListWidget()
+        self.list.itemClicked.connect(lambda item: self._run_current())
+        self.list.itemActivated.connect(lambda item: self._run_current())
+        lay.addWidget(self.list, 1)
+        self.filter_edit.installEventFilter(self)
+        self._refilter()
+        self.filter_edit.setFocus()
+
+    def showEvent(self, event):
+        # G1 geometry: 640 wide, horizontally centered on the
+        # parent window and anchored ~15% down from its top, so
+        # the palette opens where the owner's eyes already are.
+        super().showEvent(event)
+        parent = self.parentWidget()
+        if parent is not None:
+            geo = parent.frameGeometry()
+            x = geo.x() + max(0, (geo.width() - self.WIDTH) // 2)
+            y = geo.y() + int(geo.height() * 0.15)
+            self.move(x, y)
+
+    # ---------- list ----------
+    def _header_widget(self, group):
+        label = QLabel(group.upper())
+        label.setObjectName("palette_group_header")
+        label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        label.setStyleSheet(
+            f"color:{TOKENS['text_section']}; font-size:10px; "
+            "font-weight:700; letter-spacing:1.6px; padding:4px 2px;")
+        return label
+
+    def _row_widget(self, entry):
+        # Mouse-transparent throughout: the row widget is paint
+        # only, so clicks land on the list item exactly as they
+        # did when the row was a plain text item.
+        row = QWidget()
+        row.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(8, 3, 8, 3)
+        lay.setSpacing(8)
+        title = QLabel(entry["title"])
+        title.setObjectName("palette_title")
+        title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        if not entry.get("enabled", True):
+            title.setStyleSheet(f"color:{TOKENS['text_muted']};")
+        lay.addWidget(title)
+        lay.addStretch()
+        hint = entry.get("hint", "")
+        if palette_mod.is_shortcut_hint(hint):
+            badge = QLabel(hint)
+            badge.setObjectName("palette_badge")
+            badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            badge.setStyleSheet(
+                f"background:{TOKENS['surface_input']}; "
+                f"border:1px solid {TOKENS['border_input']}; "
+                f"border-radius:{TOKENS['radius_control']}; "
+                f"color:{TOKENS['text_muted']}; padding:2px 7px; "
+                "font-size:11px;")
+            lay.addWidget(badge)
+        return row
+
+    def _refilter(self):
+        groups = palette_mod.display_groups(
+            self._entries, self._recents, self.filter_edit.text())
+        self._shown = [entry for _group, gentries in groups
+                       for entry in gentries]
+        self._row_entries = []
+        self.list.clear()
+        first_enabled = -1
+        for group, gentries in groups:
+            header = QListWidgetItem(group)
+            header.setData(Qt.UserRole, None)
+            header.setFlags(Qt.NoItemFlags)
+            self.list.addItem(header)
+            widget = self._header_widget(group)
+            header.setSizeHint(widget.sizeHint())
+            self.list.setItemWidget(header, widget)
+            self._row_entries.append(None)
+            for entry in gentries:
+                item = QListWidgetItem(entry["title"])
+                item.setData(Qt.UserRole, entry["id"])
+                if not entry.get("enabled", True):
+                    item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
+                self.list.addItem(item)
+                widget = self._row_widget(entry)
+                item.setSizeHint(widget.sizeHint())
+                self.list.setItemWidget(item, widget)
+                self._row_entries.append(entry)
+                if entry.get("enabled", True) and first_enabled < 0:
+                    first_enabled = self.list.count() - 1
+        if first_enabled >= 0:
+            self.list.setCurrentRow(first_enabled)
+
+    def _step_selection(self, step):
+        # Move the selection to the next ENABLED entry row in
+        # `step` direction, stepping over group headers and
+        # disabled entries; clamps at the ends (no wraparound),
+        # like the pre-G1 row stepping did.
+        if not self.list.count():
+            return
+        row = self.list.currentRow()
+        nxt = row + step
+        while 0 <= nxt < len(self._row_entries):
+            entry = self._row_entries[nxt]
+            if entry is not None and entry.get("enabled", True):
+                self.list.setCurrentRow(nxt)
+                return
+            nxt += step
+        # No enabled row that way: stay put (clamped).
+
+    def eventFilter(self, obj, event):
+        # The filter field keeps focus; Up/Down steer the list and
+        # Enter runs the selection, so the owner's hands never
+        # leave the keyboard. Escape rejects — closing runs nothing.
+        if obj is self.filter_edit and event.type() == QEvent.KeyPress:
+            key = event.key()
+            if key == Qt.Key_Escape:
+                self.reject()
+                return True
+            if key in (Qt.Key_Down, Qt.Key_Up):
+                self._step_selection(1 if key == Qt.Key_Down else -1)
+                return True
+            if key in (Qt.Key_Return, Qt.Key_Enter):
+                self._run_current()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _run_current(self):
+        # Sweep R77, carried from the pre-G1 dialog at the merge:
+        # click AND activation (and Enter) can all land on the
+        # same gesture — one dispatch per dialog, or a palette
+        # action (a send, a dialog open) ran twice.
+        if getattr(self, "_ran", False):
+            return
+        row = self.list.currentRow()
+        if row < 0 or row >= len(self._row_entries):
+            return
+        entry = self._row_entries[row]
+        if entry is None or not entry.get("enabled", True):
+            return
+        self._ran = True
+        self.chosen_id = entry["id"]
+        self.accept()
+        if self._on_run is not None:
+            self._on_run(entry["id"])
+
+
+def format_duration(seconds):
+    """G6: a run's elapsed time as its block header shows it —
+    sub-minute runs keep a decimal ('0.4s', '3.2s'); a minute and
+    up reads as minutes + whole seconds ('1m 12s')."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    rest = int(seconds - minutes * 60)
+    return f"{minutes}m {rest}s"
+
+
+class RunBlock(QWidget):
+    """G6 (Warp-style Blocks): ONE run on the run surface — a
+    header that always stays visible (collapse toggle, the
+    command, its status, its duration) over a body holding only
+    that run's output lines. When a run finishes, success folds
+    to the header; a nonzero exit, a stop, or a failed start
+    stays open. Folded is never deleted — the lines stay in the
+    block, the owner can reopen it any time, and
+    RunWindow.blocks_text() proves the transcript is whole."""
+
+    # A body shows at most this many lines before it scrolls
+    # internally — a 2000-line spew must not make one block
+    # taller than the whole window.
+    MAX_BODY_VISIBLE_LINES = 14
+    # The app's established literal error red (the connection
+    # dot's disconnected color) — failure states, no new hue.
+    ERROR_RED = "#e5534b"
+
+    def __init__(self, command, cwd, parent=None):
+        super().__init__(parent)
+        self.command = str(command)
+        self.cwd = str(cwd)
+        self.finished = False
+        self.end_label = None      # "exited 0" / "stopped" / "could not start"
+        self.started_at = None     # time.monotonic() at launch
+        self._lines: list[str] = []
+        self._open = True
+        self.setObjectName("runBlock")
+        self.setStyleSheet(
+            f"#runBlock {{ background:{TOKENS['surface_glass_mid']};"
+            f" border:1px solid {TOKENS['rim_soft']};"
+            f" border-radius:{TOKENS['radius_control']}; }}")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6); lay.setSpacing(4)
+        head = QHBoxLayout(); head.setSpacing(6)
+        self.toggle_btn = QPushButton("▾")
+        self.toggle_btn.setFlat(True)
+        self.toggle_btn.setFixedWidth(20)
+        self.toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.toggle_btn.setToolTip("Collapse / expand this run's output")
+        self.toggle_btn.clicked.connect(self.toggle_open)
+        head.addWidget(self.toggle_btn)
+        self.cmd_label = QLabel()
+        self.cmd_label.setToolTip(f"{self.command}\n{self.cwd}")
+        self.cmd_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred)
+        head.addWidget(self.cmd_label, 1)
+        self.status_label = QLabel("")
+        head.addWidget(self.status_label)
+        self.duration_label = QLabel("")
+        self.duration_label.setStyleSheet(
+            f"color:{TOKENS['text_muted']};")
+        head.addWidget(self.duration_label)
+        lay.addLayout(head)
+        self.body = QPlainTextEdit()
+        self.body.setReadOnly(True)
+        lay.addWidget(self.body)
+        self.set_status("running…", "running")
+        self._sync_body_height()
+        self._elide_command()
+
+    # ---------- header ----------
+
+    def _command_text(self):
+        return f"$ {self.command}" if self.command else "output"
+
+    def _elide_command(self):
+        width = self.cmd_label.width()
+        if width <= 0:
+            self.cmd_label.setText(self._command_text())
+            return
+        self.cmd_label.setText(self.cmd_label.fontMetrics().elidedText(
+            self._command_text(), Qt.ElideMiddle, width))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide_command()
+
+    def set_status(self, text, kind):
+        """kind: 'running' (amber), 'ok' (muted), 'bad' (error red)."""
+        color = {"running": TOKENS["accent_amber"],
+                 "ok": TOKENS["text_muted"],
+                 "bad": self.ERROR_RED}[kind]
+        weight = "400" if kind == "ok" else "700"
+        self.status_label.setStyleSheet(
+            f"color:{color};font-weight:{weight};")
+        self.status_label.setText(text)
+
+    # ---------- body ----------
+
+    def line_count(self):
+        return len(self._lines)
+
+    def body_lines(self):
+        return list(self._lines)
+
+    def append_lines(self, lines):
+        lines = [str(line) for line in lines]
+        if not lines:
+            return
+        for line in lines:
+            self.body.appendPlainText(line)
+        self._lines.extend(lines)
+        self._sync_body_height()
+
+    def drop_oldest_lines(self, count):
+        """Trim this block's oldest lines (the output cap's last
+        resort, when no finished block is left to drop whole)."""
+        count = min(int(count), len(self._lines))
+        if count <= 0:
+            return 0
+        doc = self.body.document()
+        cursor = QTextCursor(doc)
+        for _ in range(count):
+            block = doc.firstBlock()
+            cursor.setPosition(block.position())
+            # block.length() counts the trailing newline (every
+            # block but the last has one), so the span is exact.
+            cursor.setPosition(block.position() + block.length(),
+                               QTextCursor.KeepAnchor)
+            cursor.removeSelectedText()
+        del self._lines[:count]
+        self._sync_body_height()
+        return count
+
+    def _sync_body_height(self):
+        visible = max(1, min(len(self._lines),
+                             self.MAX_BODY_VISIBLE_LINES))
+        line = self.body.fontMetrics().lineSpacing()
+        self.body.setFixedHeight(visible * line + 10)
+
+    # ---------- collapse ----------
+
+    def set_open(self, open_):
+        self._open = bool(open_)
+        self.body.setVisible(self._open)
+        self.toggle_btn.setText("▾" if self._open else "▸")
+
+    def is_open(self):
+        return self._open
+
+    def toggle_open(self):
+        self.set_open(not self._open)
+
+    # ---------- lifecycle ----------
+
+    def mark_started(self):
+        self.started_at = time.monotonic()
+
+    def elapsed(self):
+        if self.started_at is None:
+            return 0.0
+        return time.monotonic() - self.started_at
+
+    def finish(self, label, elapsed, *, success):
+        """The run ended: stamp status + duration, then the G6
+        fold rule — success collapses, anything else stays open."""
+        self.finished = True
+        self.end_label = label
+        self.duration_label.setText(format_duration(elapsed))
+        self.set_status(label, "ok" if success else "bad")
+        if success:
+            self.set_open(False)
+
+    def fail(self, message, elapsed):
+        """The process never started. The old pane's single
+        '— could not start: …' line is split here: the reason is
+        a body line (visible in the open block), the plain status
+        rides the header and the transcript trailer."""
+        self.append_lines([str(message)])
+        self.finished = True
+        self.end_label = "could not start"
+        self.duration_label.setText(format_duration(elapsed))
+        self.set_status("could not start", "bad")
+        self.set_open(True)
+
+
+class _WatchGateAsker:
+    """C1: the name the approval gate presents while a Watch-seat
+    fix proposal is at it. request_approval reads the asking model
+    off the stage worker; a monitor proposal's asker is the Watch
+    seat, so ForgeWindow swaps this stand-in in for exactly the
+    presentation. It carries ONLY what the gate reads (model) and
+    records the gate's answer (resolve_approval) — it runs no
+    tools and starts no turn."""
+
+    def __init__(self, model):
+        self.model = model
+        self.answer = None
+
+    def resolve_approval(self, ok):
+        self.answer = bool(ok)
+
+
+class RunWindow(QWidget):
+    """Item #50: the run surface is PER-PROJECT, and it LOADS — it
+    does not launch. The owner's design, in his words: working
+    within a project folder should automatically load what's built,
+    so he can run it, switch between the files in the folder that
+    carry the executable or whatnot, and test different windows.
+    The manual command box the earlier shape made him type into is
+    gone (he rejected it outright: "that's not how its supposed to
+    work at all").
+
+    So this window shows the ACTIVE project's runnable files —
+    scanned by forge/runfiles whenever the surface is shown or the
+    project changes — and waits. Nothing runs until the owner picks
+    a file and presses Run: loading is not running. The engine did
+    not move: runs still ride ForgeWindow.start_run / stop_run and
+    the runwindow.RunThread (own process group, Stop kills the
+    group), and closing the window still stops a live run, so a run
+    never outlives its room. The ForgeWindow owns the single
+    instance and aliases the controls.
+
+    Item #51: below the output pane, the same surface carries the
+    project's git panel — no new window. The CHANGES section lists
+    the active project's uncommitted changes (forge/gitpanel);
+    selecting one shows its diff, and stage / commit / push happen
+    right here. The panel always reads the owner's CURRENT
+    workspace, refreshed wherever this window refreshes.
+
+    G6: the output pane is a stack of RunBlocks (one per run:
+    header + collapsible body) in the slot the pane held."""
+
+    EMPTY_TEXT = ("Nothing runnable found here yet. Programs, .py, "
+                  ".sh, .html and .AppImage files in the project root "
+                  "(or dist/ · build/ · out/ · target/release/) show "
+                  "up here automatically.")
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._entries: list[dict] = []
+        self._git_changes: list[dict] = []
+        self._git_thread = None
+        self._git_state = ""
+        # Async git reads (GitScanThread): at most one scan and one
+        # diff load in flight; a refresh asked for mid-scan is queued
+        # as a flag, not a second thread, and results are checked
+        # against the owner's CURRENT workspace before they paint.
+        self._git_scan_thread = None
+        self._git_diff_thread = None
+        self._git_rescan_pending = False
+        # A commit/push result owns the status label (and the diff
+        # pane) until the owner next interacts — the refresh it
+        # triggers must not paint over its message.
+        self._git_label_override = None
+        self.resize(840, 680)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header — title + the run status slot.
+        # No secondary actions sit in this header (Rescan lives in
+        # the primary action row beside Run/Stop, below), so there
+        # is no overflow menu here.
+        self.header = build_window_header(self, "RUN", status_text="idle")
+        self.run_title = self.header.title_label
+        self.run_status = self.header.status_label
+        lay.addWidget(self.header)
+        self.run_file_list = QListWidget()
+        self.run_file_list.setObjectName("run_file_list")
+        self.run_file_list.setToolTip(
+            "What's runnable in this project — loaded automatically. "
+            "Pick a file, then press Run.")
+        self.run_file_list.currentRowChanged.connect(self._sync_run_enabled)
+        lay.addWidget(self.run_file_list)
+        self.run_empty_label = QLabel(self.EMPTY_TEXT)
+        self.run_empty_label.setObjectName("muted")
+        self.run_empty_label.setWordWrap(True)
+        self.run_empty_label.setVisible(False)
+        lay.addWidget(self.run_empty_label)
+        btn_row = QHBoxLayout()
+        self.run_rescan_btn = QPushButton("↻ Rescan")
+        self.run_rescan_btn.setToolTip("Reload the project's runnable files")
+        self.run_rescan_btn.clicked.connect(self.refresh)
+        btn_row.addWidget(self.run_rescan_btn)
+        btn_row.addStretch()
+        self.run_start_btn = QPushButton("▶ Run selected")
+        self.run_start_btn.setObjectName("primary")
+        self.run_start_btn.setToolTip("Run the selected file in the project folder")
+        self.run_start_btn.clicked.connect(self._run_selected)
+        btn_row.addWidget(self.run_start_btn)
+        self.run_stop_btn = QPushButton("■ Stop")
+        self.run_stop_btn.setToolTip("Stop the run — kills the whole process group, children included")
+        self.run_stop_btn.setEnabled(False)
+        self.run_stop_btn.clicked.connect(owner.stop_run)
+        btn_row.addWidget(self.run_stop_btn)
+        lay.addLayout(btn_row)
+        # G6: the output pane is a stack of RunBlocks in a scroll
+        # area — one block per run, header always visible, body
+        # collapsible — in the same layout slot the pane held.
+        # blocks_text() reproduces the old pane's transcript.
+        self.run_blocks: list[RunBlock] = []
+        self._active_block = None
+        self.run_scroll = QScrollArea()
+        self.run_scroll.setWidgetResizable(True)
+        self.run_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.run_blocks_host = QWidget()
+        self.run_blocks_layout = QVBoxLayout(self.run_blocks_host)
+        self.run_blocks_layout.setContentsMargins(0, 0, 0, 0)
+        self.run_blocks_layout.setSpacing(6)
+        self.run_placeholder = QLabel(
+            "Program output will appear here — pick a file above and press Run.")
+        self.run_placeholder.setObjectName("muted")
+        self.run_placeholder.setWordWrap(True)
+        self.run_blocks_layout.addWidget(self.run_placeholder)
+        self.run_blocks_layout.addStretch(1)
+        self.run_scroll.setWidget(self.run_blocks_host)
+        lay.addWidget(self.run_scroll, 1)
+        # Item #51: the CHANGES section — this project's git panel,
+        # in this window, under the run pane.
+        git_head = QHBoxLayout()
+        git_title = QLabel("CHANGES"); git_title.setObjectName("section")
+        git_head.addWidget(git_title); git_head.addStretch()
+        self.git_refresh_btn = QPushButton("↻")
+        self.git_refresh_btn.setToolTip("Refresh the change list")
+        self.git_refresh_btn.clicked.connect(self.refresh_git)
+        git_head.addWidget(self.git_refresh_btn)
+        lay.addLayout(git_head)
+        git_state_row = QHBoxLayout()
+        self.git_status_label = QLabel("")
+        self.git_status_label.setObjectName("muted")
+        git_state_row.addWidget(self.git_status_label)
+        git_state_row.addStretch()
+        self.git_init_btn = QPushButton("Initialize git")
+        self.git_init_btn.setToolTip(
+            "Start tracking this project with git (snapshots' init — "
+            "the usual junk folders are excluded from history)")
+        self.git_init_btn.setVisible(False)
+        self.git_init_btn.clicked.connect(self._init_git)
+        git_state_row.addWidget(self.git_init_btn)
+        lay.addLayout(git_state_row)
+        self.git_changes_list = QListWidget()
+        self.git_changes_list.setObjectName("git_changes_list")
+        self.git_changes_list.setMaximumHeight(120)
+        self.git_changes_list.setToolTip(
+            "Uncommitted changes in this project — select one to see its diff")
+        self.git_changes_list.currentRowChanged.connect(
+            self._on_git_selection)
+        lay.addWidget(self.git_changes_list)
+        git_stage_row = QHBoxLayout()
+        self.git_stage_btn = QPushButton("Stage")
+        self.git_stage_btn.setToolTip(
+            "Stage (or unstage) the selected change for the next commit")
+        self.git_stage_btn.clicked.connect(self._stage_selected)
+        git_stage_row.addWidget(self.git_stage_btn)
+        git_stage_row.addStretch()
+        lay.addLayout(git_stage_row)
+        self.git_diff_view = QPlainTextEdit()
+        self.git_diff_view.setReadOnly(True)
+        self.git_diff_view.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
+        self.git_diff_view.setPlaceholderText(
+            "Select a changed file to see its diff.")
+        lay.addWidget(self.git_diff_view, 1)
+        git_commit_row = QHBoxLayout()
+        self.git_commit_message = QLineEdit()
+        self.git_commit_message.setPlaceholderText("Commit message")
+        git_commit_row.addWidget(self.git_commit_message, 1)
+        self.git_commit_btn = QPushButton("Commit staged")
+        self.git_commit_btn.setObjectName("primary")
+        self.git_commit_btn.setToolTip("Commit what is staged, with the message at the left")
+        self.git_commit_btn.clicked.connect(self._start_git_commit)
+        git_commit_row.addWidget(self.git_commit_btn)
+        self.git_push_btn = QPushButton("Push")
+        self.git_push_btn.setToolTip("Push this project's commits to its remote")
+        self.git_push_btn.clicked.connect(self._start_git_push)
+        git_commit_row.addWidget(self.git_push_btn)
+        lay.addLayout(git_commit_row)
+        # C1: the Watch seat's surface on this window — an alerts
+        # list under the run pane (the git panel's idiom) and the
+        # seat's ONE action. Monitoring is on while this project
+        # runs; the button asks the seat for a fix proposal for the
+        # selected alert, which then goes through the normal
+        # approval gate — nothing here applies anything itself.
+        watch_head = QHBoxLayout()
+        watch_title = QLabel("WATCH — MONITORING"); watch_title.setObjectName("section")
+        watch_head.addWidget(watch_title); watch_head.addStretch()
+        self.watch_state_label = QLabel("Watch seat: watching runs in this project")
+        self.watch_state_label.setObjectName("muted")
+        watch_head.addWidget(self.watch_state_label)
+        lay.addLayout(watch_head)
+        self.watch_alerts_list = QListWidget()
+        self.watch_alerts_list.setObjectName("watch_alerts_list")
+        self.watch_alerts_list.setMaximumHeight(110)
+        self.watch_alerts_list.setToolTip(
+            "Problems the Watch seat spotted in this run's output — "
+            "select one and ask for a fix proposal")
+        self.watch_alerts_list.currentRowChanged.connect(
+            self._sync_watch_controls)
+        lay.addWidget(self.watch_alerts_list)
+        watch_row = QHBoxLayout()
+        self.watch_propose_btn = QPushButton("Ask Watch seat for a fix…")
+        self.watch_propose_btn.setToolTip(
+            "Ask the Watch seat to propose a fix for the selected "
+            "alert — the proposal arrives as a normal approval diff; "
+            "nothing is applied without your approval")
+        self.watch_propose_btn.clicked.connect(self._propose_selected)
+        watch_row.addWidget(self.watch_propose_btn)
+        watch_row.addStretch()
+        lay.addLayout(watch_row)
+        self._sync_watch_controls()
+        self.refresh()
+
+    # ---------- C1: the Watch seat's alert surface ----------
+
+    def refresh_watch(self):
+        """Repaint the alerts list from the owner's run monitor —
+        called by the window whenever an alert lands or a run
+        starts. Selection is preserved by alert id where possible;
+        a monitor with no alerts shows the honest empty state in
+        the state label instead of a fake row."""
+        owner = self._owner
+        if owner is None:
+            return
+        monitor = owner._run_monitor
+        selected = self.selected_alert()
+        selected_id = selected.get("id") if selected else None
+        self.watch_alerts_list.clear()
+        for alert in monitor.active():
+            label = (f"{alert['when']} · {alert['kind']} · "
+                     f"{alert['detail']} — {alert['evidence'][:80]}")
+            if alert["count"] > 1:
+                label += f" (x{alert['count']})"
+            self.watch_alerts_list.addItem(QListWidgetItem(label))
+        if monitor.alerts:
+            self.watch_state_label.setText(
+                f"Watch seat: {len(monitor.alerts)} alert(s) this run")
+            if selected_id is not None:
+                for row, alert in enumerate(monitor.active()):
+                    if alert["id"] == selected_id:
+                        self.watch_alerts_list.setCurrentRow(row)
+                        break
+        else:
+            self.watch_state_label.setText(
+                "Watch seat: watching runs in this project")
+        self._sync_watch_controls()
+
+    def selected_alert(self):
+        """The monitor alert dict behind the current row, or None."""
+        owner = self._owner
+        if owner is None:
+            return None
+        row = self.watch_alerts_list.currentRow()
+        active = owner._run_monitor.active()
+        if 0 <= row < len(active):
+            return active[row]
+        return None
+
+    def _sync_watch_controls(self, *_):
+        self.watch_propose_btn.setEnabled(
+            self.selected_alert() is not None)
+
+    def _propose_selected(self):
+        owner = self._owner
+        alert = self.selected_alert()
+        if owner is None or alert is None:
+            return
+        owner.request_monitor_fix(alert)
+
+    def refresh(self):
+        """(Re)scan the active project: retitle for it, reload the
+        file list, auto-select the first runnable. Selection only —
+        refreshing NEVER starts a run (item #50: load is not run).
+        A live run is left entirely alone; only the list and the
+        title move, so a project switch mid-run cannot disturb it."""
+        owner = self._owner
+        if owner is None:
+            return
+        name = Path(owner.workspace).name or owner.workspace
+        self.setWindowTitle(f"Run — {name}")
+        self.run_title.setText(f"RUN — {name.upper()}")
+        self._entries = runfiles_mod.scan_runnables(owner.workspace)
+        self.run_file_list.clear()
+        for entry in self._entries:
+            label = entry["rel"] if "/" in entry["rel"] else entry["name"]
+            self.run_file_list.addItem(
+                QListWidgetItem(f"{label} — {entry['kind']}"))
+        empty = not self._entries
+        self.run_empty_label.setVisible(empty)
+        self.run_file_list.setVisible(not empty)
+        if self._entries:
+            self.run_file_list.setCurrentRow(0)
+        self._sync_run_enabled()
+        self.refresh_git()
+
+    def selected_entry(self):
+        """The runnable dict behind the current row, or None."""
+        row = self.run_file_list.currentRow()
+        if 0 <= row < len(self._entries):
+            return self._entries[row]
+        return None
+
+    def _sync_run_enabled(self, *_):
+        """Run is pressable only while idle with a file selected.
+        The list itself stays live during a run — the owner may
+        line up the next file; selecting launches nothing."""
+        owner = self._owner
+        running = owner is not None and owner.run_is_running()
+        self.run_start_btn.setEnabled(
+            not running and self.selected_entry() is not None)
+
+    def _run_selected(self):
+        owner = self._owner
+        entry = self.selected_entry()
+        if owner is None or entry is None:
+            return
+        owner.start_run(entry["command"], owner.workspace)
+
+    # ---------- G6: run blocks ----------
+
+    def new_block(self, command, cwd):
+        """Open a fresh block for a run about to launch and make
+        it the active (streaming) one. Pressing Run is a deliberate
+        act, so the view goes to the new block."""
+        block = RunBlock(command, cwd, self.run_blocks_host)
+        self.run_blocks_layout.insertWidget(
+            self.run_blocks_layout.count() - 1, block)
+        self.run_blocks.append(block)
+        self._active_block = block
+        self.run_placeholder.setVisible(False)
+        block.mark_started()
+        self._scroll_blocks_to_bottom()
+        return block
+
+    def active_block(self):
+        return self._active_block
+
+    def append_output(self, text):
+        """Stream lines into the ACTIVE block, keeping the old
+        pane's follow rule at the container level: pinned to the
+        bottom → the view follows; scrolled up → the owner's
+        place is left alone."""
+        block = self._active_block
+        if block is None:
+            owner = self._owner
+            block = self.new_block("", owner.workspace if owner else "")
+        bar = self.run_scroll.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+        old_value = bar.value()
+        block.append_lines(str(text).splitlines() or [""])
+        self._enforce_output_cap()
+        self.run_blocks_host.adjustSize()
+        if follow:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(min(old_value, bar.maximum()))
+
+    def _scroll_blocks_to_bottom(self):
+        self.run_blocks_host.adjustSize()
+        bar = self.run_scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def total_body_lines(self):
+        return sum(b.line_count() for b in self.run_blocks)
+
+    def _enforce_output_cap(self):
+        """The MAX_OUTPUT_LINES discipline, block-shaped: while
+        the bodies hold more lines in total than the cap, drop
+        the oldest FINISHED blocks whole; when no finished block
+        is left to drop, trim the oldest lines of the block that
+        remains (in practice the active one)."""
+        overflow = self.total_body_lines() - run_mod.MAX_OUTPUT_LINES
+        while overflow > 0:
+            victim = next((b for b in self.run_blocks
+                           if b.finished and b is not self._active_block),
+                          None)
+            if victim is not None:
+                overflow -= victim.line_count()
+                self._drop_block(victim)
+                continue
+            target = next((b for b in self.run_blocks
+                           if b.line_count() > 0), None)
+            if target is None:
+                break
+            overflow -= target.drop_oldest_lines(
+                min(overflow, target.line_count()))
+
+    def _drop_block(self, block):
+        self.run_blocks.remove(block)
+        self.run_blocks_layout.removeWidget(block)
+        block.setParent(None)
+        block.deleteLater()
+        if not self.run_blocks:
+            self.run_placeholder.setVisible(True)
+
+    def clear_blocks(self):
+        """Empty the stack — the blocks-era spelling of the old
+        pane's clear()."""
+        for block in list(self.run_blocks):
+            self.run_blocks_layout.removeWidget(block)
+            block.setParent(None)
+            block.deleteLater()
+        self.run_blocks = []
+        self._active_block = None
+        self.run_placeholder.setVisible(True)
+
+    def blocks_text(self):
+        """The transcript the old shared pane would have held:
+        per block, in order — '$ {command}', its output lines,
+        and its '— {label}' trailer once the run has ended."""
+        lines = []
+        for block in self.run_blocks:
+            lines.append(f"$ {block.command}")
+            lines.extend(block.body_lines())
+            if block.end_label is not None:
+                lines.append(f"— {block.end_label}")
+        return "\n".join(lines)
+
+    # ---------- item #51: the git panel ----------
+
+    def refresh_git(self):
+        """(Re)read the active project's changes into the panel —
+        ASYNC since the 2026-11-08 run-window upgrade: git runs on a
+        GitScanThread, never on the GUI thread, so opening or
+        refreshing this window cannot hitch the bench. The workspace
+        is read fresh from the owner every time — the panel is never
+        pointed at a stored path. A refresh asked for while a scan is
+        already in flight is coalesced into one follow-up scan. The
+        current list stays on screen until the new one lands. A live
+        commit/push thread is left alone; its done handler refreshes
+        again."""
+        owner = self._owner
+        if owner is None:
+            return
+        if self._git_scan_thread is not None:
+            self._git_rescan_pending = True
+            return
+        thread = GitScanThread(owner.workspace)
+        self._git_scan_thread = thread
+        thread.scanned.connect(self._on_git_scanned)
+        thread.start()
+
+    def _on_git_scanned(self, root, state, changes):
+        self._git_scan_thread = None
+        owner = self._owner
+        if owner is None:
+            return
+        if root != owner.workspace:
+            # The project moved under the scan — this result belongs
+            # to a project the owner has left; scan the real one.
+            self.refresh_git()
+            return
+        self._git_state = state
+        self._git_changes = list(changes)
+        self.git_changes_list.clear()
+        self.git_init_btn.setVisible(state == "not_repo")
+        override = self._git_label_override
+        self._git_label_override = None
+        if state == "no_git":
+            self.git_status_label.setText("git is not installed.")
+        elif state == "not_repo":
+            self.git_status_label.setText("Not a git repository.")
+        else:
+            for change in self._git_changes:
+                self.git_changes_list.addItem(
+                    QListWidgetItem(f"{change['xy']} {change['path']}"))
+            if self._git_changes:
+                self.git_status_label.setText(
+                    override or f"{len(self._git_changes)} changed file(s)")
+                if override is None:
+                    self.git_changes_list.setCurrentRow(0)
+            else:
+                self.git_status_label.setText(
+                    override or "Working tree clean.")
+                if override is None:
+                    self.git_diff_view.clear()
+        self._sync_git_controls()
+        if self._git_rescan_pending:
+            self._git_rescan_pending = False
+            self.refresh_git()
+
+    def selected_change(self):
+        """The gitpanel change dict behind the current row, or None."""
+        row = self.git_changes_list.currentRow()
+        if 0 <= row < len(self._git_changes):
+            return self._git_changes[row]
+        return None
+
+    def _sync_git_controls(self, *_):
+        """Button truth for the panel: Stage/Unstage follows the
+        selected change, Commit needs something staged, and while a
+        commit/push thread runs all three sit out."""
+        busy = self._git_thread is not None
+        change = self.selected_change()
+        if change is None:
+            self.git_stage_btn.setText("Stage")
+            self.git_stage_btn.setEnabled(False)
+        else:
+            staged_only = change["staged"] and not change["unstaged"] \
+                and not change["untracked"]
+            self.git_stage_btn.setText("Unstage" if staged_only else "Stage")
+            self.git_stage_btn.setEnabled(not busy)
+        any_staged = any(c["staged"] for c in self._git_changes)
+        self.git_commit_btn.setEnabled(not busy and any_staged)
+        self.git_push_btn.setEnabled(
+            not busy and getattr(self, "_git_state", "") == "ok")
+
+    def _on_git_selection(self, row):
+        owner = self._owner
+        change = self.selected_change()
+        if owner is None or change is None:
+            self._sync_git_controls()
+            return
+        # The diff loads off the GUI thread too (GitScanThread); a
+        # slow disk must not hitch the window on a click. The result
+        # paints only if that change is still the selected one.
+        thread = GitScanThread(owner.workspace, change)
+        self._git_diff_thread = thread
+        # Sweep R74: rapid selection changes used to race — each
+        # click replaced the thread reference unconditionally, and
+        # whichever diff finished LAST painted, even for a row the
+        # owner had already left, while an older thread's finish
+        # nulled the reference a newer thread still needed. A
+        # per-selection sequence settles it: only the newest
+        # selection's answer paints or clears the slot.
+        self._git_diff_seq = getattr(self, "_git_diff_seq", 0) + 1
+        seq = self._git_diff_seq
+        thread.diff_loaded.connect(
+            lambda path, text, s=seq: self._on_git_diff(path, text, s))
+        thread.start()
+        self._sync_git_controls()
+
+    def _on_git_diff(self, path, text, seq=None):
+        if seq is not None and seq != getattr(self, "_git_diff_seq", 0):
+            return  # a stale answer for a selection already replaced
+        self._git_diff_thread = None
+        change = self.selected_change()
+        if change is not None and change.get("path") == path:
+            self.git_diff_view.setPlainText(text)
+
+    def _stage_selected(self):
+        owner = self._owner
+        change = self.selected_change()
+        if owner is None or change is None:
+            return
+        if self._git_thread is not None:
+            return
+        staged_only = change["staged"] and not change["unstaged"] \
+            and not change["untracked"]
+        # Sweep R120: stage/unstage run on the git thread now, like
+        # commit/push — the result lands in _on_git_op_done, which
+        # paints the same failure label + output this synchronous
+        # version did (R73's contract rides the override there).
+        action = "unstage" if staged_only else "stage"
+        self._launch_git_thread(GitThread(
+            action, owner.workspace, path=change["path"]))
+
+    def _init_git(self):
+        owner = self._owner
+        if owner is None or self._git_thread is not None:
+            return
+        # Sweep R120: init rides the git thread too (it spawns git
+        # on the GUI thread before this fix); a SnapshotError comes
+        # back as the op's failure output and owns the label through
+        # _on_git_op_done's override, as it did synchronously.
+        self._launch_git_thread(GitThread("init", owner.workspace))
+
+    def _start_git_commit(self):
+        owner = self._owner
+        if owner is None or self._git_thread is not None:
+            return
+        self._launch_git_thread(GitThread(
+            "commit", owner.workspace, self.git_commit_message.text()))
+
+    def _start_git_push(self):
+        owner = self._owner
+        if owner is None or self._git_thread is not None:
+            return
+        self._launch_git_thread(GitThread("push", owner.workspace))
+
+    def _launch_git_thread(self, thread):
+        self._git_thread = thread
+        thread.done.connect(self._on_git_op_done)
+        self.git_status_label.setText("working…")
+        self._sync_git_controls()
+        thread.start()
+
+    def _on_git_op_done(self, ok, out):
+        action = self._git_thread.action if self._git_thread else ""
+        self._git_thread = None
+        first = (out or "").strip().splitlines()
+        # The op's own first line owns the status label (the panel's
+        # standing contract); the refresh below is async now, so the
+        # label travels as an override the scan's paint step honors
+        # instead of overwriting. Sweep R120: a QUIET success from
+        # stage/unstage/init sets no override — the rescan's state
+        # label paints, exactly as it did when those ops ran
+        # synchronously (the old code forced "Done." over it).
+        # Failures always ride the override (R73), and commit/push
+        # keep the standing contract unchanged.
+        if first or not ok or action in ("commit", "push"):
+            self._git_label_override = (
+                first[0] if first else ("Done." if ok else "That git action failed."))
+            self.git_status_label.setText(self._git_label_override)
+        self.refresh_git()
+        self.git_diff_view.setPlainText(out or "")
+        if ok and action == "commit":
+            self.git_commit_message.clear()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def closeEvent(self, event):
+        owner = self._owner
+        if owner is not None and owner.run_is_running():
+            owner.stop_run()
+            if owner._run_thread is not None:
+                owner._run_thread.wait(3000)
+        # Sweep R75: the window's own git threads are parentless
+        # QThreads that nothing stopped or waited for — a close
+        # could destroy the window around a still-running scan or
+        # diff load. They are bounded operations; wait briefly.
+        for thread in (self._git_scan_thread, self._git_diff_thread,
+                       self._git_thread):
+            if thread is not None and thread.isRunning():
+                thread.wait(1500)
+        event.accept()
+
+
+class DebugControlThread(QThread):
+    """One blocking debugger command, run off the GUI thread. The
+    engine (forge/debugger) is a blocking request/response driver;
+    the bench's own threads set the pattern (RunThread, the git
+    threads): the call runs here, the result lands by signal.
+
+    Signals:
+        done(object)  — whatever the callable returned
+        failed(str)   — the callable raised; the message is shown
+    """
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            result = self._fn()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.done.emit(result)
+
+
+class DebugWindow(QWidget):
+    """The Debug room: the owner side of forge/debugger, built like
+    the Run window — single instance, per-project, loads and waits.
+    The ForgeWindow owns the ONE DebugSession; this window and the
+    agent's debug_* tools drive that same session, so what the
+    owner sees here is exactly where the agent is standing.
+
+    The surface: the project's Python files (the run scan's Python
+    entries), a breakpoints box (one per line — a bare line number
+    belongs to the selected file, or ``other.py:12``), Start / Step
+    over / Step into / Continue / Stop, the stop location, the
+    frame's locals at each stop, an inspect box (one expression,
+    evaluated in the current frame), and one transcript pane
+    carrying program + debugger output. Commands run on a
+    DebugControlThread — the GUI never blocks on pdb.
+
+    Coexistence rule (v1, deliberate): a debug session will not
+    START while a Run is live — one program at a time on the bench.
+    Closing this window stops a live session, like the Run window
+    stops a run, so a session never outlives its room."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._entries: list[dict] = []
+        self._control_thread = None
+        self.resize(840, 680)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4 conformance at the Debug merge (2026-11-10): the
+        # held copy predates the GUIFX header standard, so its
+        # old section-label title row is replaced by the standard
+        # header — title + the debug status slot, exactly like
+        # the Run window's. debug_title/debug_status alias the
+        # header's labels, as run_title/run_status do.
+        self.header = build_window_header(self, "DEBUG", status_text="idle")
+        self.debug_title = self.header.title_label
+        self.debug_status = self.header.status_label
+        lay.addWidget(self.header)
+        self.debug_file_list = QListWidget()
+        self.debug_file_list.setObjectName("debug_file_list")
+        self.debug_file_list.setToolTip(
+            "The project's Python files — pick the one to debug, then press Debug.")
+        self.debug_file_list.currentRowChanged.connect(self._sync_controls)
+        lay.addWidget(self.debug_file_list)
+        self.debug_empty_label = QLabel(
+            "No Python files found in this project yet — the debugger "
+            "runs Python targets.")
+        self.debug_empty_label.setObjectName("muted")
+        self.debug_empty_label.setWordWrap(True)
+        self.debug_empty_label.setVisible(False)
+        lay.addWidget(self.debug_empty_label)
+        bp_label = QLabel("BREAKPOINTS"); bp_label.setObjectName("section")
+        lay.addWidget(bp_label)
+        self.debug_bp_edit = QPlainTextEdit()
+        self.debug_bp_edit.setMaximumHeight(64)
+        self.debug_bp_edit.setPlaceholderText(
+            "One per line: 12   or   util.py:9 — bare lines belong to the selected file")
+        lay.addWidget(self.debug_bp_edit)
+        btn_row = QHBoxLayout()
+        self.debug_start_btn = QPushButton("▶ Debug")
+        self.debug_start_btn.setObjectName("primary")
+        self.debug_start_btn.setToolTip(
+            "Run the selected file under the debugger, stopping at the first line")
+        self.debug_start_btn.clicked.connect(self._start_debug)
+        btn_row.addWidget(self.debug_start_btn)
+        self.debug_step_btn = QPushButton("Step over")
+        self.debug_step_btn.setToolTip("Execute the current line and stop at the next one")
+        self.debug_step_btn.clicked.connect(lambda: self._drive("over"))
+        btn_row.addWidget(self.debug_step_btn)
+        self.debug_into_btn = QPushButton("Step into")
+        self.debug_into_btn.setToolTip("Step into a call on the current line")
+        self.debug_into_btn.clicked.connect(lambda: self._drive("into"))
+        btn_row.addWidget(self.debug_into_btn)
+        self.debug_continue_btn = QPushButton("Continue")
+        self.debug_continue_btn.setToolTip("Run to the next breakpoint (or the end)")
+        self.debug_continue_btn.clicked.connect(lambda: self._drive("continue"))
+        btn_row.addWidget(self.debug_continue_btn)
+        self.debug_stop_btn = QPushButton("■ Stop")
+        self.debug_stop_btn.setToolTip("Stop the debug session — kills the whole process group")
+        self.debug_stop_btn.clicked.connect(self._stop_debug)
+        btn_row.addWidget(self.debug_stop_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+        self.debug_location = QLabel(""); self.debug_location.setObjectName("muted")
+        lay.addWidget(self.debug_location)
+        self.debug_output = QPlainTextEdit(); self.debug_output.setReadOnly(True)
+        self.debug_output.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
+        self.debug_output.setPlaceholderText(
+            "Program and debugger output will appear here — pick a file above and press Debug.")
+        lay.addWidget(self.debug_output, 1)
+        locals_label = QLabel("LOCALS"); locals_label.setObjectName("section")
+        lay.addWidget(locals_label)
+        self.debug_locals = QPlainTextEdit(); self.debug_locals.setReadOnly(True)
+        self.debug_locals.setMaximumHeight(84)
+        self.debug_locals.setPlaceholderText("The current frame's variables, at each stop.")
+        lay.addWidget(self.debug_locals)
+        inspect_row = QHBoxLayout()
+        self.debug_inspect_edit = QLineEdit()
+        self.debug_inspect_edit.setPlaceholderText(
+            "Inspect an expression in the current frame — e.g. x, len(items), user.name")
+        self.debug_inspect_edit.returnPressed.connect(self._inspect)
+        inspect_row.addWidget(self.debug_inspect_edit, 1)
+        self.debug_inspect_btn = QPushButton("Inspect")
+        self.debug_inspect_btn.setToolTip("Evaluate the expression where the program is stopped")
+        self.debug_inspect_btn.clicked.connect(self._inspect)
+        inspect_row.addWidget(self.debug_inspect_btn)
+        lay.addLayout(inspect_row)
+        self.refresh()
+
+    # ---------- loading ----------
+
+    def refresh(self):
+        """(Re)scan the active project for Python files and retitle
+        for it, exactly like the Run surface: loading is not
+        running, and a live session is left entirely alone."""
+        owner = self._owner
+        if owner is None:
+            return
+        name = Path(owner.workspace).name or owner.workspace
+        self.setWindowTitle(f"Debug — {name}")
+        self.debug_title.setText(f"DEBUG — {name.upper()}")
+        self._entries = [e for e in runfiles_mod.scan_runnables(owner.workspace)
+                         if e["kind"] == "Python"]
+        self.debug_file_list.clear()
+        for entry in self._entries:
+            label = entry["rel"] if "/" in entry["rel"] else entry["name"]
+            self.debug_file_list.addItem(QListWidgetItem(label))
+        empty = not self._entries
+        self.debug_empty_label.setVisible(empty)
+        self.debug_file_list.setVisible(not empty)
+        if self._entries:
+            self.debug_file_list.setCurrentRow(0)
+        if owner.debug_session_live():
+            session = owner._debug_session
+            self.debug_status.setText(
+                f"session live — {Path(session.target).name} "
+                f"(started by the agent or this window)")
+        self._sync_controls()
+
+    def selected_entry(self):
+        row = self.debug_file_list.currentRow()
+        if 0 <= row < len(self._entries):
+            return self._entries[row]
+        return None
+
+    # ---------- control state ----------
+
+    def _busy(self):
+        return self._control_thread is not None \
+            and self._control_thread.isRunning()
+
+    def _sync_controls(self, *_):
+        owner = self._owner
+        live = owner is not None and owner.debug_session_live()
+        busy = self._busy()
+        self.debug_start_btn.setEnabled(
+            not live and not busy and self.selected_entry() is not None)
+        for btn in (self.debug_step_btn, self.debug_into_btn,
+                    self.debug_continue_btn, self.debug_inspect_btn):
+            btn.setEnabled(live and not busy)
+        self.debug_stop_btn.setEnabled(live and not busy)
+
+    def _launch(self, fn, on_done):
+        """Run one engine call on the control thread; controls sit
+        out until it lands."""
+        self._control_thread = DebugControlThread(fn, self)
+        self._control_thread.done.connect(
+            lambda result: self._on_control_done(result, on_done))
+        self._control_thread.failed.connect(self._on_control_failed)
+        self._sync_controls()
+        self._control_thread.start()
+
+    def _on_control_done(self, result, on_done):
+        self._control_thread = None
+        on_done(result)
+        self._sync_controls()
+
+    def _on_control_failed(self, message):
+        self._control_thread = None
+        self.debug_status.setText(f"debugger error: {message}")
+        self._append_output(f"— debugger error: {message}")
+        self._sync_controls()
+
+    # ---------- actions ----------
+
+    def _start_debug(self):
+        owner = self._owner
+        entry = self.selected_entry()
+        if owner is None or entry is None or self._busy():
+            return
+        if owner.debug_session_live():
+            self.debug_status.setText("a debug session is already live")
+            return
+        if owner.run_is_running():
+            self.debug_status.setText(
+                "a run is live — stop it before debugging (one program at a time)")
+            return
+        try:
+            breakpoints = debugger_mod.parse_breakpoints(
+                self.debug_bp_edit.toPlainText(), entry["rel"])
+        except ValueError as exc:
+            self.debug_status.setText(str(exc))
+            return
+        self.debug_output.clear()
+        self.debug_locals.clear()
+        self.debug_status.setText("starting…")
+
+        def begin():
+            state = owner.debug_start_session(entry["rel"], breakpoints)
+            locals_text = ""
+            session = owner._debug_session
+            if state.get("status") == "stopped" and session is not None:
+                locals_text = session.locals_text()
+            return state, locals_text
+
+        self._launch(begin, lambda result: self._paint_state(*result))
+
+    def _drive(self, kind):
+        owner = self._owner
+        session = owner._debug_session if owner is not None else None
+        if session is None or self._busy():
+            return
+
+        def drive():
+            if kind == "over":
+                state = session.step_over()
+            elif kind == "into":
+                state = session.step_into()
+            else:
+                state = session.continue_()
+            locals_text = ""
+            if state.get("status") == "stopped":
+                locals_text = session.locals_text()
+            return state, locals_text
+
+        self._launch(drive, lambda result: self._paint_state(*result))
+
+    def _inspect(self):
+        owner = self._owner
+        session = owner._debug_session if owner is not None else None
+        expr = self.debug_inspect_edit.text().strip()
+        if session is None or not expr or self._busy():
+            return
+
+        def probe():
+            return expr, session.inspect(expr)
+
+        def paint(result):
+            expression, answer = result
+            self._append_output(f">>> {expression}\n{answer}")
+
+        self._launch(probe, paint)
+
+    def _stop_debug(self):
+        owner = self._owner
+        if owner is None or self._busy():
+            return
+        state = owner.debug_stop_session()
+        self._paint_state(state, "")
+
+    # ---------- painting ----------
+
+    def _append_output(self, text):
+        bar = self.debug_output.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+        old_value = bar.value()
+        for line in str(text).splitlines() or [""]:
+            self.debug_output.appendPlainText(line)
+        if follow:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(min(old_value, bar.maximum()))
+
+    def _paint_state(self, state, locals_text):
+        status = state.get("status", "")
+        if state.get("output"):
+            self._append_output(str(state["output"]).rstrip("\n"))
+        if status == "stopped":
+            self.debug_status.setText("stopped")
+            where = state.get("file") or ""
+            rel = where
+            owner = self._owner
+            if owner is not None and where:
+                try:
+                    rel = str(Path(where).relative_to(owner.workspace))
+                except ValueError:
+                    pass
+            self.debug_location.setText(
+                f"{rel}:{state.get('line')}  in {state.get('function') or ''}()")
+            if locals_text:
+                self.debug_locals.setPlainText(locals_text)
+        elif status == "finished":
+            self.debug_status.setText("finished")
+            self.debug_location.setText("")
+            self.debug_locals.clear()
+        elif status == "running":
+            self.debug_status.setText("running…")
+        elif status == "error":
+            self.debug_status.setText("no live session")
+            self.debug_location.setText("")
+        self._sync_controls()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def closeEvent(self, event):
+        owner = self._owner
+        if owner is not None and owner.debug_session_live():
+            owner.debug_stop_session()
+        if self._control_thread is not None \
+                and self._control_thread.isRunning():
+            self._control_thread.wait(1500)
+        event.accept()
+
+
+class ModeWindow(QWidget):
+    """A mode's own room (owner directive, 2026-11-08: "give each of
+    those options its own window not a panel — design has its own
+    window, plan has its own window"). One top-level window per
+    document mode, built like the Run window: single instance, opens
+    when the mode is picked, stays open alongside the bench. Inside,
+    TABS (same directive): the first tab is the mode's session work —
+    the exchanges run while that mode was active, collected as they
+    complete, so a design (or a review, or an architecture pass)
+    lives in its own room instead of scrolling away inside the Code
+    chat. The remaining tabs are the mode's DOCUMENTS: for Design,
+    one tab per kind of design (layout / ui / flow / mechanics /
+    aesthetic / systems), each reading the artifact files Design
+    mode files under .forge/design/<kind>/; Review reads
+    .forge/reviews/, Architect the project's .forge notes. The main
+    chat still keeps the full record, exactly as before. Code's
+    room (2026-11-10 upgrade, owner directive overriding the
+    earlier bench-is-the-room design point) is the CodeWindow
+    subclass: its session work plus a Changes tab of walkthroughs.
+
+    Rooms-are-tools (2026-11-10): the room is not only a viewer —
+    a composer under the Session-work transcript starts a turn in
+    this mode from inside the room (send_from_composer, the
+    WriteWindow.rewrite_selection wiring), and the session work
+    persists per project under .forge/mode-sessions/<key>.md,
+    reloaded on set_project — a room that forgets overnight is a
+    display, not a workspace."""
+
+    BLURBS = {
+        "code": "The builder's room: everything Code mode does "
+                "this session collects here — and the Changes tab "
+                "holds the walkthrough of each finished Code turn, "
+                "what it changed and how it was verified.",
+        "design": "Everything Design mode produces this session "
+                  "collects here — and its filed artifacts live in "
+                  "the kind tabs: layout, UI, flow, mechanics, "
+                  "aesthetic, systems.",
+        "architect": "Everything Architect mode produces this session "
+                     "collects here — architecture notes, decisions, specs.",
+        "review": "Everything Review mode produces this session "
+                  "collects here — findings by severity, with the fix "
+                  "each one suggests.",
+        "ask": "Everything Ask mode answers this session collects "
+               "here — read-only answers, cited from the code.",
+        "write": "The document workshop (Write/Research modes, "
+                 "2026-11-09): everything Write mode produces this "
+                 "session collects here, the Editor tab is the "
+                 "document pane — open a file, type in it, save it "
+                 "back to disk — and the Documents tab lists the "
+                 "project's own document files.",
+        "research": "Deep research, gated and budgeted "
+                    "(Write/Research modes, 2026-11-09): the plan "
+                    "is approved before anything browses, and the "
+                    "finished reports live in the Reports tab — "
+                    "real files under .forge/research/, with the "
+                    "sources cited and the sources consulted both "
+                    "listed.",
+    }
+
+    # (tab label, project-relative folder) per mode.
+    DOC_TABS = {
+        "design": [("Layout", ".forge/design/layout"),
+                   ("UI", ".forge/design/ui"),
+                   ("Flow", ".forge/design/flow"),
+                   ("Mechanics", ".forge/design/mechanics"),
+                   ("Aesthetic", ".forge/design/aesthetic"),
+                   ("Systems", ".forge/design/systems")],
+        "architect": [("Architecture", ".forge/architecture"),
+                      ("Notes", ".forge")],
+        "review": [("Reviews", ".forge/reviews")],
+        "ask": [],
+        # Write's documents are the project's own files — the tab
+        # lists the document files at the project root, honestly
+        # from disk; the Editor tab is where they are worked on.
+        "write": [("Documents", ".")],
+        # Research files its plans and reports in one folder; the
+        # tabs split them by name (-plan.md) in ResearchWindow's
+        # _doc_tab_filter.
+        "research": [("Plans", ".forge/research"),
+                     ("Reports", ".forge/research")],
+        # Code's documents are its walkthrough artifacts, listed
+        # by CodeWindow's own Changes tab — no folder tabs here.
+        "code": [],
+    }
+    DOC_EXTS = (".md", ".txt", ".html", ".svg", ".json", ".csv",
+                ".tsv", ".yaml", ".yml", ".rst", ".tex")
+
+    def __init__(self, owner, key):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.key = key
+        self.label = key.capitalize()
+        self._workspace = getattr(owner, "workspace", "")
+        self.resize(820, 640)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header carries the mode title. This
+        # window has no header actions at all — nothing to overflow.
+        self.header = build_window_header(self, self.label.upper())
+        self.mode_title = self.header.title_label
+        lay.addWidget(self.header)
+        blurb = QLabel(self.BLURBS.get(key, ""))
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.tabs = QTabWidget()
+        lay.addWidget(self.tabs, 1)
+        self.transcript = QPlainTextEdit(); self.transcript.setReadOnly(True)
+        # Sweep R80: the transcript grows by one exchange per turn
+        # in the mode, forever — the Run window's panes have always
+        # capped their blocks (runfiles' MAX_OUTPUT_LINES); this
+        # one never did. Same cap, oldest exchanges fall off.
+        self.transcript.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
+        self.transcript.setPlaceholderText(
+            f"Nothing yet — run a {self.label} turn and its result "
+            "lands here.")
+        # Rooms-are-tools (2026-11-10): the Session tab is a page,
+        # not just the transcript — the composer under the
+        # transcript is how a turn STARTS from inside the room:
+        # type, Send, and the turn runs on the bench in this mode
+        # (the WriteWindow.rewrite_selection wiring), its result
+        # landing above like any bench-run turn in the mode.
+        session_page = QWidget()
+        session_lay = QVBoxLayout(session_page)
+        session_lay.setContentsMargins(0, 0, 0, 0)
+        session_lay.setSpacing(6)
+        # Kept on the instance: room subclasses (Review's focus
+        # picks, Ask's open-source row) add their controls here.
+        self.session_lay = session_lay
+        session_lay.addWidget(self.transcript, 1)
+        self.composer = QPlainTextEdit()
+        self.composer.setPlaceholderText(
+            f"Type here — Send runs a {self.label} turn on the "
+            "bench; the result lands above.")
+        self.composer.setMaximumHeight(72)
+        session_lay.addWidget(self.composer)
+        composer_row = QHBoxLayout()
+        self.composer_status = QLabel("")
+        self.composer_status.setObjectName("muted")
+        self.composer_status.setWordWrap(True)
+        composer_row.addWidget(self.composer_status, 1)
+        self.composer_send_btn = QPushButton("Send")
+        self.composer_send_btn.setToolTip(
+            f"Run a {self.label} turn with what's typed above — "
+            "it runs on the bench, in this mode")
+        self.composer_send_btn.clicked.connect(self.send_from_composer)
+        composer_row.addWidget(self.composer_send_btn)
+        session_lay.addLayout(composer_row)
+        self.tabs.addTab(session_page, "Session work")
+        # Document tabs: label -> (list widget, viewer, [paths]).
+        # _doc_pages keeps the page widget itself so subclasses
+        # can extend a page (Architect's outline, Review's
+        # findings column, Research's sources strip).
+        self._doc_tabs = {}
+        self._doc_pages = {}
+        for tab_label, _rel in self.DOC_TABS.get(key, []):
+            page = QWidget()
+            page_lay = QHBoxLayout(page)
+            page_lay.setContentsMargins(0, 0, 0, 0); page_lay.setSpacing(8)
+            listing = QListWidget(); listing.setMaximumWidth(240)
+            viewer = QPlainTextEdit(); viewer.setReadOnly(True)
+            viewer.setPlaceholderText(
+                "No documents filed here yet — this tab reads the "
+                "files this mode files in the project.")
+            listing.currentRowChanged.connect(
+                lambda row, lbl=tab_label: self._show_doc(lbl, row))
+            page_lay.addWidget(listing); page_lay.addWidget(viewer, 1)
+            self.tabs.addTab(page, tab_label)
+            self._doc_tabs[tab_label] = (listing, viewer, [])
+            self._doc_pages[tab_label] = page
+        self.set_project(self._workspace)
+
+    def set_project(self, workspace):
+        self._workspace = workspace or ""
+        name = Path(self._workspace).name or self._workspace
+        self.setWindowTitle(f"{self.label} — {name}" if name
+                            else f"{self.label} — Code Forge")
+        self.mode_title.setText(f"{self.label.upper()} — {name.upper()}"
+                                if name else self.label.upper())
+        self._load_session()
+        self.refresh_documents()
+
+    # -- session persistence (rooms-are-tools, 2026-11-10) ------
+    def _session_path(self):
+        """This room's saved session file for the active project,
+        or None when no project is open."""
+        if not self._workspace:
+            return None
+        return (Path(self._workspace) / ".forge" / "mode-sessions"
+                / f"{self.key}.md")
+
+    def _load_session(self):
+        """(Re)fill the transcript from the project's saved
+        session for this mode. The transcript is per-project:
+        switching projects shows THAT project's room, restored
+        from its file — the display cap still applies."""
+        self.transcript.clear()
+        path = self._session_path()
+        if path is None:
+            return
+        try:
+            saved = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        if saved.strip():
+            self.transcript.setPlainText(saved)
+
+    def _file_session(self, block):
+        """Append one transcript block to the project's session
+        file. Silent on failure, like artifact filing: a room
+        that cannot save must never break the turn it records."""
+        path = self._session_path()
+        if path is None or not block:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(block)
+        except Exception:
+            pass
+
+    def refresh_documents(self):
+        """(Re)read this mode's document folders from the active
+        project. Missing folders are simply empty tabs."""
+        if not self._workspace:
+            return
+        root = Path(self._workspace)
+        for tab_label, rel in self.DOC_TABS.get(self.key, []):
+            listing, viewer, _old = self._doc_tabs[tab_label]
+            folder = root / rel
+            paths = []
+            if folder.is_dir():
+                paths = sorted(
+                    p for p in folder.iterdir()
+                    if p.is_file() and p.suffix.lower() in self.DOC_EXTS)
+            paths = self._doc_tab_filter(tab_label, paths)
+            self._doc_tabs[tab_label] = (listing, viewer, paths)
+            listing.clear()
+            for p in paths:
+                listing.addItem(QListWidgetItem(p.name))
+            if paths:
+                listing.setCurrentRow(0)
+            else:
+                viewer.clear()
+
+    #: Sweep R81: a document tab's viewer reads at most this many
+    #: bytes whole — a generated .html/.json in a docs folder can
+    #: be megabytes, and refresh selects the first file of every
+    #: tab, so merely OPENING the window read them all, whole.
+    _DOC_VIEW_CAP = 512 * 1024
+
+    def _show_doc(self, tab_label, row):
+        entry = self._doc_tabs.get(tab_label)
+        if entry is None:
+            return
+        _listing, viewer, paths = entry
+        if 0 <= row < len(paths):
+            path = paths[row]
+            try:
+                size = path.stat().st_size
+                if size > self._DOC_VIEW_CAP:
+                    head = path.read_bytes()[:self._DOC_VIEW_CAP].decode(
+                        "utf-8", "replace")
+                    viewer.setPlainText(
+                        head + f"\n\n… (showing the first "
+                        f"{self._DOC_VIEW_CAP // 1024} KB of "
+                        f"{size:,} bytes — open the file itself for "
+                        "the whole document)")
+                else:
+                    viewer.setPlainText(
+                        path.read_text(encoding="utf-8", errors="replace"))
+            except OSError as exc:
+                viewer.setPlainText(f"(could not read that file: {exc})")
+            self._on_doc_shown(tab_label, path)
+
+    # -- subclass hooks (mode-room upgrades, 2026-11-10) --------
+    def _doc_tab_filter(self, tab_label, paths):
+        """Which of a doc tab's enumerated files the tab lists.
+        The base lists them all; ResearchWindow splits its one
+        folder into plans and reports by name. Runs inside
+        refresh_documents on paths already enumerated — no new
+        scanning."""
+        return paths
+
+    def _on_doc_shown(self, tab_label, path):
+        """A document was just shown in a doc tab's viewer.
+        Subclasses hang their per-document views off this
+        (Architect's outline, Review's findings, Research's
+        sources, Design's preview source) — populated lazily, for
+        the selected document only."""
+
+    def _bench_turn(self, label, text):
+        """Run one bench turn in `label` mode with `text`: the
+        shared composer wiring (set the mode, set the input,
+        send). Returns (True, "") when the turn was handed to the
+        bench, or (False, why) with why "empty" or "bench" — the
+        caller words the refusal on its own status line."""
+        if not (text or "").strip():
+            return (False, "empty")
+        owner = self._owner
+        input_box = getattr(owner, "input", None)
+        send = getattr(owner, "send_message", None)
+        if input_box is None or send is None:
+            return (False, "bench")
+        combo = getattr(owner, "mode_combo", None)
+        if combo is not None:
+            combo.setCurrentText(label)
+        input_box.setPlainText(text)
+        send()
+        return (True, "")
+
+    def send_from_composer(self):
+        """The room's Send: the composer's text runs as a turn in
+        this mode on the bench — the WriteWindow.rewrite_selection
+        wiring (set the mode, set the input, send). The bench's
+        own guards settle busy turns, so the room adds no gate of
+        its own; an empty composer and a missing bench are
+        answered on the status line, in words."""
+        text = self.composer.toPlainText()
+        ok, why = self._bench_turn(self.label, text)
+        if not ok:
+            self.composer_status.setText(
+                "Type something first — there's nothing to send yet."
+                if why == "empty" else
+                "The bench is not available to run the turn.")
+            return
+        self.composer.clear()
+        self.composer_status.setText(
+            f"Sent as a {self.label} turn — it runs on the bench, "
+            "and the result lands above when the turn finishes.")
+
+    def add_exchange(self, prompt, reply):
+        """One finished turn in this mode: the owner's words and the
+        mode's answer, appended as a pair when the turn completes."""
+        block = []
+        if prompt:
+            block.append(f"You:\n{prompt}")
+        if reply:
+            block.append(f"Forge — {self.label}:\n{reply}")
+        if block:
+            text = "\n\n".join(block) + "\n\n———\n"
+            self.transcript.appendPlainText(text)
+            self._file_session(text)
+
+    def add_note(self, text):
+        if text:
+            block = text + "\n\n———\n"
+            self.transcript.appendPlainText(block)
+            self._file_session(block)
+
+
+class WriteWindow(ModeWindow):
+    """The Write mode room (Write/Research spec, 2026-11-09): a
+    ModeWindow plus its Editor tab — the document pane. The pane
+    is bound to a REAL file in the project: Open loads it, typing
+    edits it, Save writes it back to disk (the owner's own hands
+    need no approval), and a finished Write turn reloads it when
+    the file changed underneath and the pane holds no unsaved
+    typing. The third edit path is the selection rewrite: select
+    a passage, say how it should change, and the instruction goes
+    through the bench's normal turn machinery (the Recipes
+    window's pattern: set the mode, set the input, send) with the
+    selection pinned in the prompt, so the model's edit lands
+    through edit_file — gated, diffed, and graded like any other
+    write — and only on that passage."""
+
+    def __init__(self, owner, key="write"):
+        super().__init__(owner, key)
+        self._editor_path = ""
+        self._editor_mtime = None
+        self._editor_dirty = False
+        # Version stepping (2026-11-10): the stamp of the saved
+        # version the pane is currently VIEWING, or None when the
+        # pane holds the live draft; _loading_version marks a
+        # programmatic pane load so it is not read as typing.
+        self._viewing_stamp = None
+        self._loading_version = False
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        path_row = QHBoxLayout()
+        self.doc_path_edit = QLineEdit()
+        self.doc_path_edit.setPlaceholderText(
+            "File inside the project — e.g. notes/letter.md")
+        path_row.addWidget(self.doc_path_edit, 1)
+        self.doc_open_btn = QPushButton("Open")
+        self.doc_open_btn.setToolTip("Load the file into the document pane")
+        self.doc_open_btn.clicked.connect(self.open_document)
+        path_row.addWidget(self.doc_open_btn)
+        self.doc_save_btn = QPushButton("Save")
+        self.doc_save_btn.setToolTip("Write the pane back to the file on disk")
+        self.doc_save_btn.clicked.connect(self.save_document)
+        path_row.addWidget(self.doc_save_btn)
+        self.doc_new_btn = QPushButton("New")
+        self.doc_new_btn.setToolTip(
+            "Start a new document — clears the pane; give it a "
+            "path above and Save to create the file")
+        self.doc_new_btn.clicked.connect(self.new_document)
+        path_row.addWidget(self.doc_new_btn)
+        lay.addLayout(path_row)
+        self.doc_editor = QPlainTextEdit()
+        self.doc_editor.setPlaceholderText(
+            "The document lives here — open a file above, or type "
+            "and Save to create it. Everything in this pane is the "
+            "real file: Save writes it to disk in the project.")
+        self.doc_editor.textChanged.connect(self._note_editor_dirty)
+        lay.addWidget(self.doc_editor, 1)
+        # Item #67 adoption (W+R merge, 2026-11-10): the Write
+        # window's Editor pane takes the same lexical tab
+        # completions as the plugin editor's Code pane — one call,
+        # the return value kept alive on the window.
+        self._code_completion = completion_mod.attach_code_completion(
+            self.doc_editor)
+        sel_row = QHBoxLayout()
+        self.selection_instr_edit = QLineEdit()
+        self.selection_instr_edit.setPlaceholderText(
+            "Select a passage above, then say how to rewrite just that…")
+        sel_row.addWidget(self.selection_instr_edit, 1)
+        self.selection_rewrite_btn = QPushButton("Rewrite selection")
+        self.selection_rewrite_btn.setToolTip(
+            "Send the selected passage + your instruction as a Write "
+            "turn — the model changes only that passage (edit_file)")
+        self.selection_rewrite_btn.clicked.connect(self.rewrite_selection)
+        sel_row.addWidget(self.selection_rewrite_btn)
+        lay.addLayout(sel_row)
+        # Version stepping: Prev/Next walk the snapshots taken
+        # when a document is opened and before each Save that
+        # changes it (see _take_snapshot).
+        version_row = QHBoxLayout()
+        self.version_prev_btn = QPushButton("◀ Prev")
+        self.version_prev_btn.setToolTip(
+            "Step back to an earlier saved version of this file")
+        self.version_prev_btn.clicked.connect(
+            lambda: self._step_version(-1))
+        version_row.addWidget(self.version_prev_btn)
+        self.version_next_btn = QPushButton("Next ▶")
+        self.version_next_btn.setToolTip(
+            "Step forward — past the newest version is the live file")
+        self.version_next_btn.clicked.connect(
+            lambda: self._step_version(1))
+        version_row.addWidget(self.version_next_btn)
+        self.version_status = QLabel("")
+        self.version_status.setObjectName("muted")
+        self.version_status.setWordWrap(True)
+        version_row.addWidget(self.version_status, 1)
+        lay.addLayout(version_row)
+        self.editor_status = QLabel("")
+        self.editor_status.setObjectName("muted")
+        self.editor_status.setWordWrap(True)
+        lay.addWidget(self.editor_status)
+        self.tabs.insertTab(1, page, "Editor")
+        # Rooms-are-tools (2026-11-10): open on the Editor — the
+        # working pane is this room's front door, not the
+        # (possibly empty) session transcript in front of it.
+        self.tabs.setCurrentIndex(1)
+        # Double-clicking a file in the Documents tab loads it
+        # into this Editor (2026-11-10 upgrade) — the tab stops
+        # being a separate read-only viewer for Write's own room.
+        _docs = self._doc_tabs.get("Documents")
+        if _docs is not None:
+            _docs[0].itemDoubleClicked.connect(
+                self._open_doc_from_list)
+
+    def _note_editor_dirty(self):
+        self._editor_dirty = True
+        # Typing while VIEWING a saved version returns the pane
+        # to the live draft (the typed text stays — it IS the
+        # draft now); programmatic loads are not typing.
+        if self._viewing_stamp is not None \
+                and not self._loading_version:
+            self._viewing_stamp = None
+            self.version_status.setText(
+                "Editing the live draft — Save writes it to "
+                "the file.")
+
+    def _editor_target(self, raw: str):
+        """The workspace-jailed target for a pane path, or None
+        (with the reason on the status line). The pane works on
+        the project's own files — the same jail the tools use."""
+        raw = (raw or "").strip()
+        if not raw:
+            self.editor_status.setText("Give a file path first.")
+            return None
+        if not self._workspace:
+            self.editor_status.setText("No project is open.")
+            return None
+        root = Path(self._workspace).resolve()
+        target = (root / raw).resolve()
+        if target != root and root not in target.parents:
+            self.editor_status.setText(
+                "That path is outside the project — the pane only "
+                "works on the project's own files.")
+            return None
+        return target
+
+    def open_document(self):
+        target = self._editor_target(self.doc_path_edit.text())
+        if target is None:
+            return
+        if not target.is_file():
+            self.editor_status.setText(
+                f"{target.name} does not exist yet — type the "
+                "document and Save to create it.")
+            self.doc_editor.clear()
+            self._editor_path = str(target)
+            self._editor_mtime = None
+            self._editor_dirty = False
+            self._viewing_stamp = None
+            self.version_status.setText("")
+            return
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            self.editor_status.setText(f"Could not read that file: {exc}")
+            return
+        # Opening snapshots the on-disk content, so the version
+        # being left behind is steppable back to.
+        self._take_snapshot(target)
+        self.doc_editor.setPlainText(text)
+        self._editor_path = str(target)
+        try:
+            self._editor_mtime = target.stat().st_mtime
+        except OSError:
+            self._editor_mtime = None
+        self._editor_dirty = False
+        self._viewing_stamp = None
+        self.version_status.setText(
+            "On the live file — Prev steps back through its "
+            "saved versions.")
+        self.editor_status.setText(f"Opened {target.name}.")
+
+    def save_document(self):
+        raw = self.doc_path_edit.text().strip() or self._editor_path
+        target = self._editor_target(raw)
+        if target is None:
+            return
+        # Before a Save overwrites CHANGED on-disk content, that
+        # content is snapshotted — no version of the file is ever
+        # lost to a Save.
+        if target.is_file():
+            try:
+                on_disk = target.read_text(encoding="utf-8",
+                                           errors="replace")
+            except OSError:
+                on_disk = None
+            if on_disk is not None \
+                    and on_disk != self.doc_editor.toPlainText():
+                self._take_snapshot(target)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(self.doc_editor.toPlainText(),
+                              encoding="utf-8")
+            self._editor_mtime = target.stat().st_mtime
+        except OSError as exc:
+            self.editor_status.setText(f"Could not save: {exc}")
+            return
+        self._editor_path = str(target)
+        self._editor_dirty = False
+        self._viewing_stamp = None
+        self.version_status.setText(
+            "Saved — on the live file, with its earlier versions "
+            "kept under Prev.")
+        size = target.stat().st_size
+        self.editor_status.setText(
+            f"Saved {target.name} ({size} bytes) — the real file, "
+            "on disk in the project.")
+        self.refresh_documents()
+
+    def rewrite_selection(self):
+        """The selection edit path: the selected passage + the
+        owner's instruction, pinned into a prompt and sent through
+        the bench's normal turn machinery in Write mode. The model
+        is told to change ONLY the passage, via edit_file with
+        old_text set to the passage exactly — so the edit is
+        approval-gated and surgical by construction."""
+        owner = self._owner
+        if not self._editor_path:
+            self.editor_status.setText("Open a document first.")
+            return
+        cursor = self.doc_editor.textCursor()
+        selection = cursor.selectedText().replace("\u2029", "\n")  # Qt marks line breaks in a selection as U+2029
+        if not selection.strip():
+            self.editor_status.setText(
+                "Select a passage in the document first — only the "
+                "selection is rewritten.")
+            return
+        instruction = self.selection_instr_edit.text().strip()
+        if not instruction:
+            self.editor_status.setText(
+                "Say how the passage should change first.")
+            return
+        rel = Path(self._editor_path).name
+        try:
+            rel = str(Path(self._editor_path).relative_to(
+                Path(self._workspace).resolve()))
+        except (ValueError, OSError):
+            pass
+        prompt = (
+            f"In Write mode, edit the file {rel}: rewrite ONLY the "
+            f"passage between the markers, following this "
+            f"instruction: {instruction}\n\n"
+            f"<<<PASSAGE\n{selection}\nPASSAGE>>>\n\n"
+            "Use edit_file with old_text set to exactly that "
+            "passage and new_text set to your rewrite of it. "
+            "Change nothing else in the file.")
+        combo = getattr(owner, "mode_combo", None)
+        if combo is not None:
+            combo.setCurrentText("Write")
+        input_box = getattr(owner, "input", None)
+        send = getattr(owner, "send_message", None)
+        if input_box is None or send is None:
+            self.editor_status.setText(
+                "The bench is not available to run the turn.")
+            return
+        input_box.setPlainText(prompt)
+        send()
+        self.editor_status.setText(
+            "Selection sent as a Write turn — the rewrite lands "
+            "through the approval gate, on that passage only.")
+
+    def add_exchange(self, prompt, reply):
+        """A finished turn may have edited the pane's file (a
+        chat-driven edit): reload it when the file on disk is
+        newer than the pane's copy — unless the owner has unsaved
+        typing in the pane, which is never clobbered."""
+        super().add_exchange(prompt, reply)
+        if not self._editor_path or self._editor_dirty:
+            return
+        target = Path(self._editor_path)
+        try:
+            mtime = target.stat().st_mtime
+        except OSError:
+            return
+        if self._editor_mtime is not None and mtime <= self._editor_mtime:
+            return
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        self.doc_editor.setPlainText(text)
+        self._editor_mtime = mtime
+        self._editor_dirty = False
+
+    # -- version stepping + New + Documents loading -------------
+    # (mode-room upgrades, 2026-11-10)
+    def _history_dir(self, target):
+        """The snapshot folder for one project file:
+        .forge/write-history/<sanitized relative path>/ — the
+        separator-folded relative path keeps two files of the
+        same name in different folders apart. None when the
+        target sits outside the project."""
+        if not self._workspace:
+            return None
+        root = Path(self._workspace).resolve()
+        try:
+            rel = target.resolve().relative_to(root)
+        except (ValueError, OSError):
+            return None
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                           rel.as_posix().replace("/", "__"))
+        return root / ".forge" / "write-history" / sanitized
+
+    def _take_snapshot(self, target):
+        """Snapshot the target's CURRENT on-disk content into
+        its history folder. Skips an exact repeat of the newest
+        snapshot (stepping through duplicates would be noise).
+        Silent on failure — history must never break editing."""
+        try:
+            if not target.is_file():
+                return
+            data = target.read_bytes()
+            folder = self._history_dir(target)
+            if folder is None:
+                return
+            existing = sorted(folder.glob("*.txt")) \
+                if folder.is_dir() else []
+            if existing:
+                try:
+                    if existing[-1].read_bytes() == data:
+                        return
+                except OSError:
+                    pass
+            folder.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) \
+                + f"-{int((time.time() % 1) * 1000000):06d}"
+            (folder / f"{stamp}.txt").write_bytes(data)
+        except Exception:
+            pass
+
+    def _version_paths(self, target):
+        folder = self._history_dir(target)
+        if folder is None or not folder.is_dir():
+            return []
+        return sorted(folder.glob("*.txt"))
+
+    def _step_version(self, delta):
+        """Prev/Next through the open file's snapshots. Stepping
+        loads the snapshot into the pane as a VIEW (Save writes
+        it back as the current file; typing returns to the live
+        draft); stepping forward past the newest snapshot
+        returns to the live file itself."""
+        if not self._editor_path:
+            self.version_status.setText("Open a document first.")
+            return
+        target = Path(self._editor_path)
+        versions = self._version_paths(target)
+        if not versions:
+            self.version_status.setText(
+                "No earlier versions yet — a snapshot is taken "
+                "when a document opens and before each Save that "
+                "changes the file.")
+            return
+        stamps = [p.stem for p in versions]
+        if self._viewing_stamp is None:
+            if delta > 0:
+                self.version_status.setText(
+                    "Already on the live file.")
+                return
+            index = len(versions) - 1
+        else:
+            try:
+                index = stamps.index(self._viewing_stamp) + delta
+            except ValueError:
+                index = len(versions) - 1 if delta < 0 else len(versions)
+        if index >= len(versions):
+            # Forward past the newest snapshot: back to live.
+            self._viewing_stamp = None
+            if target.is_file():
+                try:
+                    live = target.read_text(encoding="utf-8",
+                                            errors="replace")
+                except OSError:
+                    live = None
+                if live is not None:
+                    self._loading_version = True
+                    self.doc_editor.setPlainText(live)
+                    self._loading_version = False
+                    self._editor_dirty = False
+            self.version_status.setText("Back to the live file.")
+            return
+        index = max(0, index)
+        path = versions[index]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            self.version_status.setText(
+                f"Could not read that version: {exc}")
+            return
+        self._loading_version = True
+        self.doc_editor.setPlainText(text)
+        self._loading_version = False
+        self._viewing_stamp = path.stem
+        self._editor_dirty = True
+        self.version_status.setText(
+            f"Viewing version from {path.stem} — Save writes it "
+            "back as the current file; typing returns you to "
+            "the live draft.")
+
+    def new_document(self):
+        """New: a blank pane and no bound file — type, then give
+        it a path and Save to create the file (the status says
+        exactly that)."""
+        self.doc_path_edit.clear()
+        self._loading_version = True
+        self.doc_editor.clear()
+        self._loading_version = False
+        self._editor_path = ""
+        self._editor_mtime = None
+        self._editor_dirty = False
+        self._viewing_stamp = None
+        self.version_status.setText("")
+        self.editor_status.setText(
+            "New document — type it here, then put its path "
+            "above and Save to create the file.")
+
+    def _open_doc_from_list(self, item):
+        """A double-click in the Documents tab loads that file
+        into the Editor and brings the Editor forward."""
+        entry = self._doc_tabs.get("Documents")
+        if entry is None:
+            return
+        listing, _viewer, paths = entry
+        row = listing.row(item)
+        if not (0 <= row < len(paths)):
+            return
+        target = paths[row]
+        try:
+            rel = target.resolve().relative_to(
+                Path(self._workspace).resolve()).as_posix()
+        except (ValueError, OSError):
+            rel = target.name
+        self.doc_path_edit.setText(rel)
+        self.open_document()
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "Editor":
+                self.tabs.setCurrentIndex(i)
+                break
+
+
+
+class CodeWindow(ModeWindow):
+    """Code's room (2026-11-10 upgrade — the owner's directive
+    that every mode gets a room built to its function overrides
+    the earlier "the bench itself is Code's room" design point).
+    The base room gives it the composer and the persisted
+    session; this subclass adds the Changes tab: the walkthrough
+    artifacts of finished Code turns, newest first — what the
+    builder changed and how it verified, readable in the room.
+    The list is built in refresh_documents (on project switch /
+    open) from the artifact index, and a walkthrough's text is
+    read only when it is selected — nothing runs on open."""
+
+    def __init__(self, owner, key="code"):
+        self._changes_entries = []
+        super().__init__(owner, key)
+        page = QWidget()
+        page_lay = QHBoxLayout(page)
+        page_lay.setContentsMargins(0, 0, 0, 0); page_lay.setSpacing(8)
+        self._changes_list = QListWidget()
+        self._changes_list.setMaximumWidth(280)
+        self._changes_view = QPlainTextEdit()
+        self._changes_view.setReadOnly(True)
+        self._changes_view.setPlaceholderText(
+            "The walkthrough of each finished Code turn lands "
+            "here — what it changed and how it was verified.")
+        self._changes_list.currentRowChanged.connect(
+            self._show_change)
+        page_lay.addWidget(self._changes_list)
+        page_lay.addWidget(self._changes_view, 1)
+        self.tabs.addTab(page, "Changes")
+        self._doc_pages["Changes"] = page
+        self.refresh_documents()
+
+    def refresh_documents(self):
+        super().refresh_documents()
+        listing = getattr(self, "_changes_list", None)
+        if listing is None:
+            return  # still inside ModeWindow.__init__
+        self._changes_entries = []
+        listing.clear()
+        if not self._workspace:
+            return
+        try:
+            entries = [e for e in artifacts_mod.list_artifacts(
+                self._workspace) if e.get("kind") == "walkthrough"]
+        except Exception:
+            entries = []
+        self._changes_entries = entries
+        for e in entries:
+            listing.addItem(QListWidgetItem(
+                e.get("title") or e.get("file") or "Walkthrough"))
+        if entries:
+            listing.setCurrentRow(0)
+        else:
+            self._changes_view.clear()
+
+    def _show_change(self, row):
+        if 0 <= row < len(self._changes_entries):
+            self._changes_view.setPlainText(artifacts_mod.read_text(
+                self._workspace, self._changes_entries[row]))
+
+
+class DesignWindow(ModeWindow):
+    """The Design room with eyes (2026-11-10 upgrade): a Preview
+    tab renders the SELECTED filed design — SVG rasterized at
+    the preview's size, HTML in a browser pane with the file's
+    folder as base so its images resolve — and an "Open in
+    Design Canvas" button raises the C5 canvas window. The
+    preview renders only the selected document, only when the
+    Preview tab is showing or the selection changes while it
+    shows, and its input is capped like every document view."""
+
+    def __init__(self, owner, key="design"):
+        self._preview_source = None
+        super().__init__(owner, key)
+        self.canvas_btn = QPushButton("Open in Design Canvas")
+        self.canvas_btn.setToolTip(
+            "Raise the design canvas — lay this design out as "
+            "frames, and send frames back to the bench")
+        self.canvas_btn.clicked.connect(self.open_in_canvas)
+        self.header.slot_layout.addWidget(self.canvas_btn)
+        page = QWidget()
+        page_lay = QVBoxLayout(page)
+        page_lay.setContentsMargins(0, 0, 0, 0); page_lay.setSpacing(6)
+        self.preview_note = QLabel(
+            "Select a design document in a kind tab, then open "
+            "Preview — SVG and HTML designs render here.")
+        self.preview_note.setObjectName("muted")
+        self.preview_note.setWordWrap(True)
+        page_lay.addWidget(self.preview_note)
+        self.preview_image = QLabel()
+        self.preview_image.setAlignment(Qt.AlignCenter)
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setWidget(self.preview_image)
+        self._preview_scroll.setWidgetResizable(True)
+        page_lay.addWidget(self._preview_scroll, 1)
+        self.preview_html = QTextBrowser()
+        self.preview_html.setOpenLinks(False)
+        self.preview_html.hide()
+        page_lay.addWidget(self.preview_html, 1)
+        self.tabs.addTab(page, "Preview")
+        self._preview_page = page
+        self.tabs.currentChanged.connect(self._preview_tab_shown)
+
+    def _preview_tab_shown(self, index):
+        if self.tabs.widget(index) is self._preview_page:
+            self._render_preview()
+
+    def _on_doc_shown(self, tab_label, path):
+        self._preview_source = path
+        page = getattr(self, "_preview_page", None)
+        if page is not None and self.tabs.currentWidget() is page:
+            self._render_preview()
+
+    def _render_preview(self):
+        from PySide6.QtCore import QByteArray, QUrl
+        path = self._preview_source
+        self.preview_html.hide()
+        self._preview_scroll.show()
+        if path is None or not Path(path).is_file():
+            self.preview_image.clear()
+            self.preview_note.setText(
+                "Select a design document in a kind tab, then "
+                "open Preview — SVG and HTML designs render here.")
+            return
+        suffix = Path(path).suffix.lower()
+        try:
+            size = Path(path).stat().st_size
+        except OSError:
+            size = 0
+        if suffix == ".svg":
+            if QSvgRenderer is None:
+                self.preview_image.clear()
+                self.preview_note.setText(
+                    "This PySide6 build has no QtSvg — SVG "
+                    "previews are unavailable; the design's text "
+                    "is in its kind tab.")
+                return
+            if size > self._DOC_VIEW_CAP:
+                self.preview_image.clear()
+                self.preview_note.setText(
+                    f"{Path(path).name} is {size:,} bytes — too "
+                    "large to preview whole; its text is in its "
+                    "kind tab.")
+                return
+            try:
+                data = Path(path).read_bytes()
+            except OSError as exc:
+                self.preview_note.setText(
+                    f"(could not read that file: {exc})")
+                return
+            renderer = QSvgRenderer(QByteArray(data))
+            if not renderer.isValid():
+                self.preview_image.clear()
+                self.preview_note.setText(
+                    f"{Path(path).name} did not parse as SVG — "
+                    "its text is in its kind tab.")
+                return
+            default = renderer.defaultSize()
+            view_w = max(320, self._preview_scroll.viewport().width())
+            view_h = max(240, self._preview_scroll.viewport().height())
+            scale = min(view_w / max(1, default.width()),
+                        view_h / max(1, default.height()))
+            w = max(1, int(default.width() * scale))
+            h = max(1, int(default.height() * scale))
+            pixmap = QPixmap(w, h)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            renderer.render(painter)
+            painter.end()
+            self.preview_image.setPixmap(pixmap)
+            self.preview_note.setText(
+                f"Previewing {Path(path).name} (SVG, {w}×{h}).")
+        elif suffix in (".html", ".htm"):
+            try:
+                raw = Path(path).read_bytes()[:self._DOC_VIEW_CAP]
+                text = raw.decode("utf-8", "replace")
+            except OSError as exc:
+                self.preview_note.setText(
+                    f"(could not read that file: {exc})")
+                return
+            self._preview_scroll.hide()
+            # The file's folder is the document base so relative
+            # images resolve (QTextBrowser.setHtml takes no base
+            # argument in PySide6 — the base rides the document).
+            self.preview_html.document().setBaseUrl(
+                QUrl.fromLocalFile(str(Path(path).parent) + "/"))
+            self.preview_html.setHtml(text)
+            self.preview_html.show()
+            self.preview_note.setText(
+                f"Previewing {Path(path).name} (HTML).")
+        else:
+            self.preview_image.clear()
+            self.preview_note.setText(
+                f"Preview covers SVG and HTML designs — "
+                f"{Path(path).name} is shown as text in its "
+                "kind tab.")
+
+    def open_in_canvas(self):
+        """Raise the owner's design canvas window (ForgeWindow's
+        design_canvas_win). The canvas is its own room; this
+        button is the Design room's door to it."""
+        canvas = getattr(self._owner, "design_canvas_win", None)
+        if canvas is None:
+            self.composer_status.setText(
+                "The design canvas is not available from here.")
+            return
+        canvas.show()
+        canvas.raise_()
+        canvas.activateWindow()
+        self.composer_status.setText(
+            "Design canvas opened — its frames send back to "
+            "the bench.")
+
+
+class ArchitectWindow(ModeWindow):
+    """The Architect room, organized (2026-11-10 upgrade): its
+    own Architecture tab (.forge/architecture/) ahead of the
+    general Notes tab, and every document page carries an
+    outline — the document's ## headings, click one to jump the
+    viewer to it. The outline fills lazily from the shown
+    document's text, for the selected document only."""
+
+    def __init__(self, owner, key="architect"):
+        # Set before super().__init__: a document shown during
+        # construction already fires _on_doc_shown.
+        self._outlines = {}
+        super().__init__(owner, key)
+        for tab_label, page in self._doc_pages.items():
+            outline = QListWidget()
+            outline.setMaximumWidth(210)
+            outline.setToolTip(
+                "Headings in this document — click one to jump "
+                "to it")
+            page.layout().addWidget(outline)
+            self._outlines[tab_label] = outline
+            outline.currentTextChanged.connect(
+                lambda text, lbl=tab_label:
+                    self._scroll_to_heading(lbl, text))
+            listing, _viewer, paths = self._doc_tabs[tab_label]
+            if 0 <= listing.currentRow() < len(paths):
+                self._fill_outline(tab_label)
+
+    def _on_doc_shown(self, tab_label, path):
+        self._fill_outline(tab_label)
+
+    def _fill_outline(self, tab_label):
+        outline = self._outlines.get(tab_label)
+        if outline is None:
+            return
+        viewer = self._doc_tabs[tab_label][1]
+        outline.clear()
+        for line in viewer.toPlainText().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                outline.addItem(QListWidgetItem(stripped[3:].strip()))
+
+    def _scroll_to_heading(self, tab_label, heading):
+        if not heading:
+            return
+        viewer = self._doc_tabs[tab_label][1]
+        cursor = viewer.document().find("## " + heading)
+        if cursor.isNull():
+            cursor = viewer.document().find(heading)
+        if not cursor.isNull():
+            viewer.setTextCursor(cursor)
+            viewer.ensureCursorVisible()
+
+
+class ReviewWindow(ModeWindow):
+    """The Review room as half of a working loop (2026-11-10
+    upgrade): focus picks above the composer load the review's
+    framing in one click, and the Reviews tab parses the shown
+    review's Findings into a list with a "Fix this finding"
+    button — the fix runs as a Code turn on the bench, scoped
+    to that one finding. Findings parse lazily, from the
+    selected review only."""
+
+    FOCUSES = ("Correctness", "Safety", "Performance", "All three")
+
+    def __init__(self, owner, key="review"):
+        # Set before super().__init__: a document shown during
+        # construction already fires _on_doc_shown.
+        self._current_review_name = ""
+        self._finding_lines = []
+        self.findings_list = None
+        super().__init__(owner, key)
+        focus_row = QHBoxLayout()
+        focus_cap = QLabel("Focus:")
+        focus_cap.setObjectName("muted")
+        focus_row.addWidget(focus_cap)
+        self.focus_btns = {}
+        for name in self.FOCUSES:
+            btn = QPushButton(name)
+            btn.setToolTip(
+                f"Load the composer with a {name} review — "
+                "edit it, then Send")
+            btn.clicked.connect(
+                lambda _checked=False, n=name: self._load_focus(n))
+            focus_row.addWidget(btn)
+            self.focus_btns[name] = btn
+        focus_row.addStretch(1)
+        self.session_lay.insertLayout(1, focus_row)
+        page = self._doc_pages.get("Reviews")
+        if page is not None:
+            col = QWidget()
+            col_lay = QVBoxLayout(col)
+            col_lay.setContentsMargins(0, 0, 0, 0); col_lay.setSpacing(4)
+            col_lay.addWidget(QLabel("Findings"))
+            self.findings_list = QListWidget()
+            col_lay.addWidget(self.findings_list, 1)
+            self.fix_btn = QPushButton("Fix this finding")
+            self.fix_btn.setToolTip(
+                "Run a Code turn scoped to the selected finding — "
+                "smallest change, then verify")
+            self.fix_btn.clicked.connect(self.fix_selected_finding)
+            col_lay.addWidget(self.fix_btn)
+            col.setMaximumWidth(300)
+            page.layout().addWidget(col)
+            listing, _viewer, paths = self._doc_tabs["Reviews"]
+            if 0 <= listing.currentRow() < len(paths):
+                self._on_doc_shown("Reviews",
+                                    paths[listing.currentRow()])
+
+    def _load_focus(self, name):
+        self.composer.setPlainText(f"Review focus: {name}. ")
+        self.composer.setFocus()
+
+    def _on_doc_shown(self, tab_label, path):
+        if tab_label != "Reviews" or self.findings_list is None:
+            return
+        self._current_review_name = Path(path).name
+        viewer = self._doc_tabs["Reviews"][1]
+        body = modes_mod.section_body(viewer.toPlainText(), "Findings")
+        lines = []
+        if body:
+            for raw in body.splitlines():
+                stripped = raw.strip()
+                stripped = re.sub(r"^[-*]\s+", "", stripped)
+                stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
+                if stripped:
+                    lines.append(stripped)
+        self._finding_lines = lines
+        self.findings_list.clear()
+        for line in lines:
+            self.findings_list.addItem(QListWidgetItem(line))
+
+    def fix_selected_finding(self):
+        row = self.findings_list.currentRow() \
+            if self.findings_list is not None else -1
+        if not (0 <= row < len(self._finding_lines)):
+            self.composer_status.setText(
+                "Pick a finding from the list first — its fix "
+                "runs as a Code turn.")
+            return
+        line = self._finding_lines[row]
+        prompt = (
+            f"Fix this review finding: {line} "
+            f"(from review file {self._current_review_name}). "
+            "Read the finding's file first, make the smallest "
+            "change that resolves it, and verify.")
+        ok, why = self._bench_turn("Code", prompt)
+        if not ok:
+            self.composer_status.setText(
+                "The bench is not available to run the fix.")
+            return
+        self.composer_status.setText(
+            "Fix sent as a Code turn — it runs on the bench.")
+
+
+class AskWindow(ModeWindow):
+    """The Ask room with its sources in reach (2026-11-10
+    upgrade): an Open-source row under the composer takes a
+    cited file (path, optionally :line) and opens it in the
+    Write room's Editor at that line — the answer's Sources stop
+    being dead text. Paths resolve inside the project only."""
+
+    def __init__(self, owner, key="ask"):
+        super().__init__(owner, key)
+        row = QHBoxLayout()
+        self.source_edit = QLineEdit()
+        self.source_edit.setPlaceholderText(
+            "File from Sources — e.g. forge/worker.py:120")
+        row.addWidget(self.source_edit, 1)
+        self.source_open_btn = QPushButton("Open source")
+        self.source_open_btn.setToolTip(
+            "Open that file in the Write room's Editor, at the "
+            "cited line")
+        self.source_open_btn.clicked.connect(self.open_source)
+        row.addWidget(self.source_open_btn)
+        self.session_lay.addLayout(row)
+
+    def open_source(self):
+        raw = self.source_edit.text().strip()
+        if not raw:
+            self.composer_status.setText(
+                "Type a file from Sources first — a path, "
+                "optionally with :line after it.")
+            return
+        match = re.match(r"^(.*?)(?::(\d+))?$", raw)
+        path_part = match.group(1).strip()
+        line_no = match.group(2)
+        if not self._workspace:
+            self.composer_status.setText("No project is open.")
+            return
+        root = Path(self._workspace).resolve()
+        candidate = Path(path_part)
+        target = candidate.resolve() if candidate.is_absolute() \
+            else (root / path_part).resolve()
+        if target != root and root not in target.parents:
+            self.composer_status.setText(
+                "That file is outside the project — Sources open "
+                "project files only.")
+            return
+        if not target.is_file():
+            self.composer_status.setText(
+                f"{path_part} isn't a file in this project.")
+            return
+        windows = getattr(self._owner, "mode_windows", None) or {}
+        write_win = windows.get("write")
+        if write_win is None:
+            self.composer_status.setText(
+                "The Write room is not available to open it in.")
+            return
+        rel = target.relative_to(root).as_posix()
+        write_win.doc_path_edit.setText(rel)
+        write_win.open_document()
+        for i in range(write_win.tabs.count()):
+            if write_win.tabs.tabText(i) == "Editor":
+                write_win.tabs.setCurrentIndex(i)
+                break
+        if line_no:
+            doc = write_win.doc_editor.document()
+            block_no = min(int(line_no) - 1, doc.blockCount() - 1)
+            if block_no >= 0:
+                cursor = QTextCursor(doc.findBlockByNumber(block_no))
+                write_win.doc_editor.setTextCursor(cursor)
+                write_win.doc_editor.ensureCursorVisible()
+        write_win.show()
+        write_win.raise_()
+        write_win.activateWindow()
+        where = f" at line {line_no}" if line_no else ""
+        self.composer_status.setText(
+            f"Opened {rel} in the Write room{where}.")
+
+
+class ResearchWindow(ModeWindow):
+    """The Research room, split honestly (2026-11-10 upgrade):
+    its one folder becomes two tabs — Plans (the gated research
+    plans, *-plan.md) and Reports — and a selected report shows
+    its Sources cited and Sources consulted as two lists beside
+    the text: the mode's honesty claim, visible. The lists parse
+    lazily from the selected report only."""
+
+    def _doc_tab_filter(self, tab_label, paths):
+        if tab_label == "Plans":
+            return [p for p in paths if p.name.endswith("-plan.md")]
+        if tab_label == "Reports":
+            return [p for p in paths
+                    if not p.name.endswith("-plan.md")]
+        return paths
+
+    def __init__(self, owner, key="research"):
+        # Set before super().__init__: a document shown during
+        # construction already fires _on_doc_shown.
+        self.cited_list = None
+        self.consulted_list = None
+        super().__init__(owner, key)
+        page = self._doc_pages.get("Reports")
+        if page is not None:
+            col = QWidget()
+            col_lay = QVBoxLayout(col)
+            col_lay.setContentsMargins(0, 0, 0, 0); col_lay.setSpacing(4)
+            col_lay.addWidget(QLabel("Sources cited"))
+            self.cited_list = QListWidget()
+            col_lay.addWidget(self.cited_list, 1)
+            col_lay.addWidget(QLabel("Sources consulted"))
+            self.consulted_list = QListWidget()
+            col_lay.addWidget(self.consulted_list, 1)
+            col.setMaximumWidth(280)
+            page.layout().addWidget(col)
+            listing, _viewer, paths = self._doc_tabs["Reports"]
+            if 0 <= listing.currentRow() < len(paths):
+                self._on_doc_shown("Reports",
+                                    paths[listing.currentRow()])
+
+    def _on_doc_shown(self, tab_label, path):
+        if tab_label != "Reports" or self.cited_list is None:
+            return
+        text = self._doc_tabs["Reports"][1].toPlainText()
+        for listing, section in (
+                (self.cited_list, "Sources cited"),
+                (self.consulted_list, "Sources consulted")):
+            listing.clear()
+            body = modes_mod.section_body(text, section)
+            if body:
+                for raw in body.splitlines():
+                    stripped = raw.strip()
+                    stripped = re.sub(r"^[-*]\s+", "", stripped)
+                    stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
+                    if stripped:
+                        listing.addItem(QListWidgetItem(stripped))
+
+
+class PlanWindow(QWidget):
+    """The plan gate as its own window (owner directive, 2026-11-08:
+    plan gets a window, not a panel). Everything the Note 12 dock
+    held — the live checklist and the Approve / Edit / Kill gate —
+    moved here whole, into a room with real height instead of a
+    168px strip at the bottom of the bench. Single instance, opens
+    on its own when a plan draft lands, re-openable from the menus,
+    the palette, and Ctrl+Shift+P. The ForgeWindow aliases the
+    checklist and the gate buttons, so the gate machinery (desktop,
+    phone deck, restore-on-load) reads the same from every caller."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._workspace = getattr(owner, "workspace", "") or ""
+        self._plan_entries = []
+        self.resize(780, 560)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Plan — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header — title mirrors the window title,
+        # and the gate's three buttons (Approve / Edit / Kill) are
+        # this window's PRIMARY verb set, so they stay visible in
+        # the header slot; there are no secondary actions to overflow.
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        self.plan_approve_btn = QPushButton("✓ Approve")
+        self.plan_approve_btn.setObjectName("primary")
+        self.plan_approve_btn.setToolTip("Approve the plan — the agent works the steps in order")
+        self.plan_approve_btn.clicked.connect(lambda: owner._plan_gate_action("approve"))
+        self.header.slot_layout.addWidget(self.plan_approve_btn)
+        self.plan_edit_btn = QPushButton("✎ Edit")
+        self.plan_edit_btn.setToolTip("Edit the steps, then Approve — the edited plan is what runs")
+        self.plan_edit_btn.clicked.connect(lambda: owner._plan_gate_action("edit"))
+        self.header.slot_layout.addWidget(self.plan_edit_btn)
+        self.plan_kill_btn = QPushButton("✕ Kill")
+        self.plan_kill_btn.setToolTip("Kill the plan — nothing executes, the turn ends")
+        self.plan_kill_btn.clicked.connect(lambda: owner._plan_gate_action("kill"))
+        self.header.slot_layout.addWidget(self.plan_kill_btn)
+        # Mode-room upgrade (2026-11-10): the gate becomes the
+        # first tab of this window so filed plans get a room of
+        # their own beside it — the gate stays the default view
+        # and every gate widget keeps its place and wiring; the
+        # header (with the gate buttons) stays above the tabs.
+        self.tabs = QTabWidget()
+        gate_page = QWidget()
+        glay = QVBoxLayout(gate_page)
+        glay.setContentsMargins(0, 0, 0, 0); glay.setSpacing(6)
+        # Item #66: the owner's comment — a fourth gate action
+        # beside Approve / Edit / Kill, on a row of its own under
+        # the gate buttons. Sending settles the gate as a REVISION:
+        # the driver rewrites the draft against the words and the
+        # plan comes back to this same gate. It is never an
+        # approval — nothing executes on a comment.
+        comment_row = QHBoxLayout()
+        self.plan_comment_edit = QPlainTextEdit()
+        self.plan_comment_edit.setPlaceholderText(
+            "Comment on the draft — the driver revises it against "
+            "your words and the plan comes back to this gate.")
+        self.plan_comment_edit.setMaximumHeight(52)
+        comment_row.addWidget(self.plan_comment_edit, 1)
+        self.plan_comment_btn = QPushButton("💬 Comment")
+        self.plan_comment_btn.setToolTip(
+            "Send the comment — the driver revises the draft; "
+            "nothing runs until you Approve. Select a step first "
+            "to scope the comment to that step.")
+        self.plan_comment_btn.clicked.connect(self._comment_clicked)
+        comment_row.addWidget(self.plan_comment_btn)
+        glay.addLayout(comment_row)
+        self.plan_list = QListWidget()
+        # SingleSelection (2026-11-10 upgrade): a selected step
+        # scopes the owner's comment to that step (see
+        # _comment_clicked); selection changes nothing else —
+        # the gate reads the list, never the selection.
+        self.plan_list.setSelectionMode(QListWidget.SingleSelection)
+        glay.addWidget(self.plan_list, 1)
+        # Item #56: the Goldfish review, rendered under the checklist
+        # in the same gate — findings ranked Blocker / Major / Nit
+        # plus the reviewer's paraphrase. Advisory only: this view
+        # holds no control and nothing reads it back.
+        self.goldfish_view = QPlainTextEdit()
+        self.goldfish_view.setReadOnly(True)
+        self.goldfish_view.setMaximumHeight(170)
+        self.goldfish_view.setPlaceholderText(
+            "Goldfish review — a fresh reviewer-seat pass reads each "
+            "draft plan (plan + named files only, no conversation) "
+            "and its findings land here before you approve.")
+        glay.addWidget(self.goldfish_view)
+        # Item #58: the plan DOCUMENT itself — the full text the
+        # checklist was extracted from (goal, context, contents,
+        # risks, assumptions ride with the steps now, so the gate
+        # judges the whole document, not bare one-liners). Read-only
+        # like the Goldfish view: it holds no control and nothing
+        # reads it back; the sidecar's copy is the record.
+        self.document_view = QPlainTextEdit()
+        self.document_view.setReadOnly(True)
+        self.document_view.setMaximumHeight(190)
+        self.document_view.setPlaceholderText(
+            "Plan document — the full drafted text (Item #58) lands "
+            "here: goal, context found, contents, steps with their "
+            "detail, risks, and the assumptions the draft is making.")
+        glay.addWidget(self.document_view)
+        # Rooms-are-tools (2026-11-10): a plan can also START here —
+        # the composer under the gate runs a Plan turn on the bench
+        # and the draft lands at this same gate. The gate widgets
+        # above are untouched.
+        self.plan_composer = QPlainTextEdit()
+        self.plan_composer.setPlaceholderText(
+            "Say what you want planned — Draft plan runs a Plan "
+            "turn on the bench, and the draft comes back to this gate.")
+        self.plan_composer.setMaximumHeight(64)
+        glay.addWidget(self.plan_composer)
+        draft_row = QHBoxLayout()
+        self.plan_draft_status = QLabel("")
+        self.plan_draft_status.setObjectName("muted")
+        self.plan_draft_status.setWordWrap(True)
+        draft_row.addWidget(self.plan_draft_status, 1)
+        self.plan_draft_btn = QPushButton("Draft plan")
+        self.plan_draft_btn.setToolTip(
+            "Run a Plan turn with what's typed above — the draft "
+            "lands at this gate for Approve / Edit / Kill")
+        self.plan_draft_btn.clicked.connect(self.draft_plan)
+        draft_row.addWidget(self.plan_draft_btn)
+        glay.addLayout(draft_row)
+        self.tabs.addTab(gate_page, "Gate")
+        # The Plans tab: every plan this project has filed, from
+        # the artifact index — yesterday's plan is still here
+        # after the gate has moved on. Read-only, refreshed on
+        # set_project like the mode rooms' document tabs.
+        plans_page = QWidget()
+        plans_lay = QHBoxLayout(plans_page)
+        plans_lay.setContentsMargins(0, 0, 0, 0); plans_lay.setSpacing(8)
+        self.plans_list = QListWidget()
+        self.plans_list.setMaximumWidth(280)
+        self.plans_view = QPlainTextEdit()
+        self.plans_view.setReadOnly(True)
+        self.plans_view.setPlaceholderText(
+            "No plans filed yet — approved and drafted plans "
+            "land here as artifacts of the project.")
+        self.plans_list.currentRowChanged.connect(self._show_plan)
+        plans_lay.addWidget(self.plans_list)
+        plans_lay.addWidget(self.plans_view, 1)
+        self.tabs.addTab(plans_page, "Plans")
+        lay.addWidget(self.tabs, 1)
+        self.refresh_plans()
+
+    def _comment_clicked(self):
+        """The Comment gate action, step-aware (2026-11-10
+        upgrade): with a step selected in the checklist, the
+        comment handed to the gate is prefixed "Re step N
+        (<step text>): " so the revision answers that step.
+        The prefix is set INTO plan_comment_edit — the field
+        the gate reads (ForgeWindow aliases it) — and the gate
+        action itself runs exactly as before. No selection:
+        the comment flows untouched, as it always has."""
+        row = self.plan_list.currentRow()
+        if 0 <= row:
+            item = self.plan_list.item(row)
+            if item is not None and item.text().strip():
+                existing = self.plan_comment_edit.toPlainText()
+                self.plan_comment_edit.setPlainText(
+                    f"Re step {row + 1} ({item.text()}): " + existing)
+        action = getattr(self._owner, "_plan_gate_action", None)
+        if action is not None:
+            action("comment")
+
+    def refresh_plans(self):
+        """(Re)list the project's filed plans from the artifact
+        index. Runs on set_project; an empty project is simply
+        an empty tab."""
+        listing = getattr(self, "plans_list", None)
+        if listing is None:
+            return
+        self._plan_entries = []
+        listing.clear()
+        if not self._workspace:
+            return
+        try:
+            entries = [e for e in artifacts_mod.list_artifacts(
+                self._workspace) if e.get("kind") == "plan"]
+        except Exception:
+            entries = []
+        self._plan_entries = entries
+        for e in entries:
+            listing.addItem(QListWidgetItem(
+                e.get("title") or e.get("file") or "Plan"))
+        if entries:
+            listing.setCurrentRow(0)
+        else:
+            self.plans_view.clear()
+
+    def _show_plan(self, row):
+        if 0 <= row < len(self._plan_entries):
+            self.plans_view.setPlainText(artifacts_mod.read_text(
+                self._workspace, self._plan_entries[row]))
+
+    def draft_plan(self):
+        """The Plan room's composer Send: the typed text runs as a
+        Plan turn on the bench — the same wiring as the mode
+        rooms' Send (set the mode, set the input, send). An empty
+        composer and a missing bench are answered on the status
+        line, in words; nothing here touches the gate itself."""
+        text = self.plan_composer.toPlainText()
+        if not text.strip():
+            self.plan_draft_status.setText(
+                "Type what you want planned first — there's "
+                "nothing to draft yet.")
+            return
+        owner = self._owner
+        input_box = getattr(owner, "input", None)
+        send = getattr(owner, "send_message", None)
+        if input_box is None or send is None:
+            self.plan_draft_status.setText(
+                "The bench is not available to run the turn.")
+            return
+        combo = getattr(owner, "mode_combo", None)
+        if combo is not None:
+            combo.setCurrentText("Plan")
+        input_box.setPlainText(text)
+        send()
+        self.plan_composer.clear()
+        self.plan_draft_status.setText(
+            "Sent as a Plan turn — the draft lands at this gate "
+            "when it's ready.")
+
+    def set_project(self, workspace):
+        self._workspace = workspace or ""
+        name = Path(workspace).name or workspace or ""
+        self.setWindowTitle(f"Plan — {name}" if name else "Plan — Code Forge")
+        self.header.title_label.setText(self.windowTitle())
+        self.refresh_plans()
+
+
+class ArtifactsWindow(QWidget):
+    """The artifacts room (owner directive, 2026-11-08): every
+    reviewable deliverable the Forge produces — plans, designs,
+    architecture passes, reviews, and the walkthrough of each
+    finished Code turn — in one list, newest first, click to read
+    in full. The records live in the project's .forge/artifacts/
+    (forge/artifacts.py); this window is their reader. A kind
+    filter keeps a long list scannable."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._entries: list[dict] = []
+        self.resize(880, 620)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Artifacts — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header — title, the kind filter slotted
+        # in as this window's primary control, and the old ↻ refresh
+        # button moved into the overflow menu (same callable,
+        # self.refresh — moved, not removed).
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Refresh", self.refresh)])
+        lay.addWidget(self.header)
+        self.kind_filter = QComboBox()
+        self.kind_filter.addItem("All kinds", "")
+        for kind in artifacts_mod.KINDS:
+            self.kind_filter.addItem(kind.capitalize(), kind)
+        self.kind_filter.currentIndexChanged.connect(self.refresh)
+        self.header.slot_layout.addWidget(self.kind_filter)
+        split = QHBoxLayout(); split.setSpacing(8)
+        self.artifacts_list = QListWidget()
+        self.artifacts_list.setMaximumWidth(320)
+        self.artifacts_list.currentRowChanged.connect(self._show_selected)
+        split.addWidget(self.artifacts_list)
+        self.artifact_view = QPlainTextEdit(); self.artifact_view.setReadOnly(True)
+        self.artifact_view.setPlaceholderText(
+            "No artifacts yet — plans, designs, reviews and turn "
+            "walkthroughs land here as the work happens.")
+        split.addWidget(self.artifact_view, 1)
+        lay.addLayout(split, 1)
+        # Item #66: the owner's comment on the selected artifact.
+        # Sending starts a revision turn on the bench (the owner's
+        # words + the artifact's file); its reply files as a NEW
+        # artifact linked to this one — the original is never
+        # overwritten. The window only collects the words; the
+        # bench owns the guards and the turn (its answer line
+        # shows what happened, in words).
+        self.artifact_comment_edit = QPlainTextEdit()
+        self.artifact_comment_edit.setMaximumHeight(56)
+        self.artifact_comment_edit.setPlaceholderText(
+            "Comment on the selected artifact — Send starts a turn "
+            "that revises it; the revision files as a new artifact "
+            "and the original stays untouched.")
+        lay.addWidget(self.artifact_comment_edit)
+        comment_row = QHBoxLayout()
+        self.artifact_comment_btn = QPushButton("💬 Send comment")
+        self.artifact_comment_btn.setToolTip(
+            "Start a revision turn carrying this artifact and "
+            "your comment")
+        self.artifact_comment_btn.clicked.connect(self._send_comment)
+        comment_row.addWidget(self.artifact_comment_btn)
+        self.artifact_comment_status = QLabel("")
+        comment_row.addWidget(self.artifact_comment_status, 1)
+        lay.addLayout(comment_row)
+        self.refresh()
+
+    def refresh(self):
+        owner = self._owner
+        if owner is None:
+            return
+        name = Path(owner.workspace).name or owner.workspace
+        self.setWindowTitle(f"Artifacts — {name}")
+        self.header.title_label.setText(self.windowTitle())
+        wanted = self.kind_filter.currentData() or ""
+        self._entries = [
+            e for e in artifacts_mod.list_artifacts(owner.workspace)
+            if not wanted or e.get("kind") == wanted]
+        self.artifacts_list.clear()
+        for e in self._entries:
+            stamp = str(e.get("created_at", ""))[5:16].replace("T", " ")
+            label = f"{e.get('kind', 'note')} · {e.get('title', '')}"
+            if len(label) > 42:
+                label = label[:41] + "…"
+            item = QListWidgetItem(label)
+            item.setToolTip(f"{e.get('title', '')} — {stamp}")
+            self.artifacts_list.addItem(item)
+        if self._entries:
+            self.artifacts_list.setCurrentRow(0)
+        else:
+            self.artifact_view.clear()
+
+    def _show_selected(self, row):
+        owner = self._owner
+        if owner is None or not (0 <= row < len(self._entries)):
+            return
+        entry = self._entries[row]
+        # Sweep R81: same size law as the mode windows' document
+        # viewer — an oversized artifact shows its head plus a
+        # note instead of loading whole into the viewer.
+        path = Path(owner.workspace) / ".forge" / "artifacts" / str(
+            entry.get("file", ""))
+        try:
+            size = path.stat().st_size if path.is_file() else 0
+        except OSError:
+            size = 0
+        if size > ModeWindow._DOC_VIEW_CAP:
+            try:
+                head = path.read_bytes()[:ModeWindow._DOC_VIEW_CAP].decode(
+                    "utf-8", "replace")
+            except OSError:
+                head = artifacts_mod.read_text(owner.workspace, entry)
+            self.artifact_view.setPlainText(
+                head + f"\n\n… (showing the first "
+                f"{ModeWindow._DOC_VIEW_CAP // 1024} KB of "
+                f"{size:,} bytes)")
+            return
+        self.artifact_view.setPlainText(
+            artifacts_mod.read_text(owner.workspace, entry))
+
+    def _send_comment(self):
+        """Item #66: hand the selected artifact + the box's words
+        to the bench. The window passes the entry it is showing —
+        no re-read, no re-derivation — and reports the bench's
+        (ok, message) answer on its own status line."""
+        owner = self._owner
+        if owner is None:
+            return
+        row = self.artifacts_list.currentRow()
+        if not (0 <= row < len(self._entries)):
+            self.artifact_comment_status.setText(
+                "Pick an artifact first.")
+            return
+        ok, message = owner._send_artifact_comment(
+            self._entries[row],
+            self.artifact_comment_edit.toPlainText())
+        self.artifact_comment_status.setText(message)
+        if ok:
+            self.artifact_comment_edit.clear()
+
+
+def _session_state(is_active, worker_running, gate_pending):
+    """G2 (GUIFX Research Brief #1, 2026-11-09): the honest state of
+    one open session, from the signals the bench actually has. The
+    worker and the plan gate handed in are the BENCH's — they belong
+    to the conversation staged on it (Item #64's detached background
+    turns are Mission Control's data, not this list's) — so only the
+    staged session can read Running or Parked here, and a background
+    session reads Idle. A parked gate wins over Running: the worker
+    is still alive at the gate, but what the owner needs to know is
+    that the session is waiting on THEM (the same fact the
+    agent-state label shows as PAUSED). There is no per-session
+    "Done" signal in the app, so no state claims it."""
+    if is_active and gate_pending:
+        return "Parked at gate"
+    if is_active and worker_running:
+        return "Running"
+    return "Idle"
+
+
+# State label colors, from TOKENS — the app's existing state
+# language: the gate/awaiting amber (the agent-state label's
+# PAUSED color, the rim amber), the ember primary for a live turn,
+# and the agent-state IDLE gray for everything at rest.
+_SESSION_STATE_COLORS = {
+    "Parked at gate": "accent_amber",
+    "Running": "accent_primary_top",
+    "Idle": "state_idle",
+}
+
+
+class SessionsWindow(QWidget):
+    """G2 (GUIFX Research Brief #1, 2026-11-09): the sessions
+    room — every OPEN chat session in one list, so "which of my
+    agents is waiting on me?" has an answer at a glance. One row
+    per open tab, in tab order: title · state · model · project ·
+    last activity, all read from the data the bench already keeps
+    (ForgeWindow._session_rows) — this window owns no session
+    machinery of its own. Clicking a row walks through the chat
+    tab bar, exactly like clicking the tab itself. Born on the G4
+    header standard: WindowHeader with Refresh in the overflow."""
+
+    # Column widths shared by the header row and the data rows.
+    # Fixed, not minimum: a long model name must clip in its own
+    # column (full text on the tooltip), never push the activity
+    # column off the window's edge.
+    _COL_STATE = 120
+    _COL_MODEL = 168
+    _COL_PROJECT = 118
+    _COL_ACTIVITY = 152
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._rows: list[dict] = []
+        self.resize(820, 460)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Sessions — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header — title prominent, Refresh (this
+        # room's only secondary action) in the overflow menu.
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Refresh", self.refresh)])
+        lay.addWidget(self.header)
+        lay.addWidget(self._column_header())
+        self.sessions_list = QListWidget()
+        self.sessions_list.itemClicked.connect(self._on_item_activated)
+        self.sessions_list.itemActivated.connect(self._on_item_activated)
+        lay.addWidget(self.sessions_list, 1)
+        self.refresh()
+
+    def _column_header(self):
+        """The column names, in the app's section-label style,
+        aligned over the row columns below them."""
+        frame = QFrame(self)
+        lay = QHBoxLayout(frame)
+        lay.setContentsMargins(2, 0, 2, 0); lay.setSpacing(8)
+        for text, width in (("TITLE", None), ("STATE", self._COL_STATE),
+                            ("MODEL", self._COL_MODEL),
+                            ("PROJECT", self._COL_PROJECT),
+                            ("LAST ACTIVITY", self._COL_ACTIVITY)):
+            label = QLabel(text)
+            label.setObjectName("section")
+            if width is None:
+                label.setSizePolicy(QSizePolicy.Ignored,
+                                    QSizePolicy.Preferred)
+                lay.addWidget(label, 1)
+            else:
+                label.setFixedWidth(width)
+                lay.addWidget(label)
+        return frame
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        owner = self._owner
+        if owner is None:
+            return
+        self._rows = owner._session_rows()
+        self.sessions_list.clear()
+        for row in self._rows:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, row["id"])
+            widget = self._row_widget(row)
+            item.setSizeHint(widget.sizeHint())
+            self.sessions_list.addItem(item)
+            self.sessions_list.setItemWidget(item, widget)
+
+    def _row_widget(self, row):
+        widget = QWidget()
+        widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay = QHBoxLayout(widget)
+        lay.setContentsMargins(2, 2, 2, 2); lay.setSpacing(8)
+        title = QLabel(("▸ " if row["active"] else "") + row["title"])
+        if row["active"]:
+            title.setStyleSheet(
+                f"color:{TOKENS['text_big']};font-weight:700;")
+        title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay.addWidget(title, 1)
+        color = TOKENS[_SESSION_STATE_COLORS[row["state"]]]
+        state = QLabel(f"● {row['state']}")
+        state.setStyleSheet(f"color:{color};font-weight:700;")
+        state.setFixedWidth(self._COL_STATE)
+        state.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay.addWidget(state)
+        for key, width in (("model", self._COL_MODEL),
+                           ("project", self._COL_PROJECT),
+                           ("activity", self._COL_ACTIVITY)):
+            label = QLabel(row[key])
+            label.setStyleSheet(f"color:{TOKENS['text_muted']};")
+            label.setFixedWidth(width)
+            label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            if key == "project" and row.get("project_full"):
+                label.setToolTip(row["project_full"])
+            if key == "model" and row["model"] != "—":
+                label.setToolTip(row["model"])
+            lay.addWidget(label)
+        return widget
+
+    def _on_item_activated(self, item):
+        owner = self._owner
+        if owner is None or item is None:
+            return
+        row_index = self.sessions_list.row(item)
+        if not (0 <= row_index < len(self._rows)):
+            return
+        cid = self._rows[row_index]["id"]
+        if cid == owner.conversation_id:
+            return  # already there — a click on the live row is a no-op
+        ids = getattr(owner, "_chat_tab_ids", [])
+        if cid not in ids:
+            return
+        bar = getattr(owner, "chat_tabs", None)
+        if bar is None:
+            return
+        # The tab bar's own signal does the work — _on_chat_tab_changed
+        # loads the conversation, exactly as a tab click would.
+        bar.setCurrentIndex(ids.index(cid))
+
+
+# ---------- H1: privacy that proves the pitch ----------
+
+def configured_cloud_providers(config) -> list:
+    """H1: the cloud providers actually set up in a connector
+    config — an API key present AND the provider enabled, in
+    registry order, as (provider_id, label) pairs. These are the
+    only routes by which a chat can leave this PC, and the Privacy
+    window names exactly this list — no more, no fewer."""
+    out = []
+    for provider in providers_mod.PROVIDERS:
+        if providers_mod.provider_api_key(config, provider) and \
+                providers_mod.provider_enabled(config, provider):
+            out.append((provider,
+                        providers_mod.PROVIDER_LABELS[provider]))
+    return out
+
+
+def human_size(num_bytes) -> str:
+    """A small human-readable size for the Privacy window's data
+    line (bytes -> KB -> MB -> GB, one decimal past the unit)."""
+    size = float(max(0, int(num_bytes or 0)))
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            if unit == "bytes":
+                return f"{int(size)} bytes"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
+
+def app_dir_size(path) -> int:
+    """Total bytes of every file under *path* (0 when missing).
+    Computed on demand only — the Privacy window calls it when it
+    opens or refreshes, never on a timer."""
+    total = 0
+    try:
+        for entry in Path(path).rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    return total
+
+
+# The per-conversation badge in the main window's header (H1):
+# amber-tinted for a local model, a neutral panel pill for a cloud
+# one. TOKENS only — the amber tint is the nav-active surface the
+# stylesheet already pairs with amber text.
+_PRIVACY_BADGE_LOCAL = (
+    f"background:{TOKENS['surface_nav_active']};"
+    f"color:{TOKENS['accent_amber']};"
+    f"border:1px solid {TOKENS['rim']};"
+    f"border-radius:{TOKENS['radius_control']};"
+    "padding:2px 8px;font-size:11px;font-weight:700;")
+_PRIVACY_BADGE_CLOUD = (
+    f"background:{TOKENS['surface_glass_bottom']};"
+    f"color:{TOKENS['text_muted']};"
+    f"border:1px solid {TOKENS['border_button']};"
+    f"border-radius:{TOKENS['radius_control']};"
+    "padding:2px 8px;font-size:11px;font-weight:700;")
+
+
+class PrivacyWindow(QWidget):
+    """H1 (GUIFX Research Brief #2, 2026-11-09): the privacy
+    room — the pitch, proven in plain language. What never leaves
+    this PC (the guarantee), what CAN leave it (only a chat whose
+    chosen model is a cloud provider, named from the live
+    connector config), where Forge's data lives on this PC with
+    its size, and the two delete controls. Everything dynamic is
+    computed in refresh() — at open and after a delete — never on
+    a timer. Born on the G4 header standard; this room has no
+    secondary actions, so the header carries no overflow."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._cloud_labels: list = []
+        self.resize(700, 600)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Privacy — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+
+        lay.addWidget(self._section_label("THE GUARANTEE"))
+        self.guarantee_label = QLabel(
+            "No account. No subscription. No usage meter. Nothing "
+            "expires. Code Forge never sends your code, chats, or "
+            "usage anywhere on its own — there is no telemetry and "
+            "no phone-home.")
+        self.guarantee_label.setWordWrap(True)
+        lay.addWidget(self.guarantee_label)
+
+        lay.addWidget(self._section_label("WHAT CAN LEAVE THIS PC"))
+        self.local_line = QLabel(
+            "Local models (Ollama) run entirely on this PC. Chats "
+            "using them never leave this machine.")
+        self.local_line.setWordWrap(True)
+        lay.addWidget(self.local_line)
+        self.cloud_box = QWidget()
+        self.cloud_layout = QVBoxLayout(self.cloud_box)
+        self.cloud_layout.setContentsMargins(0, 0, 0, 0)
+        self.cloud_layout.setSpacing(4)
+        lay.addWidget(self.cloud_box)
+        # The deck is an in-process HTTP server on this PC (forge/
+        # deck.py binds the local network and relays nothing
+        # anywhere) — this line states exactly that.
+        self.deck_line = QLabel(
+            "The phone deck talks to this PC on your local network "
+            "only — it never relays through anyone's cloud.")
+        self.deck_line.setWordWrap(True)
+        lay.addWidget(self.deck_line)
+
+        lay.addWidget(self._section_label("YOUR DATA ON THIS PC"))
+        path_row = QHBoxLayout()
+        self.data_path_label = QLabel("")
+        self.data_path_label.setObjectName("muted")
+        self.data_path_label.setWordWrap(True)
+        path_row.addWidget(self.data_path_label, 1)
+        self.open_folder_btn = QPushButton("Open folder")
+        self.open_folder_btn.setToolTip(
+            "Open the data folder in the file manager")
+        self.open_folder_btn.clicked.connect(self._open_data_folder)
+        path_row.addWidget(self.open_folder_btn)
+        lay.addLayout(path_row)
+        self.data_counts_label = QLabel("")
+        self.data_counts_label.setWordWrap(True)
+        lay.addWidget(self.data_counts_label)
+
+        rule = QFrame(); rule.setFrameShape(QFrame.HLine)
+        lay.addWidget(rule)
+        lay.addWidget(self._section_label("DANGER ZONE"))
+        danger_note = QLabel("These cannot be undone.")
+        danger_note.setObjectName("muted")
+        lay.addWidget(danger_note)
+        self.delete_conversations_btn = QPushButton(
+            "Delete all conversations")
+        self.delete_conversations_btn.clicked.connect(
+            self._on_delete_conversations)
+        lay.addWidget(self.delete_conversations_btn)
+        self.delete_all_data_btn = QPushButton(
+            "Delete all Code Forge data")
+        self.delete_all_data_btn.clicked.connect(
+            self._on_delete_all_data)
+        lay.addWidget(self.delete_all_data_btn)
+        lay.addStretch()
+        self.refresh()
+
+    @staticmethod
+    def _section_label(text):
+        label = QLabel(text)
+        label.setObjectName("section")
+        return label
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        """Recompute everything dynamic: the configured-provider
+        lines from the connector config AS IT IS ON DISK NOW, and
+        the counts (conversations, total data size) from the live
+        store and the data folder."""
+        # --- what can leave: one line per configured provider ---
+        while self.cloud_layout.count():
+            item = self.cloud_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._cloud_labels = []
+        configured = configured_cloud_providers(
+            load_connector_config(APP_DIR))
+        if configured:
+            for _provider, label in configured:
+                line = QLabel(
+                    f"When a chat uses {label}, that chat's "
+                    f"messages are sent to {label} to get replies. "
+                    "That's per chat, and it's your choice of model.")
+                line.setWordWrap(True)
+                self.cloud_layout.addWidget(line)
+                self._cloud_labels.append(line)
+        else:
+            line = QLabel(
+                "No cloud providers are set up. Nothing you do "
+                "here leaves this PC.")
+            line.setWordWrap(True)
+            self.cloud_layout.addWidget(line)
+            self._cloud_labels.append(line)
+        # --- your data: path + counts ---
+        self.data_path_label.setText(str(APP_DIR))
+        count = 0
+        store = getattr(self._owner, "store", None)
+        if store is not None:
+            try:
+                count = len(store.recent(100000))
+            except Exception:
+                count = 0
+        self.data_counts_label.setText(
+            f"{count} conversation{'s' if count != 1 else ''} · "
+            f"{human_size(app_dir_size(APP_DIR))} of data on this PC")
+
+    def _open_data_folder(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(APP_DIR)))
+
+    def _on_delete_conversations(self):
+        owner = self._owner
+        if owner is None:
+            return
+        answer = QMessageBox.question(
+            self, "Delete all conversations",
+            "Delete every conversation? The chats are removed "
+            "from this PC for good. This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        if owner.delete_all_conversations() is None:
+            QMessageBox.information(
+                self, "Delete all conversations",
+                "A turn is running — stop it first, then delete.")
+            return
+        self.refresh()
+
+    def _build_delete_all_dialog(self):
+        """The typed-confirmation dialog for Delete all data: the
+        Delete button stays disabled until the owner types DELETE.
+        Built separately from the exec() so the gate itself is
+        testable without a modal loop."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Delete all Code Forge data")
+        lay = QVBoxLayout(dialog)
+        lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(8)
+        body = QLabel(
+            "This removes everything Code Forge has stored on "
+            "this PC: conversations, settings, provider keys and "
+            "config, model seats, plans, recipes, checkpoints, "
+            "logs and bench results.\n\n"
+            "Your project files are never touched. Models live in "
+            "Ollama's own storage and are managed there, not "
+            "here.\n\n"
+            "Type DELETE to confirm.")
+        body.setWordWrap(True)
+        lay.addWidget(body)
+        dialog.confirm_input = QLineEdit()
+        dialog.confirm_input.setPlaceholderText("DELETE")
+        lay.addWidget(dialog.confirm_input)
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        row.addWidget(cancel_btn)
+        dialog.confirm_btn = QPushButton("Delete everything")
+        dialog.confirm_btn.setEnabled(False)
+        dialog.confirm_btn.clicked.connect(
+            lambda: (self._run_delete_all_data(), dialog.accept()))
+        row.addWidget(dialog.confirm_btn)
+        lay.addLayout(row)
+        dialog.confirm_input.textChanged.connect(
+            lambda text: dialog.confirm_btn.setEnabled(
+                text == "DELETE"))
+        return dialog
+
+    def _on_delete_all_data(self):
+        self._build_delete_all_dialog().exec()
+
+    def _run_delete_all_data(self):
+        owner = self._owner
+        if owner is None:
+            return
+        if owner.delete_all_forge_data() is None:
+            QMessageBox.information(
+                self, "Delete all Code Forge data",
+                "A turn or Forge maintenance is in progress — "
+                "finish or stop it first, then delete.")
+            return
+        self.refresh()
+
+
+def format_ai_context(messages) -> str:
+    """H5: the "What the AI sees" rendering — one history as plain
+    text, each message under a banner naming its part in the
+    request. The fold summary and the session-notes block get
+    banners of their own: the two shapes a reader most needs to
+    spot are the two that are easiest to miss in a raw list. Pure
+    function over the message dicts — the same dicts the worker
+    will be handed, in the same order."""
+    parts = []
+    for m in messages or []:
+        content = str(m.get("content") or "")
+        if context_mod.is_summary(m):
+            parts.append("— Summary of earlier turns "
+                         "(context was folded) —\n" + content)
+        elif context_mod.is_notes(m):
+            parts.append("— Session notes (kept on disk; the AI "
+                         "reads these) —\n" + content)
+        elif m.get("role") == "system":
+            parts.append("— System prompt —\n" + content)
+        elif m.get("role") == "user":
+            parts.append("— You —\n" + content)
+        elif m.get("role") == "assistant":
+            lines = []
+            if content.strip():
+                lines.append(content)
+            for call in m.get("tool_calls") or []:
+                fn = (call.get("function") or {}) \
+                    if isinstance(call, dict) else {}
+                lines.append(f"[called {fn.get('name', 'tool')}]")
+            parts.append("— Assistant —\n" + "\n".join(lines))
+        elif m.get("role") == "tool":
+            name = m.get("name") or m.get("tool_name") or "tool"
+            parts.append(f"— Tool result ({name}) —\n" + content)
+        elif content.strip():
+            parts.append(f"— {m.get('role') or 'message'} —\n" + content)
+    return "\n\n".join(parts)
+
+
+class NotesWindow(QWidget):
+    """H5 (GUIFX Research Brief #2, 2026-11-09): the session
+    notes room — a plain editor over the CURRENT conversation's
+    notes file (APP_DIR/notes/<id>.md, forge/notes.py). Forge
+    appends deterministic entries as events happen (a plan
+    approved, a step finished, a context fold landing), and the
+    file's content rides past every fold into what the model
+    sees — the durable memory the fold cannot eat. The user owns
+    the file: Save follows the append-merge rule, so entries that
+    landed while this window was open are never overwritten by
+    the editor buffer. Born on the G4 header standard."""
+
+    EMPTY_HINT = ("No notes yet for this conversation. Forge adds "
+                  "entries when plans are approved, steps finish, "
+                  "or context is summarized. You can also write "
+                  "your own — the AI reads this file after any "
+                  "summarization.")
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._loaded_text = ""
+        self._loaded_conv = None
+        self.resize(680, 560)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Session notes — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        self.path_label = QLabel("")
+        self.path_label.setObjectName("muted")
+        self.path_label.setWordWrap(True)
+        lay.addWidget(self.path_label)
+        self.hint_label = QLabel(self.EMPTY_HINT)
+        self.hint_label.setObjectName("muted")
+        self.hint_label.setWordWrap(True)
+        lay.addWidget(self.hint_label)
+        self.editor = QPlainTextEdit()
+        lay.addWidget(self.editor, 1)
+        row = QHBoxLayout()
+        row.addStretch()
+        self.save_btn = QPushButton("Save notes")
+        self.save_btn.setObjectName("primary")
+        self.save_btn.clicked.connect(self._on_save)
+        row.addWidget(self.save_btn)
+        lay.addLayout(row)
+        self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        """Re-read the CURRENT conversation's file. Called on open
+        and whenever the owner switches conversation while this
+        room is open, so it never shows another chat's notes."""
+        owner = self._owner
+        conv = getattr(owner, "conversation_id", None) \
+            if owner is not None else None
+        self._loaded_conv = conv
+        path = notes_mod.notes_path(APP_DIR, conv)
+        if path is None:
+            self.path_label.setText(
+                "This conversation has not been saved yet — its "
+                "notes file starts with its first entry.")
+            self._loaded_text = ""
+            self.editor.setPlainText("")
+            self.hint_label.setVisible(True)
+            self.save_btn.setEnabled(False)
+            return
+        self.path_label.setText(str(path))
+        text = notes_mod.read_notes(APP_DIR, conv)
+        self._loaded_text = text
+        self.editor.setPlainText(text)
+        self.hint_label.setVisible(not text.strip())
+        self.save_btn.setEnabled(True)
+
+    def _on_save(self):
+        conv = self._loaded_conv
+        if conv is None:
+            return
+        buffer = self.editor.toPlainText()
+        current = notes_mod.read_notes(APP_DIR, conv)
+        if current.startswith(self._loaded_text):
+            # The file only GREW since it was loaded (or is
+            # unchanged): the buffer replaces the loaded part and
+            # any tail appended since rides after it, intact.
+            tail = current[len(self._loaded_text):]
+            if tail and buffer and not buffer.endswith("\n"):
+                buffer += "\n"
+            merged = buffer + tail
+        else:
+            merged = buffer
+        if notes_mod.write_notes(APP_DIR, conv, merged):
+            self._loaded_text = merged
+            self.editor.setPlainText(merged)
+            self.hint_label.setVisible(not merged.strip())
+            if self._owner is not None:
+                self._owner.log("Session notes saved.")
+
+
+class WhatTheAiSeesWindow(QWidget):
+    """H5 (GUIFX Research Brief #2, 2026-11-09): the "What the
+    AI sees" room — the current conversation's context exactly
+    as the next request will carry it: the same message list the
+    worker is handed (ForgeWindow.messages), rendered read-only
+    with each part bannered (system prompt, folded summary,
+    session notes, turns) and the gauge's own estimate on top.
+    Nothing here is recomputed differently from the send path —
+    the point is that there is nothing hidden to recompute."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.resize(720, 620)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("What the AI sees — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        self.usage_label = QLabel("")
+        self.usage_label.setObjectName("muted")
+        self.usage_label.setWordWrap(True)
+        lay.addWidget(self.usage_label)
+        self.view = QPlainTextEdit()
+        self.view.setReadOnly(True)
+        lay.addWidget(self.view, 1)
+        self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        owner = self._owner
+        messages = list(getattr(owner, "messages", []) or []) \
+            if owner is not None else []
+        num_ctx = int(owner.settings.get("num_ctx", 8192) or 8192) \
+            if owner is not None else 8192
+        # Dynamic context windows (2026-11-10): the budget the
+        # worker will actually fold against is the DRIVER's
+        # resolved window — when it differs from the bare setting,
+        # this label says which number is real and why. Nothing
+        # about the next request is hidden in this room, and the
+        # window it must fit is part of the request.
+        resolved = num_ctx
+        driver = ""
+        if owner is not None:
+            try:
+                driver = owner.model_combo.currentText().strip()
+            except Exception:
+                driver = ""
+            if driver:
+                try:
+                    resolved = owner._resolve_budget(driver, num_ctx)
+                except Exception:
+                    resolved = num_ctx
+        try:
+            schemas = owner._context_schemas() \
+                if owner is not None else []
+        except Exception:
+            schemas = []
+        est = context_mod.total_estimate(messages, schemas)
+        if resolved != num_ctx:
+            self.usage_label.setText(
+                f"~{est:,} of {resolved:,} tokens (estimate, counted "
+                f"locally) — {driver}'s resolved context window "
+                f"(your num_ctx setting is {num_ctx:,}); the "
+                "messages below are what the next request carries, "
+                "in order. Tool schemas ride along on top of them.")
+        else:
+            self.usage_label.setText(
+                f"~{est:,} of {num_ctx:,} tokens (estimate, counted "
+                "locally) — the messages below are what the next "
+                "request carries, in order. Tool schemas ride along "
+                "on top of them.")
+        if not any(m.get("role") == "user" for m in messages):
+            self.view.setPlainText(
+                "Nothing to show yet — this conversation has no "
+                "messages. When you chat, this window shows "
+                "exactly what will be sent to the model: the "
+                "system prompt, any folded summary, your session "
+                "notes, and the turns, in order.")
+            return
+        self.view.setPlainText(format_ai_context(messages))
+
+
+class ModelsWindow(QWidget):
+    """H4 (GUIFX Research Brief #2, 2026-11-09): the models room —
+    every model Forge can pick, with the two facts a bare name
+    hides: whether it FITS this PC, and where it came from.
+
+    Fit is forge/modelfit's pure math over the model's real size
+    (Ollama's own tags data), the context Forge would actually run
+    it at (the owner's num_ctx setting — the one context every
+    send carries), and this machine's total RAM, read once per
+    refresh. Local rows carry the badge + estimated need; the
+    provenance sub-line names the publisher (the tag's namespace,
+    or the Ollama library) and the digest's first 12 characters
+    when Ollama reported one. Cloud rows (Groq/Gemini/EXAONE entries in
+    the same merged list) carry NO badge and no size — fit is a
+    local concept, and a cloud model lives on the provider's
+    machines; this room says exactly that instead of inventing
+    numbers for them.
+
+    Read-only over ForgeWindow._models_data — the same merged
+    tags list the model combo is built from, kept by
+    _apply_models. Everything is computed in refresh(): at open,
+    and whenever a fresh tags fetch lands while the room is
+    visible. No timers, no polling. Born on the G4 header
+    standard, Refresh in the overflow (it asks the owner for a
+    fresh tags fetch; the apply path refreshes this room).
+
+    Scout phase 1 (owner's correction, 2026-11-09): the room's
+    PULL WITH OLLAMA section is how models arrive — pulling
+    means the terminal pulls: a Pull button (the owner's typed
+    tag, or one of the verified roster's curated rows) calls
+    ForgeWindow.pull_model_via_terminal, which opens the Run
+    window and starts "ollama pull <tag>" through the run
+    surface's own machinery. There is deliberately no HTTP
+    pull client: Ollama's own terminal output streams into a
+    run block and the Run window's Stop stops the pull.
+    Curated rows carry a fit badge only where the governor's
+    roster table already knows the model's size in code — a
+    typed tag is never pre-badged with an invented size."""
+
+    # Badge colors: Fits is quiet (muted), Tight is the amber the
+    # palette already speaks in, Too large is the app's
+    # established error red — the literal RunBlock.ERROR_RED and
+    # the disconnect lamp already use. No green, per the law.
+    _BADGE_COLORS = {
+        modelfit_mod.FITS: TOKENS["text_muted"],
+        modelfit_mod.TIGHT: TOKENS["accent_amber"],
+        modelfit_mod.TOO_LARGE: "#e5534b",
+    }
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._local_rows: list = []
+        self._cloud_rows: list = []
+        self._pull_rows: list = []
+        self.resize(760, 560)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Models — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Refresh", self._refresh_from_owner)])
+        lay.addWidget(self.header)
+
+        lay.addWidget(self._section_label("ON THIS PC"))
+        truth = QLabel(
+            "Local models are files on this PC — they work offline "
+            "and can't be retired or taken away.")
+        truth.setWordWrap(True)
+        lay.addWidget(truth)
+        self.machine_line = QLabel("")
+        self.machine_line.setObjectName("muted")
+        self.machine_line.setWordWrap(True)
+        lay.addWidget(self.machine_line)
+
+        self.local_section = self._section_label("LOCAL MODELS")
+        lay.addWidget(self.local_section)
+        self.local_list = QListWidget()
+        lay.addWidget(self.local_list, 1)
+        self.local_empty = QLabel(
+            "No local models in the list yet — Forge reads it from "
+            "Ollama. If Ollama is still starting, reopen this "
+            "window in a moment; models pulled with Ollama appear "
+            "here once Forge refreshes.")
+        self.local_empty.setObjectName("muted")
+        self.local_empty.setWordWrap(True)
+        lay.addWidget(self.local_empty)
+
+        self.cloud_section = self._section_label("CLOUD MODELS")
+        lay.addWidget(self.cloud_section)
+        self.cloud_list = QListWidget()
+        lay.addWidget(self.cloud_list)
+
+        lay.addWidget(self._section_label("PULL WITH OLLAMA"))
+        pull_blurb = QLabel(
+            "Pulling runs in the Run window: Forge starts "
+            "“ollama pull <tag>” there, Ollama's own output "
+            "streams into a run block, and the Run window's "
+            "Stop button stops the pull.")
+        pull_blurb.setObjectName("muted")
+        pull_blurb.setWordWrap(True)
+        lay.addWidget(pull_blurb)
+        pull_row = QHBoxLayout(); pull_row.setSpacing(6)
+        self.pull_tag_edit = QLineEdit()
+        self.pull_tag_edit.setObjectName("pull_tag_edit")
+        self.pull_tag_edit.setPlaceholderText(
+            "any Ollama tag — e.g. qwen3:4b or user/model:tag")
+        self.pull_tag_edit.returnPressed.connect(
+            self._pull_from_field)
+        pull_row.addWidget(self.pull_tag_edit, 1)
+        self.pull_btn = QPushButton("Pull")
+        self.pull_btn.setObjectName("primary")
+        self.pull_btn.setToolTip(
+            "Start “ollama pull” for the typed tag in the Run "
+            "window")
+        self.pull_btn.clicked.connect(self._pull_from_field)
+        pull_row.addWidget(self.pull_btn)
+        lay.addLayout(pull_row)
+        self.pull_note = QLabel("")
+        self.pull_note.setObjectName("muted")
+        self.pull_note.setWordWrap(True)
+        lay.addWidget(self.pull_note)
+        self.pull_list = QListWidget()
+        lay.addWidget(self.pull_list)
+        self.refresh()
+
+    @staticmethod
+    def _section_label(text):
+        label = QLabel(text)
+        label.setObjectName("section")
+        return label
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def _refresh_from_owner(self):
+        """The overflow Refresh: ask the owner for a fresh tags
+        fetch (its apply path refreshes this room when it lands);
+        without a fetch path, re-read the state already here."""
+        owner = self._owner
+        fetch = getattr(owner, "refresh_models_async", None) \
+            if owner is not None else None
+        if callable(fetch):
+            fetch()
+        else:
+            self.refresh()
+
+    def refresh(self):
+        owner = self._owner
+        entries = list(getattr(owner, "_models_data", []) or []) \
+            if owner is not None else []
+        settings = getattr(owner, "settings", {}) or {}
+        num_ctx = int(settings.get("num_ctx", 8192) or 8192)
+        total_ram = modelfit_mod.total_ram_bytes()
+        if total_ram > 0:
+            max_size = modelfit_mod.comfortable_max_size_bytes(
+                total_ram, num_ctx)
+            self.machine_line.setText(
+                f"This PC: {modelfit_mod.format_ram_gb(total_ram)} "
+                f"GB RAM — models up to "
+                f"≈{modelfit_mod.format_gb(max_size)} GB fit "
+                f"comfortably.")
+        else:
+            self.machine_line.setText(
+                "This PC: its RAM could not be read — fit badges "
+                "are unavailable, sizes and provenance still show.")
+        self.local_section.setText(
+            f"LOCAL MODELS — FIT AT {num_ctx:,} CONTEXT")
+        local_entries, cloud_entries = [], []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("provider") in providers_mod.PROVIDERS:
+                cloud_entries.append(entry)
+            else:
+                local_entries.append(entry)
+        self._local_rows = []
+        self.local_list.clear()
+        for entry in local_entries:
+            row = self._local_row(entry, num_ctx, total_ram)
+            self._local_rows.append(row)
+            item = QListWidgetItem()
+            widget = row["widget"]
+            item.setSizeHint(widget.sizeHint())
+            self.local_list.addItem(item)
+            self.local_list.setItemWidget(item, widget)
+        self.local_empty.setVisible(not local_entries)
+        self._cloud_rows = cloud_entries
+        self.cloud_list.clear()
+        cloud_height = 0
+        for entry in cloud_entries:
+            widget = self._cloud_row(entry)
+            item = QListWidgetItem()
+            item.setSizeHint(widget.sizeHint())
+            cloud_height += widget.sizeHint().height()
+            self.cloud_list.addItem(item)
+            self.cloud_list.setItemWidget(item, widget)
+        self.cloud_section.setVisible(bool(cloud_entries))
+        self.cloud_list.setVisible(bool(cloud_entries))
+        if cloud_entries:
+            self.cloud_list.setMaximumHeight(cloud_height + 4)
+        # Scout phase 1: the curated pull rows — the owner's
+        # verified roster (forge/seats BASE_ROSTER), rebuilt with
+        # the same figures as everything else in this room.
+        self._pull_rows = []
+        self.pull_list.clear()
+        pull_height = 0
+        for tag in seats_mod.BASE_ROSTER:
+            row = self._pull_row(tag, num_ctx, total_ram)
+            self._pull_rows.append(row)
+            item = QListWidgetItem()
+            widget = row["widget"]
+            item.setSizeHint(widget.sizeHint())
+            pull_height += widget.sizeHint().height()
+            self.pull_list.addItem(item)
+            self.pull_list.setItemWidget(item, widget)
+        if self._pull_rows:
+            self.pull_list.setMaximumHeight(pull_height + 4)
+
+    def _local_row(self, entry, num_ctx, total_ram):
+        name = str(entry.get("name") or "")
+        size = entry.get("size")
+        size = int(size) if isinstance(size, (int, float)) else 0
+        klass, need = modelfit_mod.classify_fit(size, num_ctx,
+                                                total_ram)
+        widget = QWidget()
+        widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay = QVBoxLayout(widget)
+        lay.setContentsMargins(2, 3, 2, 3); lay.setSpacing(1)
+        top = QHBoxLayout(); top.setSpacing(8)
+        name_label = QLabel(name)
+        name_label.setObjectName("model_name")
+        name_label.setStyleSheet(
+            f"color:{TOKENS['text_big']};font-weight:700;")
+        name_label.setToolTip(name)
+        name_label.setSizePolicy(QSizePolicy.Ignored,
+                                 QSizePolicy.Preferred)
+        name_label.setAttribute(Qt.WA_TransparentForMouseEvents,
+                                True)
+        top.addWidget(name_label, 1)
+        if size:
+            size_label = QLabel(
+                f"{modelfit_mod.format_gb(size)} GB")
+            size_label.setObjectName("model_size")
+            size_label.setAttribute(Qt.WA_TransparentForMouseEvents,
+                                    True)
+            top.addWidget(size_label)
+        badge_text = ""
+        if klass in modelfit_mod.FIT_LABELS:
+            badge_text = (f"{modelfit_mod.FIT_LABELS[klass]} · "
+                          f"≈{modelfit_mod.format_gb(need)} GB")
+            badge = QLabel(f"● {badge_text}")
+            badge.setObjectName("fit_badge")
+            badge.setStyleSheet(
+                f"color:{self._BADGE_COLORS[klass]};")
+            badge.setToolTip(
+                f"Estimated RAM to run this model at "
+                f"{num_ctx:,} context: "
+                f"≈{modelfit_mod.format_gb(need)} GB of "
+                f"{modelfit_mod.format_ram_gb(total_ram)} GB")
+            badge.setAttribute(Qt.WA_TransparentForMouseEvents,
+                               True)
+            top.addWidget(badge)
+        lay.addLayout(top)
+        parts = [f"Publisher: {modelfit_mod.publisher_for(name)}"]
+        digest = modelfit_mod.short_digest(entry.get("digest"))
+        if digest:
+            parts.append(f"ID: {digest}")
+        prov = QLabel(" · ".join(parts))
+        prov.setObjectName("provenance")
+        prov.setStyleSheet(f"color:{TOKENS['text_muted']};")
+        prov.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay.addWidget(prov)
+        return {"entry": entry, "klass": klass, "need": need,
+                "badge_text": badge_text, "widget": widget}
+
+    def _cloud_row(self, entry):
+        provider = entry.get("provider")
+        label = providers_mod.PROVIDER_LABELS.get(provider,
+                                                  provider)
+        name = str(entry.get("name") or "")
+        widget = QWidget()
+        widget.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay = QVBoxLayout(widget)
+        lay.setContentsMargins(2, 3, 2, 3); lay.setSpacing(1)
+        top = QHBoxLayout(); top.setSpacing(8)
+        name_label = QLabel(name)
+        name_label.setObjectName("model_name")
+        name_label.setToolTip(name)
+        name_label.setSizePolicy(QSizePolicy.Ignored,
+                                 QSizePolicy.Preferred)
+        name_label.setAttribute(Qt.WA_TransparentForMouseEvents,
+                                True)
+        top.addWidget(name_label, 1)
+        prov_label = QLabel(str(label))
+        prov_label.setObjectName("provider_label")
+        prov_label.setStyleSheet(f"color:{TOKENS['text_muted']};")
+        prov_label.setAttribute(Qt.WA_TransparentForMouseEvents,
+                                True)
+        top.addWidget(prov_label)
+        lay.addLayout(top)
+        note_text = (
+            f"Cloud model — runs on {label}'s machines, not this "
+            "PC. No fit badge: there is nothing local to fit.")
+        # A window the provider itself stated (its catalog) is a
+        # fact, not an invention — show it; budgeting uses it too.
+        stated = entry.get("context_window")
+        if isinstance(stated, int) and not isinstance(stated, bool) \
+                and stated > 0:
+            note_text += f" Stated context window: {stated:,} tokens."
+        note = QLabel(note_text)
+        note.setObjectName("provenance")
+        note.setStyleSheet(f"color:{TOKENS['text_muted']};")
+        note.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay.addWidget(note)
+        return widget
+
+    # ---------- scout phase 1: terminal pull rows ----------
+
+    def _pull_row(self, tag, num_ctx, total_ram):
+        """One curated pull row: the roster tag, its size and
+        fit badge when the governor's roster table already
+        knows the size in code, the governor's own note for the
+        model, and a Pull button. (Unlike the read-only local /
+        cloud rows this widget takes mouse events — the button
+        has to click.)"""
+        info = {}
+        for entry in governor.MODELS.values():
+            if entry.get("ollama") == tag:
+                info = entry
+                break
+        # The governor's gb figures are decimal GB — the unit
+        # modelfit.format_gb speaks — so the curated row quotes
+        # the same size (and near enough the same need) as the
+        # installed row for the same model.
+        size_bytes = int(round(float(info.get("gb") or 0)
+                               * 10 ** 9))
+        widget = QWidget()
+        lay = QVBoxLayout(widget)
+        lay.setContentsMargins(2, 3, 2, 3); lay.setSpacing(1)
+        top = QHBoxLayout(); top.setSpacing(8)
+        name_label = QLabel(tag)
+        name_label.setObjectName("model_name")
+        name_label.setStyleSheet(
+            f"color:{TOKENS['text_big']};font-weight:700;")
+        name_label.setToolTip(tag)
+        name_label.setSizePolicy(QSizePolicy.Ignored,
+                                 QSizePolicy.Preferred)
+        top.addWidget(name_label, 1)
+        badge_text = ""
+        klass = modelfit_mod.UNKNOWN
+        if size_bytes:
+            size_label = QLabel(
+                f"{modelfit_mod.format_gb(size_bytes)} GB")
+            size_label.setObjectName("model_size")
+            top.addWidget(size_label)
+            klass, need = modelfit_mod.classify_fit(
+                size_bytes, num_ctx, total_ram)
+            if klass in modelfit_mod.FIT_LABELS:
+                badge_text = (f"{modelfit_mod.FIT_LABELS[klass]}"
+                              f" · ≈{modelfit_mod.format_gb(need)}"
+                              f" GB")
+                badge = QLabel(f"● {badge_text}")
+                badge.setObjectName("fit_badge")
+                badge.setStyleSheet(
+                    f"color:{self._BADGE_COLORS[klass]};")
+                top.addWidget(badge)
+        pull_btn = QPushButton("Pull")
+        pull_btn.setObjectName("pull_btn")
+        pull_btn.setToolTip(
+            f"Start “ollama pull {tag}” in the Run window")
+        pull_btn.clicked.connect(
+            lambda _checked=False, t=tag: self._pull_tag(t))
+        top.addWidget(pull_btn)
+        lay.addLayout(top)
+        note_text = str(info.get("note") or "")
+        if note_text:
+            note = QLabel(note_text)
+            note.setObjectName("provenance")
+            note.setStyleSheet(
+                f"color:{TOKENS['text_muted']};")
+            lay.addWidget(note)
+        return {"tag": tag, "klass": klass,
+                "badge_text": badge_text, "widget": widget}
+
+    def _pull_tag(self, tag):
+        """Hand the tag to the owner's terminal-pull entry —
+        the single routing every Pull affordance in this room
+        takes (tests monkeypatch that entry, never ollama)."""
+        owner = self._owner
+        fn = getattr(owner, "pull_model_via_terminal", None) \
+            if owner is not None else None
+        if callable(fn):
+            fn(tag)
+
+    def _pull_from_field(self):
+        self._pull_tag(self.pull_tag_edit.text())
+
+    def show_pull_note(self, text):
+        """The pull section's own status line: the terminal-pull
+        entry reports a refused tag (or a busy run surface)
+        here, in plain words, next to the field it came from."""
+        self.pull_note.setText(str(text or ""))
+
+
+class SkillEditorWindow(QWidget):
+    """One skill, one window (the Forge window rule, 2026-11-09):
+    creating or editing a global skill gets a room of its own
+    instead of a cramped editor stacked inside Customize. Built like
+    the ModeWindow rooms — top-level, non-modal, closable, stays
+    open alongside the bench — with a tabbed form: Details (the slug
+    and the one-line index description) and Instructions (the
+    SKILL.md body, full height). Saving writes through
+    create_mod.create_skill / update_skill — the exact backing calls
+    the agent's tools use — and fires the owner's rescan so the
+    skill lists refresh everywhere. A successful create turns the
+    window into the new skill's Edit window, so a second Save
+    updates instead of colliding. Refusals are create_ext's plain
+    result strings, shown on the status line, never exceptions."""
+
+    def __init__(self, owner, skills_dir, skill=None, on_saved=None):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._skills_dir = skills_dir
+        self._on_saved = on_saved
+        self._folder_name = skill.folder.name if skill is not None else None
+        self.resize(780, 640)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header carries the editor title (the
+        # same label _retitle updates). Save/Close are the bottom
+        # action row's primaries — no header secondaries to overflow.
+        self.header = build_window_header(
+            self, "EDIT SKILL" if skill is not None else "NEW SKILL")
+        self.win_title = self.header.title_label
+        lay.addWidget(self.header)
+        blurb = QLabel("Skills are global: this writes into the Forge's own skills/ "
+                       "folder, so the skill is available in every project. Saving "
+                       "rescans automatically — no restart needed.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.tabs = QTabWidget()
+        lay.addWidget(self.tabs, 1)
+        # Details tab.
+        details = QWidget()
+        form = QFormLayout(details)
+        form.setContentsMargins(10, 10, 10, 10); form.setSpacing(8)
+        self.name_edit = QLineEdit(skill.folder.name if skill is not None else "")
+        self.name_edit.setPlaceholderText("lowercase-slug, e.g. pdf-tables")
+        form.addRow("Name (slug):", self.name_edit)
+        self.desc_edit = QLineEdit(skill.description if skill is not None else "")
+        self.desc_edit.setPlaceholderText(
+            "One line: what it does AND when to use it — the skill index line")
+        form.addRow("Description:", self.desc_edit)
+        name_note = QLabel("The name is the skill's folder name — it cannot change "
+                           "after creation.")
+        name_note.setObjectName("muted"); name_note.setWordWrap(True)
+        form.addRow("", name_note)
+        self.tabs.addTab(details, "Details")
+        # Instructions tab.
+        self.body_edit = QPlainTextEdit()
+        self.body_edit.setPlaceholderText(
+            "The skill instructions (Markdown): the procedure, in order, "
+            "terse and operational.")
+        if skill is not None:
+            self.body_edit.setPlainText(self._current_body(skill))
+        self.tabs.addTab(self.body_edit, "Instructions")
+        if skill is not None:
+            self._lock_name()
+        # Status + actions.
+        self.status = QLabel("")
+        self.status.setObjectName("muted"); self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.save_btn = QPushButton("Save skill")
+        self.save_btn.setObjectName("primary")
+        self.save_btn.clicked.connect(self.save)
+        btn_row.addWidget(self.save_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+        self._retitle()
+
+    @staticmethod
+    def _current_body(skill) -> str:
+        """The editable body of an existing SKILL.md: the file minus
+        its leading name:/description: header lines and the blank
+        line after them — the shape skill_file_text writes and
+        forge/skills.py parses."""
+        try:
+            text = (skill.folder / "SKILL.md").read_text(
+                encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        lines = text.splitlines()
+        i = 0
+        while i < len(lines) and i < 12:
+            low = lines[i].strip().lower()
+            if low.startswith("name:") or low.startswith("description:"):
+                i += 1
+            else:
+                break
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        return "\n".join(lines[i:])
+
+    def _lock_name(self):
+        self.name_edit.setReadOnly(True)
+        self.name_edit.setToolTip("The name is the folder name — fixed after creation.")
+
+    def _retitle(self):
+        if self._folder_name is not None:
+            self.win_title.setText("EDIT SKILL")
+            self.setWindowTitle(f"Edit Skill — {self._folder_name} — Code Forge")
+        else:
+            self.win_title.setText("NEW SKILL")
+            self.setWindowTitle("New Skill — Code Forge")
+
+    def save(self):
+        """Write through the create/update backing calls. Returns
+        (ok, message); the message lands on the status line either
+        way, so a refusal reads in place."""
+        name = self._folder_name or self.name_edit.text().strip()
+        if self._folder_name is not None:
+            ok, message = create_mod.update_skill(
+                self._skills_dir, name, self.desc_edit.text(),
+                self.body_edit.toPlainText())
+        else:
+            ok, message = create_mod.create_skill(
+                self._skills_dir, name, self.desc_edit.text(),
+                self.body_edit.toPlainText())
+        self.status.setText(message)
+        if ok:
+            if self._folder_name is None:
+                self._folder_name = name
+                self.name_edit.setText(name)
+                self._lock_name()
+                self._retitle()
+            if self._on_saved is not None:
+                self._on_saved(message.split(" — ")[0])
+        return ok, message
+
+
+class PluginEditorWindow(QWidget):
+    """One plugin, one window (the Forge window rule, 2026-11-09):
+    the plugin counterpart of SkillEditorWindow. Tabs: Details
+    (slug + one-line description) and Code (the full plugin.py, full
+    height, monospace). Saving writes through create_mod.create_plugin
+    / update_plugin — the agent tools' backing calls, with the same
+    compile / HANDLERS / TOOL_SCHEMAS gate before a byte is written —
+    and fires the owner's rescan. A brand-new plugin starts DISABLED
+    (Note 18) until the owner ticks it on in Customize; an update
+    keeps the plugin's enabled state and plugin.json settings."""
+
+    def __init__(self, owner, plugins_dir, plugin=None, on_saved=None):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._plugins_dir = plugins_dir
+        self._on_saved = on_saved
+        self._folder_name = plugin.folder.name if plugin is not None else None
+        self.resize(820, 660)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header carries the editor title (the
+        # same label _retitle updates). Save/Close are the bottom
+        # action row's primaries — no header secondaries to overflow.
+        self.header = build_window_header(
+            self, "EDIT PLUGIN" if plugin is not None else "NEW PLUGIN")
+        self.win_title = self.header.title_label
+        lay.addWidget(self.header)
+        blurb = QLabel("Plugins are global: this writes into the Forge's own "
+                       "plugins/ folder, available in every project. The code must "
+                       "define HANDLERS = {'tool_name': handler, ...}; it is checked "
+                       "before anything is written. A new plugin starts DISABLED — "
+                       "enable it in Customize.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.tabs = QTabWidget()
+        lay.addWidget(self.tabs, 1)
+        # Details tab.
+        details = QWidget()
+        form = QFormLayout(details)
+        form.setContentsMargins(10, 10, 10, 10); form.setSpacing(8)
+        self.name_edit = QLineEdit(plugin.folder.name if plugin is not None else "")
+        self.name_edit.setPlaceholderText("lowercase-slug, e.g. weather-fetch")
+        form.addRow("Name (slug):", self.name_edit)
+        self.desc_edit = QLineEdit(plugin.description if plugin is not None else "")
+        self.desc_edit.setPlaceholderText("One line: what the plugin does and when to use it")
+        form.addRow("Description:", self.desc_edit)
+        name_note = QLabel("The name is the plugin's folder name — it cannot change "
+                           "after creation.")
+        name_note.setObjectName("muted"); name_note.setWordWrap(True)
+        form.addRow("", name_note)
+        self.tabs.addTab(details, "Details")
+        # Code tab.
+        self.code_edit = QPlainTextEdit()
+        self.code_edit.setFont(QFont("monospace", 10))
+        self.code_edit.setPlaceholderText(
+            "Complete plugin.py source — define HANDLERS = "
+            "{'tool_name': handler_function, ...}; each handler takes "
+            "(args, ctx) and returns a string. Optional: TOOL_SCHEMAS = "
+            "{'tool_name': {parameters}, ...}.")
+        if plugin is not None:
+            try:
+                self.code_edit.setPlainText(
+                    (plugin.folder / "plugin.py").read_text(
+                        encoding="utf-8", errors="replace"))
+            except OSError:
+                pass
+        self.tabs.addTab(self.code_edit, "Code")
+        # Item #67: lexical tab completions in the Code pane
+        # (keywords/builtins + identifiers harvested from the code
+        # itself; Tab accepts while the popup is up, indents when
+        # it is not). Code pane only — the skill window's
+        # Instructions pane is prose and deliberately gets none.
+        self._code_completion = completion_mod.attach_code_completion(
+            self.code_edit)
+        if plugin is not None:
+            self._lock_name()
+        # Status + actions.
+        self.status = QLabel("")
+        self.status.setObjectName("muted"); self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.save_btn = QPushButton("Save plugin")
+        self.save_btn.setObjectName("primary")
+        self.save_btn.clicked.connect(self.save)
+        btn_row.addWidget(self.save_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btn_row.addWidget(close_btn)
+        lay.addLayout(btn_row)
+        self._retitle()
+
+    def _lock_name(self):
+        self.name_edit.setReadOnly(True)
+        self.name_edit.setToolTip("The name is the folder name — fixed after creation.")
+
+    def _retitle(self):
+        if self._folder_name is not None:
+            self.win_title.setText("EDIT PLUGIN")
+            self.setWindowTitle(f"Edit Plugin — {self._folder_name} — Code Forge")
+        else:
+            self.win_title.setText("NEW PLUGIN")
+            self.setWindowTitle("New Plugin — Code Forge")
+
+    def save(self):
+        """Write through the create/update backing calls. Returns
+        (ok, message); a refused update leaves the plugin on disk
+        untouched, and the refusal reads on the status line."""
+        name = self._folder_name or self.name_edit.text().strip()
+        if self._folder_name is not None:
+            ok, message = create_mod.update_plugin(
+                self._plugins_dir, name, self.desc_edit.text(),
+                self.code_edit.toPlainText())
+        else:
+            ok, message = create_mod.create_plugin(
+                self._plugins_dir, name, self.desc_edit.text(),
+                self.code_edit.toPlainText())
+        self.status.setText(message)
+        if ok:
+            if self._folder_name is None:
+                self._folder_name = name
+                self.name_edit.setText(name)
+                self._lock_name()
+                self._retitle()
+            if self._on_saved is not None:
+                self._on_saved(message.split(" — ")[0])
+        return ok, message
+
+
+class ProviderTestThread(QThread):
+    """Item #69: both providers' connection tests off the GUI thread
+    (each is a live catalog fetch). Emits {provider: (ok, message,
+    count)}; the window paints the results into its header."""
+
+    done = Signal(object)
+
+    def __init__(self, client):
+        super().__init__()
+        self.client = client
+
+    def run(self):
+        results = {}
+        test = getattr(self.client, "test_provider", None)
+        for provider in providers_mod.PROVIDERS:
+            if not callable(test):
+                results[provider] = (
+                    False, "This client cannot test providers.", 0)
+                continue
+            try:
+                results[provider] = test(provider)
+            except Exception as exc:
+                results[provider] = (False, str(exc), 0)
+        self.done.emit(results)
+
+
+class MaintenanceTestThread(QThread):
+    """Item #69: the candidate's full verification — the app's own
+    unittest suite, run inside the work copy with the same interpreter
+    the app is running on. Output streams to the Tests tab; done
+    carries the honest pass/fail."""
+
+    output = Signal(str)
+    done = Signal(bool)
+
+    def __init__(self, worktree):
+        super().__init__()
+        self.worktree = str(worktree)
+
+    def run(self):
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests"],
+                cwd=self.worktree, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1)
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    self.output.emit(line.rstrip("\n"))
+            code = proc.wait()
+            self.done.emit(code == 0)
+        except Exception as exc:
+            self.output.emit(f"Could not run verification: {exc}")
+            self.done.emit(False)
+
+
+class MaintenanceWindow(QWidget):
+    """Item #69: the Forge maintenance room — the dedicated cloud
+    self-maintenance engine's own closable window (window rule: a
+    function gets its own window, never a crammed panel).
+
+    Four tabs. CHAT mirrors the persistent maintenance conversation
+    and sends through the owner's normal send path, so approvals,
+    tool gates, diffs and receipts are the app's real ones. CHANGES
+    lists the work copy's diff against the live app, protected files
+    flagged. TESTS runs the candidate's full suite in the work copy.
+    UPDATE builds a candidate package (only after a passing suite)
+    and hands it to the owner's existing update flow — installation
+    stays the owner's click, with a separate acknowledgement when
+    protected files changed. Closing the window leaves maintenance
+    mode and restores the owner's previous session."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.resize(880, 660)
+        self.setStyleSheet("background:#12100d;")
+        self.setWindowTitle("Forge maintenance — Code Forge")
+        self.last_test_ok = None
+        self.candidate_path = None
+        self.candidate_manifest = None
+        self._changes: list[dict] = []
+        self._tested_signature = None
+        self._test_thread = None
+        self._provider_thread = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header — title, and the header row's one
+        # secondary action (Test providers) moved into the overflow
+        # menu, bound to the same callable. The window's primary
+        # verbs (Send, Run full verification, Build candidate) live
+        # in their tabs, untouched. The provider tooltip's content
+        # survives as the status line directly below.
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Test providers", self.test_providers)])
+        lay.addWidget(self.header)
+        # The run-state enable/disable the old button had now rides
+        # on the overflow action itself.
+        self.test_providers_action = self.header.overflow_menu.actions()[0]
+        self.provider_status = QLabel(
+            "Hosted models repair Forge itself here. Prompts and code "
+            "in this room go to the provider you pick — nothing here "
+            "runs on a local model unless you choose one.")
+        self.provider_status.setObjectName("muted")
+        self.provider_status.setWordWrap(True)
+        lay.addWidget(self.provider_status)
+        self.tabs = QTabWidget()
+        lay.addWidget(self.tabs, 1)
+        # --- Chat tab ---
+        chat_page = QWidget(); chat_lay = QVBoxLayout(chat_page)
+        self.transcript = QPlainTextEdit(); self.transcript.setReadOnly(True)
+        self.transcript.setPlaceholderText(
+            "The maintenance conversation lives here — it persists "
+            "across sessions, separate from your project chats.")
+        chat_lay.addWidget(self.transcript, 1)
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Maintenance model"))
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumWidth(280)
+        self.model_combo.currentTextChanged.connect(self._model_changed)
+        model_row.addWidget(self.model_combo, 1)
+        chat_lay.addLayout(model_row)
+        self.input = QPlainTextEdit()
+        self.input.setMaximumHeight(96)
+        self.input.setPlaceholderText(
+            "Tell the maintenance engineer what to repair or build…")
+        chat_lay.addWidget(self.input)
+        send_row = QHBoxLayout()
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.clicked.connect(self.send)
+        send_row.addWidget(self.send_btn)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.clicked.connect(lambda: self._owner.stop_generation())
+        send_row.addWidget(self.stop_btn)
+        send_row.addStretch()
+        chat_lay.addLayout(send_row)
+        self.tabs.addTab(chat_page, "Chat")
+        # --- Changes tab ---
+        changes_page = QWidget(); changes_lay = QVBoxLayout(changes_page)
+        self.refresh_changes_btn = QPushButton("Refresh")
+        self.refresh_changes_btn.clicked.connect(self.refresh_changes)
+        changes_lay.addWidget(self.refresh_changes_btn)
+        self.changes_view = QPlainTextEdit(); self.changes_view.setReadOnly(True)
+        self.changes_view.setPlaceholderText(
+            "No work copy yet — sending a maintenance message creates it.")
+        changes_lay.addWidget(self.changes_view, 1)
+        self.tabs.addTab(changes_page, "Changes")
+        # --- Tests tab ---
+        tests_page = QWidget(); tests_lay = QVBoxLayout(tests_page)
+        self.run_tests_btn = QPushButton("Run full verification")
+        self.run_tests_btn.setToolTip(
+            "Run the candidate's whole test suite inside the work "
+            "copy. A candidate update can only be built after this "
+            "passes on the current changes.")
+        self.run_tests_btn.clicked.connect(self.run_tests)
+        tests_lay.addWidget(self.run_tests_btn)
+        # S3 (audit S1-09): the honest label — this suite is the
+        # candidate's own code (written by the cloud maintenance
+        # models), and running it EXECUTES that code on this PC.
+        # Until now the tab never said so.
+        self.tests_exec_label = QLabel(
+            "Running tests runs the candidate's code on this PC — "
+            "the suite is the candidate's own code, written by the "
+            "cloud maintenance models. It is not a read-only check.")
+        self.tests_exec_label.setObjectName("muted")
+        self.tests_exec_label.setWordWrap(True)
+        tests_lay.addWidget(self.tests_exec_label)
+        self.test_status = QLabel("Not run yet.")
+        self.test_status.setObjectName("muted")
+        tests_lay.addWidget(self.test_status)
+        self.test_output = QPlainTextEdit(); self.test_output.setReadOnly(True)
+        tests_lay.addWidget(self.test_output, 1)
+        self.tabs.addTab(tests_page, "Tests")
+        # --- Update tab ---
+        update_page = QWidget(); update_lay = QVBoxLayout(update_page)
+        self.build_update_btn = QPushButton("Build candidate update")
+        self.build_update_btn.clicked.connect(self.build_candidate)
+        update_lay.addWidget(self.build_update_btn)
+        self.candidate_label = QLabel("No candidate built yet.")
+        self.candidate_label.setWordWrap(True)
+        update_lay.addWidget(self.candidate_label)
+        self.manifest_view = QPlainTextEdit(); self.manifest_view.setReadOnly(True)
+        update_lay.addWidget(self.manifest_view, 1)
+        self.protected_check = QCheckBox(
+            "This candidate changes protected files (seat guard, "
+            "permissions, providers, updater, or tests) and I have "
+            "reviewed those changes")
+        update_lay.addWidget(self.protected_check)
+        self.install_update_btn = QPushButton("Install candidate…")
+        self.install_update_btn.setEnabled(False)
+        self.install_update_btn.clicked.connect(self.install_candidate)
+        update_lay.addWidget(self.install_update_btn)
+        self.tabs.addTab(update_page, "Update")
+        self.refresh_models()
+        self.refresh_transcript()
+        self.refresh_changes()
+
+    # ---------- helpers ----------
+
+    def worktree_path(self):
+        active = getattr(self._owner, "_self_maintenance_worktree", None)
+        if active:
+            return Path(active)
+        return self_maint_mod.worktree_dir(APP_DIR)
+
+    def refresh_models(self):
+        current = self.model_combo.currentText()
+        candidates = []
+        helper = getattr(self._owner, "_maintenance_model_candidates", None)
+        if callable(helper):
+            try:
+                candidates = list(helper())
+            except Exception:
+                candidates = []
+        chosen = self._owner.settings.get("maintenance_model", "")
+        if chosen and chosen not in candidates:
+            candidates.insert(0, chosen)
+        if getattr(self._owner, "_self_maintenance_active", False):
+            live = self._owner.model_combo.currentText().strip()
+            if live and live not in candidates:
+                candidates.insert(0, live)
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(candidates)
+        if current and current in candidates:
+            self.model_combo.setCurrentText(current)
+        elif chosen and chosen in candidates:
+            self.model_combo.setCurrentText(chosen)
+        self.model_combo.blockSignals(False)
+
+    def refresh_transcript(self):
+        blocks = []
+        for message in getattr(self._owner, "messages", []) or []:
+            role = message.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            body = (message.get("content") or "").strip()
+            if not body:
+                continue
+            who = "YOU" if role == "user" else "FORGE ENGINEER"
+            if message.get("reviewer"):
+                who = f"REVIEWER · {message['reviewer']}"
+            blocks.append(f"{who}\n{body}")
+        self.transcript.setPlainText("\n\n———\n\n".join(blocks))
+        bar = self.transcript.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def refresh_changes(self):
+        work = self.worktree_path()
+        if not work.is_dir():
+            self._changes = []
+            self.changes_view.setPlainText(
+                "No work copy yet — sending a maintenance message "
+                "creates it under the app data folder.")
+            return
+        try:
+            self._changes = self_maint_mod.changed_files(ROOT_DIR, work)
+        except Exception as exc:
+            self.changes_view.setPlainText(f"Could not diff the work copy: {exc}")
+            return
+        signature = json.dumps(self._changes, sort_keys=True)
+        if self.last_test_ok and signature != self._tested_signature:
+            self.last_test_ok = False
+            self.test_status.setText(
+                "Changes landed after the passing run — verification "
+                "is stale; run it again before building a candidate.")
+        if not self._changes:
+            self.changes_view.setPlainText(
+                "The work copy matches the live app — no changes yet.")
+            return
+        protected = {c["path"] for c in
+                     self_maint_mod.protected_changes(self._changes)}
+        lines = []
+        for change in self._changes:
+            line = f"{change['status'].upper():9s} {change['path']}"
+            if change["path"] in protected:
+                line += "   ⚠ PROTECTED — separate acknowledgement required"
+            lines.append(line)
+        self.changes_view.setPlainText("\n".join(lines))
+
+    # ---------- chat ----------
+
+    def _model_changed(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        owner = self._owner
+        owner.settings["maintenance_model"] = text
+        owner.save_settings()
+        if getattr(owner, "_self_maintenance_active", False):
+            if owner.model_combo.findText(text) < 0:
+                owner.model_combo.addItem(text)
+            owner.model_combo.setCurrentText(text)
+
+    def send(self):
+        text = self.input.toPlainText().strip()
+        if not text:
+            return
+        owner = self._owner
+        if not getattr(owner, "_self_maintenance_active", False):
+            model = self.model_combo.currentText().strip() or None
+            if not owner.activate_maintenance_session(model):
+                return
+        elif self.model_combo.currentText().strip():
+            self._model_changed(self.model_combo.currentText().strip())
+        owner.input.setPlainText(text)
+        self.input.clear()
+        owner.send_message()
+        self.refresh_transcript()
+
+    # ---------- providers ----------
+
+    def test_providers(self):
+        if self._provider_thread is not None and \
+                self._provider_thread.isRunning():
+            return
+        self.provider_status.setText("Testing providers…")
+        self.test_providers_action.setEnabled(False)
+        thread = ProviderTestThread(self._owner.client)
+        thread.done.connect(self._on_provider_test_done)
+        self._provider_thread = thread
+        thread.start()
+
+    def _on_provider_test_done(self, results):
+        self._provider_thread = None
+        self.test_providers_action.setEnabled(True)
+        parts = []
+        for provider in providers_mod.PROVIDERS:
+            ok, message, _count = results.get(
+                provider, (False, "No result.", 0))
+            parts.append(f"{providers_mod.PROVIDER_LABELS[provider]}: "
+                         f"{'✓' if ok else '✗'} {message}")
+        self.provider_status.setText(" · ".join(parts))
+
+    # ---------- tests ----------
+
+    def run_tests(self):
+        if self._test_thread is not None and self._test_thread.isRunning():
+            return
+        work = self.worktree_path()
+        if not work.is_dir():
+            work = self_maint_mod.prepare_work_copy(ROOT_DIR, APP_DIR)
+        # S3 (audit S1-09): the same plain statement in the owner's
+        # log at the moment a candidate test run starts.
+        self._owner.log(
+            "Maintenance verification: running the candidate's test "
+            "suite EXECUTES the candidate's code on this PC — it is "
+            "not a read-only check.")
+        self.last_test_ok = None
+        self.test_status.setText("Running the full suite in the work copy…")
+        self.test_output.clear()
+        self.run_tests_btn.setEnabled(False)
+        thread = MaintenanceTestThread(work)
+        thread.output.connect(
+            lambda line: self.test_output.appendPlainText(line))
+        thread.done.connect(self._on_test_done)
+        self._test_thread = thread
+        thread.start()
+
+    def _on_test_done(self, ok):
+        self._test_thread = None
+        self.run_tests_btn.setEnabled(True)
+        self.last_test_ok = bool(ok)
+        work = self.worktree_path()
+        try:
+            changes = self_maint_mod.changed_files(ROOT_DIR, work)
+            self._tested_signature = json.dumps(changes, sort_keys=True)
+        except Exception:
+            self._tested_signature = None
+        self.test_status.setText(
+            "Verification PASSED — a candidate update may be built."
+            if ok else
+            "Verification FAILED — fix the work copy and run it again. "
+            "No candidate can be built from failing changes.")
+        self.refresh_changes()
+
+    # ---------- update ----------
+
+    def build_candidate(self):
+        if self.last_test_ok is not True:
+            QMessageBox.warning(
+                self, "Build candidate update",
+                "Run the full verification first — a candidate is "
+                "only built from changes whose suite passed.")
+            return None
+        work = self.worktree_path()
+        if not work.is_dir():
+            QMessageBox.warning(
+                self, "Build candidate update",
+                "There is no maintenance work copy yet.")
+            return None
+        model = self.model_combo.currentText().strip() or \
+            self._owner.model_combo.currentText().strip()
+        try:
+            zip_path, manifest = self_maint_mod.build_candidate_package(
+                ROOT_DIR, work, APP_DIR,
+                {"models_used": [model] if model else [],
+                 "tests_passed": True, "base_version": APP_VERSION})
+        except Exception as exc:
+            QMessageBox.critical(self, "Build candidate update", str(exc))
+            return None
+        self.candidate_path = str(zip_path)
+        self.candidate_manifest = manifest
+        self.candidate_label.setText(f"Candidate: {zip_path}")
+        lines = [f"Created: {manifest.get('created_at', '')}",
+                 f"SHA-256: {manifest.get('sha256', '')}",
+                 f"Changed files: {len(manifest.get('changed_files') or [])}",
+                 f"Protected files: {len(manifest.get('protected_files') or [])}",
+                 ""]
+        for change in manifest.get("changed_files") or []:
+            lines.append(f"{change['status'].upper():9s} {change['path']}")
+        self.manifest_view.setPlainText("\n".join(lines))
+        protected = manifest.get("protected_files") or []
+        self.protected_check.setEnabled(bool(protected))
+        if not protected:
+            self.protected_check.setChecked(False)
+        self.install_update_btn.setEnabled(True)
+        return zip_path
+
+    def install_candidate(self):
+        if not self.candidate_path:
+            return
+        protected = (self.candidate_manifest or {}).get(
+            "protected_files") or []
+        if protected and not self.protected_check.isChecked():
+            QMessageBox.warning(
+                self, "Install candidate",
+                "This candidate changes protected files. Tick the "
+                "acknowledgement first — those are the files that "
+                "guard your seats, permissions, keys, updater, and "
+                "the test evidence itself.")
+            return
+        self._owner.apply_update(self.candidate_path)
+
+    def closeEvent(self, event):
+        owner = self._owner
+        if owner.worker is not None and owner.worker.isRunning():
+            self.provider_status.setText(
+                "A maintenance turn is running — stop it before closing.")
+            event.ignore()
+            return
+        if (self._test_thread is not None and self._test_thread.isRunning()) or \
+                (self._provider_thread is not None
+                 and self._provider_thread.isRunning()):
+            self.provider_status.setText(
+                "A check is still running — wait for it before closing.")
+            event.ignore()
+            return
+        if getattr(owner, "_self_maintenance_active", False):
+            if not owner.deactivate_maintenance_session():
+                event.ignore()
+                return
+        event.accept()
+
+
+class DeckLinkDialog(QDialog):
+    """The deck link as a scannable QR (owner request, 2026-11-08):
+    a pop-up, not a panel fixture — it opens when the deck starts,
+    the phone scans it, and it closes. It never eats inspector space.
+    Reused across deck restarts; set_link refreshes the address and
+    code because the token is per-session."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Phone deck — scan to connect")
+        lay = QVBoxLayout(self); lay.setContentsMargins(18, 16, 18, 16); lay.setSpacing(10)
+        head = QLabel("Scan with your phone to open the deck:")
+        lay.addWidget(head)
+        self.qr_label = QLabel(""); self.qr_label.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self.qr_label)
+        self.url_label = QLabel(""); self.url_label.setWordWrap(True)
+        self.url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(self.url_label)
+        close_btn = QPushButton("Close"); close_btn.clicked.connect(self.accept)
+        lay.addWidget(close_btn)
+
+    def set_link(self, url, pixmap):
+        if pixmap is not None:
+            self.qr_label.setText("")
+            self.qr_label.setPixmap(pixmap)
+        else:
+            # Never an empty box: say so in the window itself.
+            self.qr_label.setPixmap(QPixmap())
+            self.qr_label.setText(
+                "QR code unavailable —\ntype the address below into your phone.")
+        self.url_label.setText(url)
+
+
+class WelcomeDialog(QDialog):
+    """The startup welcome screen (owner request, 2026-11-10):
+    Code Forge is free, so the first thing a new user sees — after
+    the bench itself — is a hello and a way to support it: a
+    Donate / Buy me a coffee button and a scannable QR, both
+    pointing at the owner's Cash App (DONATE_URL). Same pop-up
+    family as DeckLinkDialog: it opens at startup, sits on top of
+    the ready bench, and closes when the user is ready to run —
+    it never blocks the bench behind a modal. The QR is rendered
+    by the built-in forge.qr encoder, like the deck's: if the
+    render ever fails the window still opens, saying so and
+    showing the plain link instead of an empty box."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Welcome to Code Forge")
+        lay = QVBoxLayout(self); lay.setContentsMargins(20, 18, 20, 18); lay.setSpacing(10)
+        head = QLabel("Welcome to Code Forge 🔥")
+        head.setStyleSheet("font-size:18px; font-weight:700;")
+        lay.addWidget(head)
+        blurb = QLabel(
+            "A fully local AI coding agent for Linux — free, no "
+            "subscription, no account. Your code never leaves "
+            "your machine.\n\n"
+            "If Code Forge helps you, you can support its "
+            "development with a one-time donation:")
+        blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.qr_label = QLabel(""); self.qr_label.setAlignment(Qt.AlignCenter)
+        pix = qr_mod.qr_pixmap(DONATE_URL, scale=6)
+        if pix is not None:
+            self.qr_label.setPixmap(pix)
+        else:
+            # Never an empty box: say so in the window itself.
+            self.qr_label.setText(
+                "QR code unavailable —\nuse the button or the link below.")
+        lay.addWidget(self.qr_label)
+        self.url_label = QLabel(
+            f"Cash App: {DONATE_CASHTAG}  ·  {DONATE_URL}")
+        self.url_label.setWordWrap(True)
+        self.url_label.setAlignment(Qt.AlignCenter)
+        self.url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(self.url_label)
+        btn_row = QHBoxLayout()
+        self.donate_btn = QPushButton("☕  Donate / Buy me a coffee")
+        self.donate_btn.clicked.connect(self.open_donate_link)
+        btn_row.addWidget(self.donate_btn)
+        btn_row.addStretch(1)
+        self.start_btn = QPushButton("Start Code Forge →")
+        self.start_btn.setDefault(True)
+        self.start_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self.start_btn)
+        lay.addLayout(btn_row)
+
+    def open_donate_link(self):
+        """Open the owner's Cash App page in the user's browser —
+        the button stays in the welcome window, which stays open
+        until the user closes it and starts running."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl(DONATE_URL))
+
+
+class TemplatesWindow(QWidget):
+    """Item C4: the templates shelf — starter projects that ship
+    inside the app (forge/templates.py). Its own closable window
+    (the window rule), opened from the projects section, the menus
+    and the palette. Rows come from a fresh discovery scan on every
+    refresh — the window keeps no registry of its own, so a
+    template folder dropped into templates/ appears here with no
+    code change (that is how the owner's EMBER BREAK build will
+    take its registered slot). Picking one asks where the new
+    project goes and what it is called, then runs the ordinary
+    project-creation path on the owner. Conformed to the G4
+    header standard at the C4 merge: the standard header carries
+    the title, and Refresh (this room's only secondary action)
+    lives in the overflow menu, bound to the same callable it
+    always called — moved, not removed."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.setWindowTitle("Templates — Code Forge")
+        self.resize(680, 440)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4: the standard header — title prominent, Refresh in
+        # the overflow (this room's only secondary action).
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Refresh", self.refresh)])
+        lay.addWidget(self.header)
+        blurb = QLabel(
+            "Start a new project from a template that ships with "
+            "Code Forge. The template's files are copied into a "
+            "fresh project folder — the template itself is never "
+            "changed — and the project opens like any other.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.rows_list = QListWidget()
+        lay.addWidget(self.rows_list, 1)
+        self.detail = QLabel("")
+        self.detail.setObjectName("muted"); self.detail.setWordWrap(True)
+        lay.addWidget(self.detail)
+        btn_row = QHBoxLayout()
+        self.use_btn = QPushButton("Create project from template")
+        self.use_btn.clicked.connect(self._use_selected)
+        btn_row.addWidget(self.use_btn)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+        self.rows_list.currentRowChanged.connect(self._sync)
+        self.rows_list.itemDoubleClicked.connect(
+            lambda _i: self._use_selected())
+        self._entries = []
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        self._entries = self._owner.template_entries()
+        self.rows_list.clear()
+        for entry in self._entries:
+            self.rows_list.addItem(QListWidgetItem(
+                f"{entry['name']}  ·  {entry['id']}"))
+        if not self._entries:
+            self.rows_list.addItem(QListWidgetItem(
+                "No templates on the shelf. Templates live in the "
+                "app's templates/ folder — one folder per template, "
+                "with a template.json manifest."))
+        if self._entries:
+            self.rows_list.setCurrentRow(0)
+        self._sync()
+
+    def _selected(self):
+        row = self.rows_list.currentRow()
+        if 0 <= row < len(self._entries):
+            return self._entries[row]
+        return None
+
+    def _sync(self):
+        entry = self._selected()
+        self.use_btn.setEnabled(entry is not None)
+        if entry is None:
+            self.detail.setText("")
+            return
+        bits = [entry["description"]]
+        if entry["kind"]:
+            bits.append(f"Kind: {entry['kind']}")
+        if entry["tags"]:
+            bits.append("Tags: " + ", ".join(entry["tags"]))
+        self.detail.setText("  ·  ".join(b for b in bits if b))
+
+    def _use_selected(self):
+        entry = self._selected()
+        if entry is None:
+            return
+        parent = QFileDialog.getExistingDirectory(
+            self, "Choose where to create the project",
+            str(Path.home()))
+        if not parent:
+            return
+        name, ok = QInputDialog.getText(
+            self, "New project from template",
+            "Project folder name:", text=entry["id"])
+        if not ok or not name.strip():
+            return
+        created = self._owner.create_project_from_template(
+            entry, parent, name.strip())
+        if created:
+            self.close()
+
+
+
+class TestingWindow(QWidget):
+    """Item C8: the testing room — test runs the owner can WATCH.
+
+    Testing used to happen out of sight: the tester seat reports
+    in the transcript and the worker's verify commands run inside
+    the turn, so the owner was told the proof instead of shown it.
+    This window is a VIEW over the runs Forge already performs: it
+    observes the one run stream (runwindow's RunThread, tapped at
+    ForgeWindow.start_run — the same lines the Run window shows),
+    streams them here as they arrive, tallies only what a runner's
+    output itself states (forge/testview.py — unrecognized output
+    just streams, no tally is invented), and keeps the session's
+    run history: command, verdict, duration, exit.
+
+    Its own Run tests button starts the project's configured test
+    command through the SAME start_run path (own process group,
+    the Run window's Stop discipline) — resolved from the same
+    configuration the worker verifies with (.forge/verify.json,
+    else settings verify_commands; see testview.resolve_test_
+    command). When nothing is configured anywhere, the field IS
+    the configuration: pressing Run saves the typed command into
+    settings verify_commands, the store the worker already reads.
+    The window starts nothing on open and owns no thread."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.run_log = testview_mod.TestRunLog()
+        self._command_dirty = False
+        self._filled_workspace = None
+        self.command_source = None
+        self.setWindowTitle("Testing — Code Forge")
+        self.resize(760, 560)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4 (merge-time conformance, C8 assembly): the standard
+        # header replaces the copy's hand-rolled "TESTING" title
+        # label — title prominent, Refresh in the overflow, bound
+        # to this room's existing refresh() (the same pattern as
+        # the Templates room; the copy had no visible Refresh
+        # button of its own, so nothing is removed).
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Refresh", self.refresh)])
+        lay.addWidget(self.header)
+        blurb = QLabel(
+            "Watch the project's tests run — output streams here "
+            "live, as it happens, and every finished run stays in "
+            "the session history below with its verdict. Runs "
+            "started from the Run window stream here too: there is "
+            "one run machinery, and this room watches it.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.test_source_label = QLabel("")
+        self.test_source_label.setObjectName("muted")
+        self.test_source_label.setWordWrap(True)
+        lay.addWidget(self.test_source_label)
+        cmd_row = QHBoxLayout()
+        self.test_command_edit = QLineEdit()
+        self.test_command_edit.setPlaceholderText(
+            "e.g. python3 -m pytest -q")
+        self.test_command_edit.setToolTip(
+            "The command Run tests starts in the project folder, "
+            "through the same run machinery as the Run window")
+        self.test_command_edit.textEdited.connect(self._command_edited)
+        cmd_row.addWidget(self.test_command_edit, 1)
+        self.test_run_btn = QPushButton("▶ Run tests")
+        self.test_run_btn.setObjectName("primary")
+        self.test_run_btn.setToolTip(
+            "Run the test command in the project folder — output "
+            "streams here and in the Run window")
+        self.test_run_btn.clicked.connect(self._run_tests)
+        cmd_row.addWidget(self.test_run_btn)
+        self.test_stop_btn = QPushButton("■ Stop")
+        self.test_stop_btn.setToolTip(
+            "Stop the run — kills the whole process group, "
+            "children included")
+        self.test_stop_btn.setEnabled(False)
+        self.test_stop_btn.clicked.connect(owner.stop_run)
+        cmd_row.addWidget(self.test_stop_btn)
+        lay.addLayout(cmd_row)
+        status_row = QHBoxLayout()
+        self.test_status_label = QLabel("idle")
+        self.test_status_label.setObjectName("muted")
+        status_row.addWidget(self.test_status_label)
+        status_row.addStretch(1)
+        self.test_tally_label = QLabel("")
+        self.test_tally_label.setObjectName("muted")
+        status_row.addWidget(self.test_tally_label)
+        lay.addLayout(status_row)
+        self.test_output = QPlainTextEdit()
+        self.test_output.setReadOnly(True)
+        self.test_output.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
+        self.test_output.setPlaceholderText(
+            "Test output will appear here, line by line, as the "
+            "run produces it.")
+        lay.addWidget(self.test_output, 1)
+        history_title = QLabel("SESSION HISTORY")
+        history_title.setObjectName("section")
+        lay.addWidget(history_title)
+        self.test_history_list = QListWidget()
+        self.test_history_list.setMaximumHeight(140)
+        self.test_history_list.setToolTip(
+            "Runs finished this session — command, the runner's "
+            "own verdict (or the exit code), and how long they took")
+        lay.addWidget(self.test_history_list)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._sync_controls)
+        self.refresh_command()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def refresh(self):
+        """Open-time refresh in the other rooms' shape: re-resolve
+        the command for the active project, re-render the history,
+        re-sync the controls."""
+        self.refresh_command()
+        self._render_history()
+        self._sync_controls()
+
+    def refresh_command(self):
+        """Re-resolve the default test command for the active
+        project. An owner edit in the field is kept while he stays
+        in the same project; a project switch re-resolves."""
+        owner = self._owner
+        workspace = getattr(owner, "workspace", "")
+        if self._command_dirty and workspace == self._filled_workspace:
+            return
+        command, source = testview_mod.resolve_test_command(
+            workspace, getattr(owner, "settings", {}))
+        self.command_source = source
+        self._filled_workspace = workspace
+        self._command_dirty = False
+        self.test_command_edit.setText(command)
+        self._update_source_label(source)
+        self._sync_controls()
+
+    def _update_source_label(self, source):
+        if source == "project":
+            text = ("Test command — from this project's "
+                    ".forge/verify.json, the same checks the agent "
+                    "verifies with. Edit the field to run something "
+                    "else once; the file itself is not changed.")
+        elif source == "settings":
+            text = "Test command — from Agent settings (verify_commands)."
+        else:
+            text = ("No test command is configured for this project "
+                    "yet. Type one and press Run tests — it is saved "
+                    "as the default in Agent settings.")
+        self.test_source_label.setText(text)
+
+    def _command_edited(self, _text):
+        self._command_dirty = True
+        self._sync_controls()
+
+    def _sync_controls(self):
+        owner = self._owner
+        running = bool(owner is not None and owner.run_is_running()) \
+            or self.run_log.current is not None
+        self.test_stop_btn.setEnabled(running)
+        self.test_run_btn.setEnabled(
+            not running and bool(self.test_command_edit.text().strip()))
+
+    def _run_tests(self):
+        owner = self._owner
+        command = self.test_command_edit.text().strip()
+        if not command or owner.run_is_running():
+            return
+        if self.command_source is None:
+            # First configuration happens here, in plain sight:
+            # persist through the settings store the worker's
+            # verify loop already reads — no second command store.
+            owner.settings["verify_commands"] = [command]
+            owner.save_settings()
+            self.command_source = "settings"
+            self._update_source_label("settings")
+        owner.start_run(command, owner.workspace)
+
+    # ---- The observation seam: ForgeWindow.start_run connects the
+    # run thread's own signals here, beside the Run window's. The
+    # view owns no thread, forks no machinery, and its pane is its
+    # own — the Run window keeps behaving exactly as before. ----
+    def note_run_started(self, command, cwd):
+        self.run_log.note_started(command, cwd)
+        self.test_output.clear()
+        self._append_output(f"$ {command}")
+        self.test_status_label.setText("running…")
+        self.test_tally_label.setText("")
+        self._sync_controls()
+
+    def note_run_line(self, text):
+        self.run_log.note_line(text)
+        self._append_output(text)
+        tally = self.run_log.live_tally_text()
+        if tally:
+            self.test_tally_label.setText(tally)
+
+    def note_run_finished(self, code, stopped):
+        self._settled(self.run_log.note_finished(code, stopped))
+
+    def note_run_failed(self, message):
+        self._settled(self.run_log.note_failed(message))
+
+    def _settled(self, record):
+        if record is not None:
+            verdict = testview_mod.run_verdict(record)
+            self._append_output(f"— {verdict}")
+            self.test_status_label.setText(verdict)
+            self._render_history()
+        self._sync_controls()
+
+    def _append_output(self, text):
+        bar = self.test_output.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4
+        old_value = bar.value()
+        for line in str(text).splitlines() or [""]:
+            self.test_output.appendPlainText(line)
+        if follow:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(min(old_value, bar.maximum()))
+
+    def _render_history(self):
+        self.test_history_list.clear()
+        for record in self.run_log.history:
+            self.test_history_list.addItem(
+                QListWidgetItem(testview_mod.history_line(record)))
+        if self.run_log.history:
+            self.test_history_list.scrollToBottom()
+
+
+class MissionControlWindow(QWidget):
+    """Item #64: mission control — every agent workstream in one
+    room. When parallel turns are enabled (Settings → Seats &
+    limits → Parallel turns), a turn can keep running in the
+    background while the owner works in another conversation; this
+    window is where those turns stay visible and answerable: what
+    is running, what is parked at a gate waiting on the owner, what
+    finished. Rows come from ForgeWindow.mission_rows() (rebuilt on
+    every refresh — the window keeps no state of its own); Jump
+    loads the row's conversation (reattaching its live turn), Stop
+    cancels that one turn, Dismiss clears a settled row. A
+    maintenance turn is listed read-only — its room is the
+    Maintenance window. Execution-focused by design: this is not a
+    session browser (history lives in the chat tabs / History)."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.setWindowTitle("Mission Control — Code Forge")
+        self.resize(760, 480)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        title = QLabel("MISSION CONTROL")
+        title.setObjectName("section")
+        lay.addWidget(title)
+        blurb = QLabel(
+            "Every turn the Forge is running, across conversations. "
+            "Approvals surface one gate at a time, labelled with the "
+            "conversation that asked — on the desktop and the phone "
+            "deck alike. Parallel turns share the one Ollama, so "
+            "they trade speed for company.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.rows_list = QListWidget()
+        lay.addWidget(self.rows_list, 1)
+        btn_row = QHBoxLayout()
+        self.jump_btn = QPushButton("Go to conversation")
+        self.jump_btn.clicked.connect(self._jump)
+        self.stop_btn = QPushButton("Stop turn")
+        self.stop_btn.clicked.connect(self._stop)
+        self.dismiss_btn = QPushButton("Dismiss")
+        self.dismiss_btn.clicked.connect(self._dismiss)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh)
+        btn_row.addWidget(self.jump_btn)
+        btn_row.addWidget(self.stop_btn)
+        btn_row.addWidget(self.dismiss_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.refresh_btn)
+        lay.addLayout(btn_row)
+        self.rows_list.currentRowChanged.connect(self._sync_buttons)
+        self.rows_list.itemDoubleClicked.connect(lambda _i: self._jump())
+        self._rows = []
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def refresh(self):
+        """Rebuild the rows from the owner's live registry, keeping
+        the selection on the same stream where it survives."""
+        rows = self._owner.mission_rows()
+        selected = None
+        row = self.rows_list.currentRow()
+        if 0 <= row < len(self._rows):
+            selected = self._rows[row]["id"]
+        self._rows = rows
+        self.rows_list.clear()
+        for entry in rows:
+            self.rows_list.addItem(QListWidgetItem(entry["line"]))
+        if not rows:
+            self.rows_list.addItem(QListWidgetItem(
+                "Nothing running. Turns you start appear here — "
+                "with Parallel turns above 1, a turn you switch "
+                "away from keeps working and is watched from here."))
+        target = 0
+        for i, entry in enumerate(rows):
+            if entry["id"] == selected:
+                target = i
+                break
+        if rows:
+            self.rows_list.setCurrentRow(target)
+        self._sync_buttons()
+
+    def _selected(self):
+        row = self.rows_list.currentRow()
+        if 0 <= row < len(self._rows):
+            return self._rows[row]
+        return None
+
+    def _sync_buttons(self):
+        entry = self._selected()
+        live = bool(entry and entry["live"])
+        settled = bool(entry and not entry["live"])
+        readonly = bool(entry and entry.get("maintenance"))
+        self.jump_btn.setEnabled(bool(entry) and not readonly)
+        self.stop_btn.setEnabled(live and not readonly)
+        self.dismiss_btn.setEnabled(settled and not readonly)
+
+    def _jump(self):
+        entry = self._selected()
+        if entry is not None:
+            self._owner.jump_to_stream(entry["id"])
+            self.refresh()
+
+    def _stop(self):
+        entry = self._selected()
+        if entry is not None:
+            self._owner.stop_stream(entry["id"])
+            self.refresh()
+
+    def _dismiss(self):
+        entry = self._selected()
+        if entry is not None:
+            self._owner.dismiss_stream(entry["id"])
+            self.refresh()
+
+
+class ProviderChatWindow(QWidget):
+    """Provider chat (owner ask, 2026-11-09): a plain conversation
+    with the hosted models (Groq / Gemini / EXAONE) that runs ALONGSIDE the
+    bench — the owner talks to a cloud model about the work, or
+    about anything else, while the local agent keeps working in the
+    background completely untouched.
+
+    Deliberately separate machinery on deliberately shared plumbing:
+    the window owns its message list outright — nothing here reads,
+    writes, or persists the main conversation or its store — and
+    sends through the owner's existing ProviderClient facade with
+    NO tools (Ask-mode character: conversation only, nothing said
+    here can execute). Its one look at the bench is read-only: the
+    status line is rebuilt from ForgeWindow.mission_rows(), the #64
+    stream registry's own read surface. There are no bench controls
+    in this window by design."""
+
+    SYSTEM_PROMPT = (
+        "You are a hosted model chatting with the owner of Code "
+        "Forge in a side conversation, next to the local coding "
+        "agent working on the bench. This is conversation only: "
+        "you have no tools here, and nothing you say runs anything. "
+        "Bench status when this exchange started: {bench}")
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.setWindowTitle("Provider chat — Code Forge")
+        self.resize(720, 560)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.messages = []
+        self._thread = None
+        self._pending_text = ""
+        self._notice = ""
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4 conformance at the PC merge (2026-11-10): the
+        # held copy predates the GUIFX header standard, so
+        # its old section-label title is replaced by the
+        # standard header — the title mirrors the window
+        # title; there are no secondary actions to overflow
+        # (Send / Stop are the bottom row's primaries).
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        blurb = QLabel(
+            "Talk with a hosted model (Groq / Gemini / EXAONE) while the "
+            "local agent works on the bench. Conversation only — "
+            "this chat has no tools and runs nothing, the bench "
+            "keeps working untouched, and this conversation is "
+            "never saved into your project chats.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self.bench_label = QLabel("Bench: idle")
+        self.bench_label.setObjectName("muted")
+        self.bench_label.setWordWrap(True)
+        lay.addWidget(self.bench_label)
+        self.setup_label = QLabel("")
+        self.setup_label.setObjectName("muted")
+        self.setup_label.setWordWrap(True)
+        lay.addWidget(self.setup_label)
+        self.transcript = QPlainTextEdit()
+        self.transcript.setReadOnly(True)
+        self.transcript.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
+        self.transcript.setPlaceholderText(
+            "Nothing yet — pick a hosted model and say hello.")
+        lay.addWidget(self.transcript, 1)
+        pick_row = QHBoxLayout()
+        pick_row.addWidget(QLabel("Provider"))
+        self.provider_combo = QComboBox()
+        self.provider_combo.currentTextChanged.connect(
+            lambda _text: self._fill_models())
+        pick_row.addWidget(self.provider_combo)
+        pick_row.addWidget(QLabel("Model"))
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumWidth(260)
+        pick_row.addWidget(self.model_combo, 1)
+        lay.addLayout(pick_row)
+        self.input = QPlainTextEdit()
+        self.input.setMaximumHeight(96)
+        self.input.setPlaceholderText(
+            "Ask the hosted model about the work — or anything else…")
+        lay.addWidget(self.input)
+        send_row = QHBoxLayout()
+        self.send_btn = QPushButton("Send")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.clicked.connect(self.send)
+        send_row.addWidget(self.send_btn)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.clicked.connect(self._stop)
+        send_row.addWidget(self.stop_btn)
+        send_row.addStretch()
+        lay.addLayout(send_row)
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh_status)
+        self.refresh()
+
+    # -- pickers -------------------------------------------------
+
+    def _configured_providers(self):
+        """Providers the owner can actually talk to right now:
+        enabled AND keyed, per the connector config the facade
+        itself reads."""
+        config = self._owner._provider_config()
+        return [provider for provider in providers_mod.PROVIDERS
+                if providers_mod.provider_enabled(config, provider)
+                and providers_mod.provider_api_key(config, provider)]
+
+    def refresh(self):
+        self.refresh_models()
+        self.refresh_status()
+
+    def refresh_models(self):
+        """Rebuild the provider picker from the connector config.
+        No configured provider -> the plain-words setup state,
+        never an empty-picker mystery."""
+        configured = self._configured_providers()
+        current = self.provider_combo.currentData()
+        self.provider_combo.blockSignals(True)
+        self.provider_combo.clear()
+        for provider in configured:
+            self.provider_combo.addItem(
+                providers_mod.PROVIDER_LABELS[provider], provider)
+        if current in configured:
+            self.provider_combo.setCurrentIndex(
+                configured.index(current))
+        self.provider_combo.blockSignals(False)
+        if not configured:
+            self.setup_label.setText(
+                "No cloud provider is set up yet. Add a Groq, Gemini "
+                "or EXAONE API key in Customize → Providers, then "
+                "reopen this window — the hosted models will be "
+                "listed here. Your local models and the bench are "
+                "unaffected.")
+            self.setup_label.setVisible(True)
+        else:
+            self.setup_label.setVisible(False)
+        self._fill_models()
+
+    def _fill_models(self):
+        """The model picker for the chosen provider, cloud models
+        only: the #69 registry first (enabled, project scope,
+        registry-gated), then any catalog names the facade adds."""
+        provider = self.provider_combo.currentData()
+        models = []
+        seen = set()
+
+        def add(model_id):
+            model_id = str(model_id or "").strip()
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                models.append(model_id)
+
+        if provider:
+            config = self._owner._provider_config()
+            for entry in providers_mod.registry_entries(config):
+                entry_provider, _bare = providers_mod.split_model_id(
+                    entry.get("id"))
+                if entry_provider != provider:
+                    continue
+                if not entry.get("enabled", False):
+                    continue
+                if entry.get("scope") not in ("project", "both"):
+                    continue
+                if providers_mod.model_allowed(
+                        config, entry["id"], scope="project",
+                        role="driver"):
+                    add(entry["id"])
+            tags = getattr(self._owner.client, "tags", None)
+            if callable(tags):
+                try:
+                    for item in tags(scope="project") or []:
+                        if isinstance(item, dict) and \
+                                item.get("provider") == provider:
+                            add(item.get("name"))
+                except Exception:
+                    pass
+            if not models:
+                self.setup_label.setText(
+                    f"No {providers_mod.PROVIDER_LABELS[provider]} "
+                    "models are available — add one to the model "
+                    "registry in Customize → Providers.")
+                self.setup_label.setVisible(True)
+        current = self.model_combo.currentText()
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        if current in models:
+            self.model_combo.setCurrentText(current)
+        self._sync_send_state()
+
+    # -- bench status (read-only) --------------------------------
+
+    def refresh_status(self):
+        """The bench line, rebuilt from the owner's mission_rows()
+        — the #64 stream registry's own read surface. Live rows
+        only; a settled or empty registry reads as idle."""
+        try:
+            rows = self._owner.mission_rows()
+        except Exception:
+            rows = []
+        live = [row for row in rows if row.get("live")]
+        if not live:
+            text = "Bench: idle"
+        else:
+            text = f"Bench: {live[0]['line']}"
+            if len(live) > 1:
+                text += f"  ·  +{len(live) - 1} more running"
+        self.bench_label.setText(text)
+        return text
+
+    # -- conversation ---------------------------------------------
+
+    def _speaker(self):
+        provider = self.provider_combo.currentData()
+        return providers_mod.PROVIDER_LABELS.get(provider,
+                                                 "Hosted model")
+
+    def _render(self):
+        lines = []
+        for message in self.messages:
+            who = "You" if message.get("role") == "user" \
+                else self._speaker()
+            lines.append(f"{who}: {message.get('content', '')}")
+        if self._pending_text:
+            lines.append(f"{self._speaker()}: {self._pending_text}")
+        if self._notice:
+            lines.append(self._notice)
+        self.transcript.setPlainText("\n\n".join(lines))
+        cursor = self.transcript.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.transcript.setTextCursor(cursor)
+
+    def send(self):
+        if self._thread is not None and self._thread.isRunning():
+            return
+        model = self.model_combo.currentText().strip()
+        text = self.input.toPlainText().strip()
+        if not model or not text:
+            return
+        self.messages.append({"role": "user", "content": text})
+        self.input.clear()
+        self._pending_text = ""
+        self._notice = ""
+        self._render()
+        system = self.SYSTEM_PROMPT.format(
+            bench=self.bench_label.text())
+        request = [{"role": "system", "content": system}] + \
+            [dict(message) for message in self.messages]
+        thread = ProviderChatThread(self._owner.client, model, request)
+        thread.chunk.connect(self._on_chunk)
+        thread.done.connect(self._on_done)
+        thread.failed.connect(self._on_failed)
+        self._thread = thread
+        self._sync_send_state()
+        thread.start()
+
+    def _stop(self):
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.cancel()
+
+    def _on_chunk(self, text):
+        self._pending_text += text
+        self._render()
+
+    def _on_done(self, text):
+        if text.strip():
+            self.messages.append({"role": "assistant",
+                                  "content": text})
+        self._pending_text = ""
+        self._render()
+        self._sync_send_state()
+
+    def _on_failed(self, why):
+        self._pending_text = ""
+        self._notice = f"The hosted model didn't answer: {why}"
+        self._render()
+        self._sync_send_state()
+
+    def _sync_send_state(self):
+        running = self._thread is not None and self._thread.isRunning()
+        ready = bool(self.provider_combo.currentData()) \
+            and self.model_combo.count() > 0
+        self.send_btn.setEnabled(ready and not running)
+        self.stop_btn.setEnabled(running)
+        self.provider_combo.setEnabled(not running)
+        self.model_combo.setEnabled(not running)
+
+    # -- window lifecycle ------------------------------------------
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        if self._thread is not None and self._thread.isRunning():
+            self._thread.cancel()
+        super().closeEvent(event)
+
+
+class TimelineWindow(QWidget):
+    """Item C9: the current conversation's turn timeline — every
+    completed turn with its wall-clock time, generations and
+    estimated tokens, plus the conversation's totals and its soft
+    budget state. A VIEW, not a store: the rows are rebuilt on
+    every refresh from forge/timeline.py's pairing of the event
+    log's own turn records (request → turn_complete / error) with
+    the window's settle marks (mode and outcome live only on the
+    window's signals — the log does not record them). Token counts
+    are the worker's estimates and are labelled estimated. Marks
+    live for the app session, so the timeline covers this
+    session's turns; a conversation with none says so plainly."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.setWindowTitle("Turn Timeline — Code Forge")
+        self.resize(820, 520)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        # G4 (merge-time conformance, C9 assembly): the standard
+        # header replaces the copy's hand-rolled "TURN TIMELINE"
+        # title label — title prominent, Refresh in the overflow,
+        # bound to this room's existing refresh() (the same pattern
+        # as the Templates and Testing rooms; the copy's bottom
+        # Refresh button moves into the overflow with it — moved,
+        # not removed: the same callable stays reachable).
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[("Refresh", self.refresh)])
+        lay.addWidget(self.header)
+        self.head = QLabel("")
+        self.head.setObjectName("muted"); self.head.setWordWrap(True)
+        lay.addWidget(self.head)
+        self.rows_list = QListWidget()
+        lay.addWidget(self.rows_list, 1)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        data = self._owner.timeline_data(self._owner.conversation_id)
+        totals = data["rollups"]
+        self.rows_list.clear()
+        if not data["entries"]:
+            self.head.setText(
+                f"{data['title']} — no turns recorded for this "
+                "conversation in this session yet. Turns appear "
+                "here as they finish; the timeline is built from "
+                "the event log's own turn records.")
+            self.rows_list.addItem(QListWidgetItem(
+                "Nothing recorded yet — send a message and its "
+                "turn lands here with its time and estimated "
+                "tokens."))
+            return
+        lines = [
+            f"{data['title']} — {totals['turns']} turn(s) this "
+            f"session · ≈{totals['total_tokens']:,} estimated "
+            f"tokens (≈{totals['prompt_tokens']:,} in / "
+            f"≈{totals['eval_tokens']:,} out) · "
+            f"{totals['seconds']:,.1f}s of generation · "
+            f"{totals['generations']} generation(s)"]
+        budget_line = (
+            f"Soft budget: {data['budget']:,} estimated tokens — "
+            f"≈{totals['total_tokens']:,} used")
+        if data["over"]:
+            budget_line += " — OVER the soft budget (a flag only; nothing is blocked)"
+        lines.append(budget_line)
+        self.head.setText("\n".join(lines))
+        for entry in data["entries"]:
+            item = QListWidgetItem(_timeline_entry_line(entry))
+            prompt = (entry.get("prompt") or "").strip()
+            if prompt:
+                item.setToolTip(prompt[:400])
+            self.rows_list.addItem(item)
+        self.rows_list.scrollToBottom()
+
+
+def _timeline_entry_line(entry):
+    """One timeline row from one paired entry — pieces a record
+    didn't carry are left out, never filled in."""
+    when = str(entry.get("ended") or entry.get("started") or "")
+    when = when[11:19] if len(when) >= 19 else when
+    parts = [when] if when else []
+    if entry.get("mode"):
+        parts.append(entry["mode"])
+    parts.append(entry.get("outcome") or "finished")
+    if entry.get("seconds") is not None:
+        parts.append(f"{entry['seconds']:,.1f}s")
+    if entry.get("generations") is not None:
+        parts.append(f"{entry['generations']} generation(s)")
+    tokens = []
+    if entry.get("prompt_tokens") is not None:
+        tokens.append(f"≈{entry['prompt_tokens']:,} in")
+    if entry.get("eval_tokens") is not None:
+        tokens.append(f"≈{entry['eval_tokens']:,} out")
+    if tokens:
+        parts.append(" / ".join(tokens) + " (estimated)")
+    if entry.get("model"):
+        parts.append(str(entry["model"]))
+    prompt = " ".join((entry.get("prompt") or "").split())
+    if prompt:
+        parts.append(f"“{prompt[:60]}”")
+    return "  ·  ".join(parts)
+
+
+class CanvasBoardView(QWidget):
+    """Item C5: the board surface — a plain painted widget, no
+    graphics scene, no web engine. It draws the frames the model
+    holds (forge/design_canvas.py), topmost last by z, and turns
+    the mouse into the board's operations: drag a frame to move
+    it, drag its bottom-right corner to resize it, drag the
+    empty board to pan, wheel to zoom around the cursor. All
+    mutation goes through the window (which saves); the view
+    owns only the camera (offset + zoom) and the drag state."""
+
+    HANDLE = 14          # resize handle, screen px
+    MIN_ZOOM, MAX_ZOOM = 0.2, 2.5
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self.board = design_canvas_mod.empty_board()
+        self.excerpts = {}
+        self.selected_id = None
+        self.zoom = 0.6
+        self.ox = 12.0
+        self.oy = 12.0
+        self._drag = None    # (mode, frame_id, dx, dy)
+        self.setMinimumSize(320, 240)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    # ----- camera -----
+
+    def reset_view(self):
+        self.zoom = 0.6
+        self.ox = 12.0
+        self.oy = 12.0
+        self.update()
+
+    def zoom_by(self, factor, anchor=None):
+        old = self.zoom
+        self.zoom = max(self.MIN_ZOOM,
+                        min(self.MAX_ZOOM, self.zoom * factor))
+        if anchor is not None and self.zoom != old:
+            bx, by = self.to_board(anchor)
+            self.ox = anchor.x() - bx * self.zoom
+            self.oy = anchor.y() - by * self.zoom
+        self.update()
+
+    def to_board(self, pos):
+        return ((pos.x() - self.ox) / self.zoom,
+                (pos.y() - self.oy) / self.zoom)
+
+    def frame_screen_rect(self, frame):
+        return QRectF(self.ox + frame["x"] * self.zoom,
+                      self.oy + frame["y"] * self.zoom,
+                      frame["w"] * self.zoom,
+                      frame["h"] * self.zoom)
+
+    def frame_at(self, pos):
+        bx, by = self.to_board(pos)
+        for frame in sorted(self.board.get("frames", []),
+                            key=lambda f: f["z"], reverse=True):
+            if frame["x"] <= bx <= frame["x"] + frame["w"] \
+                    and frame["y"] <= by <= frame["y"] + frame["h"]:
+                return frame
+        return None
+
+    def _on_handle(self, frame, pos):
+        rect = self.frame_screen_rect(frame)
+        return pos.x() >= rect.right() - self.HANDLE \
+            and pos.y() >= rect.bottom() - self.HANDLE
+
+    # ----- mouse -----
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return super().mousePressEvent(event)
+        frame = self.frame_at(event.pos())
+        bx, by = self.to_board(event.pos())
+        if frame is not None:
+            self._window.select_frame(frame["id"])
+            if self._on_handle(frame, event.pos()):
+                self._drag = ("resize", frame["id"],
+                              frame["w"] - bx, frame["h"] - by)
+            else:
+                self._drag = ("move", frame["id"],
+                              bx - frame["x"], by - frame["y"])
+        else:
+            self._window.select_frame(None)
+            self._drag = ("pan", None, event.pos().x() - self.ox,
+                          event.pos().y() - self.oy)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag is None:
+            return super().mouseMoveEvent(event)
+        mode, fid, dx, dy = self._drag
+        bx, by = self.to_board(event.pos())
+        if mode == "pan":
+            self.ox = event.pos().x() - dx
+            self.oy = event.pos().y() - dy
+            self.update()
+        elif mode == "move":
+            design_canvas_mod.move_frame(self.board, fid,
+                                         bx - dx, by - dy)
+            self.update()
+        elif mode == "resize":
+            design_canvas_mod.resize_frame(self.board, fid,
+                                           bx + dx, by + dy)
+            self.update()
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self._drag is not None and self._drag[0] in ("move", "resize"):
+            self._window.board_dragged()
+        self._drag = None
+        event.accept()
+
+    def wheelEvent(self, event):
+        steps = event.angleDelta().y() / 120.0
+        if steps:
+            self.zoom_by(1.12 ** steps, anchor=event.position())
+        event.accept()
+
+    # ----- painting -----
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(TOKENS["surface_chat"]))
+        frames = sorted(self.board.get("frames", []),
+                        key=lambda f: f["z"])
+        if not frames:
+            p.setPen(QColor(TOKENS["text_muted"]))
+            p.drawText(self.rect().adjusted(20, 20, -20, -20),
+                       Qt.TextWordWrap,
+                       "The board is empty. Add an artifact frame "
+                       "linked to a project file, a note card, or "
+                       "a variant — frames reference files, they "
+                       "never copy them.")
+            return
+        for frame in frames:
+            self._paint_frame(p, frame)
+        p.end()
+
+    def _paint_frame(self, p, frame):
+        rect = self.frame_screen_rect(frame)
+        selected = frame["id"] == self.selected_id
+        p.fillRect(rect, QColor(TOKENS["surface_glass_mid"]))
+        band = QRectF(rect.left(), rect.top(), rect.width(),
+                      min(22.0, rect.height()))
+        p.fillRect(band, QColor(TOKENS["surface_input"]))
+        p.setPen(QPen(QColor(TOKENS["rim"] if selected
+                             else TOKENS["rim_soft"]),
+                      2 if selected else 1))
+        p.drawRect(rect)
+        inner = rect.adjusted(8, 4, -8, -4)
+        p.setPen(QColor(TOKENS["text_base"]))
+        title = design_canvas_mod.frame_label(self.board, frame)
+        p.drawText(QRectF(inner.left(), rect.top() + 2,
+                          inner.width(), 18),
+                   Qt.TextSingleLine,
+                   p.fontMetrics().elidedText(
+                       title, Qt.ElideRight, int(inner.width())))
+        lines = [frame["kind"]]
+        if frame.get("file"):
+            lines.append(frame["file"])
+        if frame["kind"] == "variant":
+            chips = [v for v in (frame.get("viewport"),
+                                 frame.get("state")) if v]
+            if chips:
+                lines.append(" · ".join(chips))
+            source = design_canvas_mod.get_frame(
+                self.board, frame.get("derived_from") or "")
+            if source is not None:
+                lines.append("variant of: " + design_canvas_mod
+                             .frame_label(self.board, source))
+        p.setPen(QColor(TOKENS["text_muted"]))
+        y = rect.top() + 24
+        for line in lines:
+            if y > rect.bottom() - 12:
+                break
+            p.drawText(QRectF(inner.left(), y, inner.width(), 14),
+                       Qt.TextSingleLine,
+                       p.fontMetrics().elidedText(
+                           line, Qt.ElideRight, int(inner.width())))
+            y += 14
+        excerpt = self.excerpts.get(frame["id"]) or ""
+        if excerpt and y < rect.bottom() - 8:
+            p.drawText(QRectF(inner.left(), y + 2, inner.width(),
+                              rect.bottom() - y - 10),
+                       Qt.TextWordWrap, excerpt.replace("\n", " "))
+        if selected:
+            handle = QRectF(rect.right() - self.HANDLE,
+                            rect.bottom() - self.HANDLE,
+                            self.HANDLE, self.HANDLE)
+            p.fillRect(handle, QColor(TOKENS["rim"]))
+
+
+class DesignCanvasWindow(QWidget):
+    """Item C5 (honest v1): the design canvas room — a code-
+    linked spatial board for the ACTIVE project. Frames link to
+    project files (references, never copies), note cards hold
+    the owner's text, and variants carry lineage + viewport /
+    state labels. The board persists as .forge/design/
+    canvas.json — a project file the agent reads and revises
+    through the ordinary gated file tools; there is no canvas
+    tool and no ungated path. The generated canvas-summary.md
+    files as a design artifact through the ordinary artifact
+    path. Previews are title / path / excerpt — no live HTML
+    rendering, by design (see forge/design_canvas.py)."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.board = design_canvas_mod.empty_board()
+        self._loaded_workspace = None
+        self.selected_id = None
+        self.setWindowTitle("Design Canvas — Code Forge")
+        self.resize(1020, 640)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        self.header = build_window_header(
+            self, self.windowTitle(),
+            overflow_actions=[
+                ("Refresh", self.refresh),
+                ("File summary as design artifact",
+                 self.file_summary_as_artifact),
+                ("Send frame to bench", self.send_to_bench)])
+        lay.addWidget(self.header)
+        blurb = QLabel(
+            "Lay the project's surfaces out side by side. Frames "
+            "LINK to files — the file stays the one truth — and "
+            "variants record what they descend from. Drag to "
+            "move, drag a selected frame's corner to resize, "
+            "drag the board to pan, scroll to zoom.")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        bar = QHBoxLayout()
+        self.add_artifact_btn = QPushButton("＋ Artifact frame…")
+        self.add_artifact_btn.setToolTip(
+            "Link a file from this project onto the board")
+        self.add_artifact_btn.clicked.connect(self.add_artifact_frame)
+        bar.addWidget(self.add_artifact_btn)
+        self.add_note_btn = QPushButton("＋ Note card")
+        self.add_note_btn.clicked.connect(self.add_note_card)
+        bar.addWidget(self.add_note_btn)
+        self.variant_btn = QPushButton("⧉ Variant of selected")
+        self.variant_btn.setToolTip(
+            "Duplicate the selected frame as a variant carrying "
+            "its lineage and labels")
+        self.variant_btn.clicked.connect(self.add_variant)
+        bar.addWidget(self.variant_btn)
+        self.rename_btn = QPushButton("✎ Rename")
+        self.rename_btn.clicked.connect(self.rename_selected)
+        bar.addWidget(self.rename_btn)
+        self.note_btn = QPushButton("📝 Edit note")
+        self.note_btn.clicked.connect(self.edit_note)
+        bar.addWidget(self.note_btn)
+        self.delete_btn = QPushButton("🗑 Delete")
+        self.delete_btn.clicked.connect(self.delete_selected)
+        bar.addWidget(self.delete_btn)
+        self.front_btn = QPushButton("⬆ Front")
+        self.front_btn.clicked.connect(self.front_selected)
+        bar.addWidget(self.front_btn)
+        self.back_btn = QPushButton("⬇ Back")
+        self.back_btn.clicked.connect(self.back_selected)
+        bar.addWidget(self.back_btn)
+        bar.addStretch(1)
+        self.zoom_out_btn = QPushButton("−")
+        self.zoom_out_btn.clicked.connect(lambda: self.view.zoom_by(0.85))
+        bar.addWidget(self.zoom_out_btn)
+        self.zoom_reset_btn = QPushButton("Reset view")
+        self.zoom_reset_btn.clicked.connect(self._reset_view)
+        bar.addWidget(self.zoom_reset_btn)
+        self.zoom_in_btn = QPushButton("＋")
+        self.zoom_in_btn.clicked.connect(lambda: self.view.zoom_by(1.18))
+        bar.addWidget(self.zoom_in_btn)
+        lay.addLayout(bar)
+        body = QHBoxLayout()
+        self.view = CanvasBoardView(self)
+        body.addWidget(self.view, 1)
+        side = QVBoxLayout()
+        side_title = QLabel("FRAMES")
+        side_title.setObjectName("section")
+        side.addWidget(side_title)
+        self.frames_list = QListWidget()
+        self.frames_list.setMaximumWidth(260)
+        self.frames_list.currentRowChanged.connect(self._list_picked)
+        side.addWidget(self.frames_list, 1)
+        self.detail_label = QLabel("")
+        self.detail_label.setObjectName("muted")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setMaximumWidth(260)
+        side.addWidget(self.detail_label)
+        label_row = QHBoxLayout()
+        self.viewport_combo = QComboBox()
+        self.viewport_combo.addItems(
+            ["(viewport)"] + list(design_canvas_mod.VIEWPORTS))
+        self.viewport_combo.setToolTip(
+            "A variant's viewport preset label — a label only; "
+            "no source is rewritten to match it")
+        self.viewport_combo.currentIndexChanged.connect(
+            self._labels_changed)
+        label_row.addWidget(self.viewport_combo)
+        self.state_combo = QComboBox()
+        self.state_combo.addItems(
+            ["(state)"] + list(design_canvas_mod.STATES))
+        self.state_combo.setToolTip(
+            "A variant's interaction-state label — the state the "
+            "variant is FOR; recorded, not edited into source")
+        self.state_combo.currentIndexChanged.connect(
+            self._labels_changed)
+        label_row.addWidget(self.state_combo)
+        side.addLayout(label_row)
+        self.send_btn = QPushButton("➤ Send frame to bench")
+        self.send_btn.setObjectName("primary")
+        self.send_btn.setToolTip(
+            "Compose a normal bench turn from this frame's "
+            "metadata and its linked source's head")
+        self.send_btn.clicked.connect(self.send_to_bench)
+        side.addWidget(self.send_btn)
+        self.file_btn = QPushButton("🧩 File summary as design artifact")
+        self.file_btn.setToolTip(
+            "File the generated canvas summary (.forge/design/"
+            "canvas-summary.md) as a design artifact")
+        self.file_btn.clicked.connect(self.file_summary_as_artifact)
+        side.addWidget(self.file_btn)
+        body.addLayout(side)
+        lay.addLayout(body, 1)
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("muted")
+        self.status_label.setWordWrap(True)
+        lay.addWidget(self.status_label)
+        self.refresh()
+
+    # ----- loading / saving -----
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self):
+        """Load the active project's board when the project (or
+        the file, via the agent's tools) changed under us; a
+        board that does not exist yet is an empty board — the
+        room opens either way."""
+        workspace = self._owner.workspace
+        if workspace != self._loaded_workspace:
+            self.board = design_canvas_mod.load_board(workspace)
+            self._loaded_workspace = workspace
+            self.selected_id = None
+        else:
+            on_disk = design_canvas_mod.load_board(workspace)
+            if on_disk != self.board:
+                self.board = on_disk
+        self._render()
+
+    def _changed(self, message=""):
+        workspace = self._owner.workspace
+        self.board = design_canvas_mod.save_board(workspace, self.board)
+        design_canvas_mod.save_summary(
+            workspace, self.board, Path(workspace).name)
+        self._loaded_workspace = workspace
+        self._render()
+        if message:
+            self.status_label.setText(message)
+
+    def _render(self):
+        self.view.board = self.board
+        self.view.excerpts = {
+            f["id"]: design_canvas_mod.frame_excerpt(
+                self._owner.workspace, f)
+            for f in self.board.get("frames", [])}
+        self.view.selected_id = self.selected_id
+        self.view.update()
+        self.frames_list.blockSignals(True)
+        self.frames_list.clear()
+        ordered = sorted(self.board.get("frames", []),
+                         key=lambda f: f["z"], reverse=True)
+        for frame in ordered:
+            item = QListWidgetItem(
+                f"{design_canvas_mod.frame_label(self.board, frame)}"
+                f"  ·  {frame['kind']}")
+            item.setData(Qt.UserRole, frame["id"])
+            self.frames_list.addItem(item)
+            if frame["id"] == self.selected_id:
+                self.frames_list.setCurrentItem(item)
+        self.frames_list.blockSignals(False)
+        self._render_detail()
+
+    def _render_detail(self):
+        frame = self._selected()
+        count = len(self.board.get("frames", []))
+        project = Path(self._owner.workspace).name
+        if frame is None:
+            self.detail_label.setText(
+                "No frame selected. Click a frame on the board "
+                "or in the list.")
+            self.status_label.setText(
+                f"{project} — {count} frame(s) on the board.")
+        else:
+            bits = [f"{frame['kind']} · "
+                    f"({frame['x']}, {frame['y']}) · "
+                    f"{frame['w']}x{frame['h']}"]
+            if frame.get("file"):
+                bits.append(frame["file"])
+            if frame["kind"] == "variant":
+                source = design_canvas_mod.get_frame(
+                    self.board, frame.get("derived_from") or "")
+                if source is not None:
+                    bits.append("variant of: " + design_canvas_mod
+                                .frame_label(self.board, source))
+            self.detail_label.setText("\n".join(bits))
+        for combo, key in ((self.viewport_combo, "viewport"),
+                           (self.state_combo, "state")):
+            combo.blockSignals(True)
+            value = frame.get(key) if frame else ""
+            combo.setCurrentIndex(
+                combo.findText(value) if value else 0)
+            combo.setEnabled(
+                frame is not None and frame["kind"] == "variant")
+            combo.blockSignals(False)
+        has = frame is not None
+        for btn in (self.variant_btn, self.rename_btn, self.note_btn,
+                    self.delete_btn, self.front_btn, self.back_btn,
+                    self.send_btn):
+            btn.setEnabled(has)
+
+    # ----- selection -----
+
+    def _selected(self):
+        if self.selected_id is None:
+            return None
+        return design_canvas_mod.get_frame(self.board, self.selected_id)
+
+    def select_frame(self, frame_id):
+        self.selected_id = frame_id
+        self._render()
+
+    def _list_picked(self, row):
+        item = self.frames_list.item(row) if row >= 0 else None
+        self.select_frame(
+            item.data(Qt.UserRole) if item is not None else None)
+
+    def board_dragged(self):
+        """The view finished a move/resize drag against the
+        board dict — persist and re-render the list/detail."""
+        self._changed("Board saved (.forge/design/canvas.json).")
+
+    # ----- operations -----
+
+    def add_artifact_frame(self):
+        workspace = Path(self._owner.workspace)
+        start = str(workspace)
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "Link a project file", start)
+        if not path:
+            return
+        chosen = Path(path).resolve()
+        try:
+            rel = chosen.relative_to(workspace.resolve())
+        except ValueError:
+            self.status_label.setText(
+                "That file is outside this project — a frame "
+                "links to a file inside the project it belongs to.")
+            return
+        frame = design_canvas_mod.add_frame(
+            self.board, "artifact", title=chosen.name,
+            file=rel.as_posix())
+        self.selected_id = frame["id"]
+        self._changed(f"Linked {rel.as_posix()} on the board.")
+
+    def add_note_card(self):
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Note card", "The note's text:")
+        if not ok:
+            return
+        text = (text or "").strip()
+        title = text.split("\n")[0][:60] if text else "Note"
+        frame = design_canvas_mod.add_frame(
+            self.board, "note", title=title, note=text)
+        self.selected_id = frame["id"]
+        self._changed("Note card added.")
+
+    def add_variant(self):
+        source = self._selected()
+        if source is None:
+            self.status_label.setText(
+                "Select a frame first — a variant descends from "
+                "the selected frame.")
+            return
+        frame = design_canvas_mod.duplicate_as_variant(
+            self.board, source["id"])
+        self.selected_id = frame["id"]
+        self._changed(
+            "Variant created — it names its source; edit its "
+            "labels to say what it is for.")
+
+    def rename_selected(self):
+        frame = self._selected()
+        if frame is None:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Rename frame", "Title:",
+            text=frame.get("title") or "")
+        if not ok:
+            return
+        design_canvas_mod.rename_frame(self.board, frame["id"], text)
+        self._changed("Frame renamed.")
+
+    def edit_note(self):
+        frame = self._selected()
+        if frame is None:
+            return
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Frame note", "Note text:",
+            frame.get("note") or "")
+        if not ok:
+            return
+        design_canvas_mod.set_note(self.board, frame["id"], text)
+        self._changed("Note saved.")
+
+    def delete_selected(self):
+        frame = self._selected()
+        if frame is None:
+            return
+        design_canvas_mod.delete_frame(self.board, frame["id"])
+        self.selected_id = None
+        self._changed("Frame deleted — links and lineage that "
+                      "pointed at it were cleared, not left dangling.")
+
+    def front_selected(self):
+        frame = self._selected()
+        if frame is None:
+            return
+        design_canvas_mod.bring_to_front(self.board, frame["id"])
+        self._changed("Frame brought to the front.")
+
+    def back_selected(self):
+        frame = self._selected()
+        if frame is None:
+            return
+        design_canvas_mod.send_to_back(self.board, frame["id"])
+        self._changed("Frame sent to the back.")
+
+    def _labels_changed(self, _index=None):
+        frame = self._selected()
+        if frame is None or frame["kind"] != "variant":
+            return
+        viewport = self.viewport_combo.currentText()
+        state = self.state_combo.currentText()
+        design_canvas_mod.set_labels(
+            self.board, frame["id"],
+            viewport="" if viewport.startswith("(") else viewport,
+            state="" if state.startswith("(") else state)
+        self._changed("Variant labels saved (labels only — no "
+                      "source was rewritten).")
+
+    def _reset_view(self):
+        self.view.reset_view()
+
+    # ----- bench + artifacts -----
+
+    def send_to_bench(self):
+        frame = self._selected()
+        if frame is None:
+            self.status_label.setText(
+                "Select a frame first — the bench turn is "
+                "composed from the selected frame.")
+            return
+        ok, message = self._owner.send_canvas_frame_to_bench(
+            self.board, frame)
+        self.status_label.setText(message)
+
+    def file_summary_as_artifact(self):
+        workspace = self._owner.workspace
+        project = Path(workspace).name
+        title = f"Design canvas — {project}"
+        text = design_canvas_mod.summary_text(self.board, project)
+        design_canvas_mod.save_summary(workspace, self.board, project)
+        self._owner._record_artifact("design", title, text)
+        # _record_artifact never raises and returns nothing (a
+        # failure is a log line by its design) — so the claim
+        # "filed" is verified against the artifact index itself.
+        entries = artifacts_mod.list_artifacts(workspace)
+        filed = bool(entries) and entries[0].get("title") == title \
+            and entries[0].get("kind") == "design"
+        if filed:
+            self.status_label.setText(
+                "Summary filed as a design artifact "
+                f"({entries[0].get('file', '')}) — the same text "
+                "is at .forge/design/canvas-summary.md.")
+        else:
+            self.status_label.setText(
+                "The summary is at .forge/design/canvas-summary.md; "
+                "filing it as an artifact failed — see the log.")
+
+
+QUOTE_MAX_CHARS = 600
+
+
+def quote_block_for(text):
+    """The Reply quote: a message's text as a markdown-style quote
+    block ("> " prefixed per line, bare ">" for a blank line),
+    capped at QUOTE_MAX_CHARS of the source — past the cap the
+    excerpt is cut and an ellipsis marks the cut, so quoting a very
+    long block can never flood the composer."""
+    text = str(text or "")
+    if len(text) > QUOTE_MAX_CHARS:
+        text = text[:QUOTE_MAX_CHARS].rstrip() + " …"
+    if not text:
+        return ""
+    return "\n".join(
+        ("> " + line) if line else ">" for line in text.splitlines())
+
+
+class ForgeWindow(QMainWindow):
+    gauge_ready = Signal(dict)
+    resident_ready = Signal(object)
+    # Note 22: a create_skill/create_plugin tool succeeded on the worker
+    # thread — the slot rescans on the GUI thread so the new extension
+    # is loadable in this same session.
+    extension_created = Signal(str)
+
+    def __init__(self):
+        # Audit B21: startup timing starts at the very top of
+        # construction; the app_start record below reports it as
+        # startup_ms so a slow launch is measurable, not a feeling.
+        _startup_t0 = time.time()
+        super().__init__()
+        self.setWindowTitle(f"CODE FORGE v{APP_VERSION} — Linux Forge Agent")
+        self.resize(1360, 880); self.setMinimumSize(880, 560)
+        self.settings = self.load_settings()
+        # G5: the saved density drives the global stylesheet from
+        # the very first paint (Comfortable == STYLE itself).
+        self.apply_density()
+        # Item #41 (audit D42): the optional seats file — loaded for
+        # real by _load_seat_file at the end of __init__ (once the
+        # log exists); empty defaults keep every earlier path safe.
+        # Refusals caught at the window's seat read sites are logged
+        # once per (seat, refused) pair for the window's life —
+        # _start_turn runs every turn (the #31 hooks pattern).
+        self._seat_config: dict = {}
+        self._seat_problem: str | None = None
+        self._seat_refusals_seen: set = set()
+        self.store = ConversationStore(APP_DIR / "conversations.sqlite3")
+        self.conversation_id = None
+        # Item #69: the client is the provider facade — local Ollama
+        # by default, Groq/Gemini/EXAONE when a model ID names them. The
+        # connector config object is shared with the plugin context
+        # and rebuilt whenever Settings/Customize saves new keys.
+        self._connector_config = load_connector_config(APP_DIR)
+        # Secrets vault (GUIFX V1): one-way migration — any provider
+        # keys / connector tokens still sitting in plaintext
+        # connectors.json move into the encrypted vault and the file
+        # is rewritten without them.  Idempotent; on any vault
+        # failure the config is returned untouched and the keys keep
+        # working the old way.
+        self._connector_config = vault_mod.migrate_connector_secrets(
+            APP_DIR, self._connector_config)
+        # S2 no-plaintext-left assertion (audit S1-13): re-read the
+        # file that is actually on disk; whatever is still plaintext
+        # is logged loudly once the UI exists (below) — never silent.
+        self._vault_plaintext_left = vault_mod.plaintext_secret_keys(
+            APP_DIR)
+        self.client = ProviderClient(
+            self.settings.get("ollama_url", "http://127.0.0.1:11434"),
+            self._connector_config)
+        self.eventlog = EventLog(APP_DIR / "logs")
+        self.workspace = self.settings.get("workspace", str(Path.home() / "Projects"))
+        Path(self.workspace).mkdir(parents=True, exist_ok=True)
+        self.projects = self.settings.get("projects", [])
+        self.messages = []
+        self.worker = None
+        # Item #54: side chat state — None, or {"messages": <the main
+        # thread's list>} while a side chat is open. The fork itself
+        # lives in self.messages for the duration (a deep copy made
+        # at open); the stash is the untouched main list, restored
+        # verbatim on close. No store record ever names the fork:
+        # persist_conversation() is a no-op while this is set.
+        self._side_chat = None
+        self.pending_images = []
+        self.pending_upload_note = ""
+        # Item #71: the pending attachments as ONE ordered list —
+        # the single source of truth the compose strip (desktop)
+        # and the deck strip both render, and the index space both
+        # remove controls address. Entries: {"kind": "image",
+        # "name": str, "data": base64} or {"kind": "file", "name":
+        # str, "note": str}. pending_images / pending_upload_note
+        # above remain as the derived mirrors the send path has
+        # always read (rebuilt by _sync_pending), so the worker
+        # payload shape — message["images"] as base64 strings —
+        # never changes.
+        self.pending_attachments = []
+        # Item #71: per-model image capability, from Ollama's
+        # /api/show ("vision" in its capabilities list). Only
+        # definitive answers are cached, in memory, for the
+        # window's life; unknown is never cached and never blocks.
+        self._vision_cache = {}
+        # Item #71: the words of the send path's most recent
+        # refusal, reset at every send_message entry, so the phone
+        # delivery path can report a guard refusal truthfully
+        # instead of its blanket "Received".
+        self._send_refusal = None
+        self._stream_text = ""
+        # The mode this turn runs in + its prompt, captured at start
+        # so on_finished can file the exchange in that mode's window.
+        self._turn_mode = None
+        self._turn_prompt = ""
+        # Streaming-render bookkeeping (audit B14): the in-flight
+        # assistant message, how many messages before it the chat
+        # document already shows, and the doc offset where its blocks
+        # begin — so a repaint tick can replace just the bubble's tail.
+        self._stream_bubble = None
+        self._stream_prefix_len = 0
+        self._stream_anchor = None
+        self._transcriber = None
+        self._fold_thread = None
+        self._copy_thread = None
+        self._models_thread = None
+        self._maintenance_thread = None
+        self._run_thread = None
+        # C1: the Watch seat's per-run state. The window owns one
+        # monitor, reset by every run start; fed by the RunThread's
+        # own line stream (see _append_run_output / start_run).
+        self._run_monitor = monitor_mod.RunMonitor()
+        self._monitor_thread = None
+        self._debug_session = None
+        self._gauge_busy = False
+        self.gauge_ready.connect(self._apply_gauges)
+        self.resident_ready.connect(self._apply_resident)
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(120)
+        self._render_timer.timeout.connect(self._on_render_tick)
+        # skills + plugins (disabled sets come from settings; Customize manages them)
+        # Note 22: the app-global extension dirs. Default = the app
+        # root's own folders; settings may point them elsewhere (tests).
+        self.app_skills_dir = Path(self.settings.get("skills_dir") or SKILLS_DIR)
+        self.app_templates_dir = Path(self.settings.get("templates_dir") or TEMPLATES_DIR)
+        self.app_plugins_dir = Path(self.settings.get("plugins_dir") or PLUGINS_DIR)
+        # Item #69: self-maintenance session state. Inactive is the
+        # normal state; activation records the owner's session so
+        # deactivation can restore it exactly (see
+        # activate_maintenance_session).
+        self._self_maintenance_active = False
+        self._self_maintenance_prior = None
+        self._self_maintenance_worktree = None
+        self.maintenance_win = None
+        self._project_local: list = []
+        # Audit C30: hook config problems already logged this window's
+        # life — _turn_config runs every turn, so each distinct problem
+        # is logged once, not once per turn.
+        self._hook_problems_seen: set = set()
+        # S3 (audit S1-02): project hook/verify trust denials for THIS
+        # session — (workspace, kind, content hash) the owner already
+        # declined, so a denied project is not re-asked every turn.
+        # Session-only by design: a denial is never persisted as
+        # trust, and a fresh window asks again.
+        self._project_hook_denials: set = set()
+        # Audit D41: the same once-per-window dedupe for recipe load
+        # problems — the recipes dialog reports them at every open,
+        # and the log should carry each distinct one exactly once.
+        self._recipe_problems_seen: set = set()
+        self.all_skills = scan_skills(self.app_skills_dir)
+        self.macros = macros_mod.scan_macros(COMMANDS_DIR)
+        self.plugin_ctx = PluginContext(
+            workspace=self.workspace, base_url=self.client.base_url,
+            config=self._connector_config, log=lambda m: self.log(m),
+            governing_roster=self.settings.get("governing_roster", ""))
+        self.all_plugins, self._full_registry = load_plugins(
+            self.app_plugins_dir, self.plugin_ctx,
+            disabled=set(self.settings.get("disabled_plugins", [])),
+            known=self._known_plugins_for_load())
+        self.skills, self.plugins, self.plugin_registry = [], [], {}
+        self.reload_extensions()
+        self.extension_created.connect(self._on_extension_created)
+        self.deck = DeckServer(self)
+        self.deck.stop_requested.connect(self._on_phone_stop)
+        self.deck.mode_changed.connect(self._on_phone_mode)
+        self.deck.council_changed.connect(self._on_phone_council)
+        self.deck.project_switch_requested.connect(self._deck_project_switch)
+        self.deck.prompt_delivery_requested.connect(self._deck_prompt_delivery)
+        self.deck.plan_action_requested.connect(self._deck_plan_action)
+        self.deck.attachment_remove_requested.connect(self._deck_attachment_remove)
+        self.deck.attachment_upload_requested.connect(self._deck_attachment_upload)
+        self._gauge_snap = None
+        self._turn_started = 0.0
+        self._deck_last_push = 0.0
+        self._phone_queue = []
+        # Sweep R51: each held prompt's workspace rides a parallel
+        # list (the queue itself stays a list of strings — its
+        # shape is pinned by the deck tests). A prompt queued in
+        # one project must not fire into another after a switch.
+        self._phone_queue_ws = []
+        # Item #64: the workstream registry. EVERY turn registers a
+        # stream record at _start_turn; the stage stream is the one
+        # on the bench (self.worker), the rest run in the background
+        # when the owner switches conversations with Parallel turns
+        # above 1. Records are plain dicts (the plan_state /
+        # _side_chat convention); settled records stay listed in
+        # Mission Control until their conversation is staged again
+        # or the owner dismisses them.
+        self._streams = {}
+        self._stream_seq = 0
+        self._stage_stream_id = None
+        # C3 (auto-test cadence): per-workspace untested-changes
+        # tabs (forge/testcadence.py), the workspaces with a
+        # plan-step boundary waiting for their settle, and the one
+        # cadence tester run at a time (a cadence run is a seat
+        # run, and seat runs are one-at-a-time on this PC).
+        self._test_debt = {}
+        self._cadence_boundary = set()
+        self._cadence_thread = None
+        self._cadence_running_for = None
+        # Item #64: the approval gate queue. One gate is presented
+        # at a time (desktop dialog + deck pending, exactly as
+        # before); a gate asked while one is on screen waits here
+        # in arrival order, and its worker stays parked on its own
+        # approval event (F8: no timeout) until it is presented.
+        self._gate_queue = []
+        self._gate_presenting = False
+        self._gate_owner_worker = None
+        self.mission_win = None
+        self.templates_win = None
+        self.testing_win = None
+        self.provider_chat_win = None
+        self.timeline_win = None
+        self.design_canvas_win = None
+        # Item C9: per-conversation turn marks for the Turn
+        # timeline — {conversation_id: [{prompt, model, mode,
+        # outcome}]} appended at the settle dispatchers (the only
+        # place mode and the stopped/finished distinction exist as
+        # signals), plus the soft-budget announcements already made
+        # ({conversation_id: budget value announced at}), so a
+        # crossing is announced exactly once per budget value.
+        # Session state only: the timeline pairs these marks with
+        # the event log's turn records (forge/timeline.py).
+        self._turn_marks = {}
+        self._soft_budget_announced = {}
+        # Note 12: the live plan state for the current conversation
+        # (forge/planning.py dict or None) + the request that drafted it.
+        self.plan_state = None
+        self._pending_plan_request = ""
+        # Item #56: the Goldfish result the worker emits just before
+        # plan_ready; on_plan_ready folds it into the plan state.
+        self._pending_goldfish = None
+        # Item #58: the plan document the worker emits just before
+        # plan_ready, folded in the same way.
+        self._pending_plan_document = None
+        # Item #66: True while the driver revises a draft against a
+        # gate comment — the gate's other actions refuse in words
+        # meanwhile (there is no parked decision to release, and
+        # resolving one would strand the gate).
+        self._plan_revising = False
+        # Item #66: the pending artifact-comment marker — set when
+        # a comment turn is sent, claimed by that turn's settle
+        # (stage or background) to file its reply as the revision.
+        self._pending_artifact_comment = None
+        self._build_ui()
+        if self._vault_plaintext_left:
+            self.log("⚠ Vault migration incomplete — these keys are "
+                     "still in plain text in connectors.json: "
+                     + ", ".join(self._vault_plaintext_left)
+                     + ". They keep working, but they are NOT "
+                     "protected until a vault write succeeds.")
+        proj.ensure_project(self.workspace)
+        self.new_chat()
+        self.refresh_models_async()
+        self._gauge_timer = QTimer(self)
+        self._gauge_timer.timeout.connect(self.refresh_gauges)
+        self._gauge_timer.start(3000)
+        self._sched_timer = QTimer(self)
+        self._sched_timer.timeout.connect(self._scheduler_tick)
+        self._sched_timer.start(30000)
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._watch_tick)
+        self._watch_timer.start(5000)
+        self._watch_seen = set(self.settings.get("watch_seen", []))
+        self.refresh_gauges()
+        self.eventlog.record("app_start", version=APP_VERSION,
+                             startup_ms=int(round((time.time() - _startup_t0) * 1000)),
+                             skills=[s.name for s in self.skills],
+                             plugins=[p.pid for p in self.plugins])
+        self._restore_resume_state()
+
+    # ---------- extensions (skills / plugins / connectors) ----------
+    def _known_plugins_for_load(self):
+        """The history load_plugins trusts: the stored known_plugins,
+        or — when no history exists yet (S6, audit S1-25a) — the
+        BUNDLED_PLUGIN_IDS seed, so an unseeded plugin folder's code
+        does not execute on first load, before reload_extensions has
+        even recorded it as new-and-disabled. Seeded (bundled)
+        plugins keep the historic first-run behaviour."""
+        known = self.settings.get("known_plugins")
+        if known is None:
+            return sorted(BUNDLED_PLUGIN_IDS)
+        return known
+
+    def reload_extensions(self):
+        disabled_skills = set(self.settings.get("disabled_skills", []))
+        disabled_plugins = set(self.settings.get("disabled_plugins", []))
+        known = self.settings.get("known_plugins")
+        current_pids = [pl.pid for pl in self.all_plugins]
+        if known is None:
+            # S6 (audit S1-25a): first run / no history — the seed,
+            # not the whole folder, becomes the recorded history.
+            # Bundled plugins keep today's first-run behaviour;
+            # anything else present is NEW and falls into the
+            # starts-disabled path below instead of grandfathering.
+            known = [pid for pid in current_pids
+                     if pid in BUNDLED_PLUGIN_IDS]
+            self.settings["known_plugins"] = known
+            self.save_settings()
+        new_pids = [pid for pid in current_pids if pid not in known]
+        if new_pids:
+            disabled_plugins.update(new_pids)
+            self.settings["disabled_plugins"] = sorted(disabled_plugins)
+            self.settings["known_plugins"] = sorted(set(known) | set(current_pids))
+            self.save_settings()
+            if hasattr(self, "activity"):
+                for pid in new_pids:
+                    self.log(f"New plugin '{pid}' appeared — left DISABLED until you enable it in Customize.")
+        # S6 (audit S1-25c): skills mirror plugins — a skill whose
+        # name has never been seen starts DISABLED; the first
+        # recorded history is the skills already present (an existing
+        # install's skills all keep their current state — nothing is
+        # retroactively disabled).
+        known_skills = self.settings.get("known_skills")
+        current_skill_names = [s.name for s in self.all_skills]
+        if known_skills is None:
+            self.settings["known_skills"] = current_skill_names
+            self.save_settings()
+        else:
+            new_skills = [name for name in current_skill_names
+                          if name not in known_skills]
+            if new_skills:
+                disabled_skills.update(new_skills)
+                self.settings["disabled_skills"] = sorted(disabled_skills)
+                self.settings["known_skills"] = sorted(
+                    set(known_skills) | set(current_skill_names))
+                self.save_settings()
+                if hasattr(self, "activity"):
+                    for name in new_skills:
+                        self.log(f"New skill '{name}' appeared — left DISABLED until you enable it in Customize.")
+        self.skills = [s for s in self.all_skills if s.name not in disabled_skills]
+        self.plugins = [p for p in self.all_plugins if p.pid not in disabled_plugins]
+        # Owner-based filter: a tool leaves the registry only when its
+        # OWNING plugin is disabled — never by name, so a disabled
+        # plugin that happens to declare the same tool name as an
+        # enabled one cannot delete the enabled plugin's tool.
+        disabled_names = {p.name for p in self.all_plugins
+                          if p.pid in disabled_plugins}
+        self.plugin_registry = {k: v for k, v in self._full_registry.items()
+                                if v[3] not in disabled_names}
+        if hasattr(self, "ext_counts"):
+            self._refresh_panels()
+
+    def rescan_extensions(self):
+        self.all_skills = scan_skills(self.app_skills_dir)
+        self.macros = macros_mod.scan_macros(COMMANDS_DIR)
+        self.all_plugins, self._full_registry = load_plugins(
+            self.app_plugins_dir, self.plugin_ctx,
+            disabled=set(self.settings.get("disabled_plugins", [])),
+            known=self._known_plugins_for_load())
+        self.reload_extensions()
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = self.build_system_prompt()
+        self.log(f"Extensions rescanned — {len(self.all_skills)} skill(s), {len(self.all_plugins)} plugin(s) on disk.")
+        # Note 22: skills/plugins saved inside the project folder are
+        # project-only — detected and reported, never loaded as globals.
+        self._project_local = create_mod.find_project_local(
+            self.workspace, self.app_skills_dir, self.app_plugins_dir)
+        if self._project_local:
+            names = ", ".join(f"{i['kind']} '{i['name']}'" for i in self._project_local)
+            self.log(f"⚠ {len(self._project_local)} extension(s) found INSIDE the project "
+                     f"folder ({names}) — project-only until housed globally "
+                     "(Customize → “House project skills/plugins globally”).")
+
+
+    # ---------- Item #69: provider client lifecycle ----------
+
+    def _provider_config(self):
+        """The live connector config the provider facade reads —
+        keys, enables, maintenance models, and the model registry."""
+        config = getattr(self, "_connector_config", None)
+        if isinstance(config, dict):
+            return config
+        ctx_config = getattr(getattr(self, "plugin_ctx", None),
+                             "config", None)
+        return ctx_config if isinstance(ctx_config, dict) else {}
+
+    def _rebuild_provider_client(self, config=None):
+        """Rebuild the provider facade after Settings/Customize
+        saved: a new Ollama URL or new provider keys take effect
+        without a restart, and the plugin context sees the same
+        config object and base URL."""
+        if config is None:
+            config = load_connector_config(APP_DIR)
+        self._connector_config = config
+        self.client = ProviderClient(
+            self.settings.get("ollama_url", "http://127.0.0.1:11434"),
+            config)
+        if getattr(self, "plugin_ctx", None) is not None:
+            self.plugin_ctx.config = config
+            self.plugin_ctx.base_url = self.client.base_url
+        return self.client
+
+    # ---------- Item #69: self-maintenance session ----------
+
+    def _maintenance_model_candidates(self):
+        """The models the maintenance engineer may drive: the
+        provider facade's maintenance-scope list first, then the
+        owner's configured maintenance fields / registry entries /
+        saved maintenance model as offline fallbacks."""
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add(model):
+            model = str(model or "").strip()
+            if model and model not in seen:
+                seen.add(model)
+                candidates.append(model)
+
+        config = self._provider_config()
+        saved = self.settings.get("maintenance_model", "")
+        if saved:
+            add(saved)
+        client_method = getattr(self.client, "maintenance_models", None)
+        if callable(client_method):
+            try:
+                for model in client_method() or []:
+                    add(model)
+            except Exception:
+                pass
+        for provider in providers_mod.PROVIDERS:
+            raw = config.get(f"maintenance_{provider}_model")
+            if raw:
+                add(providers_mod.provider_model_id(provider, raw))
+        for entry in providers_mod.registry_entries(config):
+            if entry.get("scope") in ("maintenance", "both") and \
+                    "driver" in entry.get("roles", []):
+                add(entry.get("id"))
+        return candidates
+
+    @staticmethod
+    def _candidate_plugin_ids(worktree):
+        """Plugin IDs declared in a work copy, read from manifests
+        only — candidate plugin CODE is never executed to learn them."""
+        ids = set()
+        plugins_dir = Path(worktree) / "plugins"
+        if plugins_dir.is_dir():
+            for folder in sorted(plugins_dir.iterdir()):
+                meta_file = folder / "plugin.json"
+                if not (folder.is_dir() and meta_file.is_file()):
+                    continue
+                try:
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                    pid = str(meta.get("id") or folder.name) \
+                        if isinstance(meta, dict) else folder.name
+                except Exception:
+                    pid = folder.name
+                if pid:
+                    ids.add(pid)
+        return ids
+
+    def activate_maintenance_session(self, model=None):
+        """Enter Forge maintenance: the workspace becomes the guarded
+        work copy, extension creation stages inside the candidate,
+        candidate plugins are all disabled (their code never runs in
+        the live app), and the persistent maintenance conversation
+        loads. The owner's current session is recorded for exact
+        restoration on deactivate."""
+        if self._self_maintenance_active:
+            if model:
+                if self.model_combo.findText(model) < 0:
+                    self.model_combo.addItem(model)
+                self.model_combo.setCurrentText(model)
+                self.settings["maintenance_model"] = model
+                self.save_settings()
+            return True
+        if (self.worker and self.worker.isRunning()) or \
+                (self._fold_thread is not None
+                 and self._fold_thread.isRunning()):
+            self.log("Maintenance refused — a turn is running. "
+                     "Stop it first.")
+            return False
+        # Item #64: a background turn is still a turn — the room's
+        # swap (workspace, extension dirs, disabled sets) is
+        # window-global and must never land under one.
+        if self._live_streams():
+            self.log("Maintenance refused — a background turn is "
+                     "running. Stop it first (Mission Control).")
+            return False
+        # Item #54: the maintenance room swaps conversations itself —
+        # an open side chat is discarded first so its stash is never
+        # orphaned by the swap.
+        if getattr(self, "_side_chat", None) is not None:
+            self.close_side_chat()
+        self.persist_conversation()
+        prior = {
+            "conversation_id": self.conversation_id,
+            "workspace": self.workspace,
+            "model": self.model_combo.currentText().strip(),
+            "mode": self.mode_combo.currentText().lower(),
+            "app_skills_dir": Path(self.app_skills_dir),
+            "app_plugins_dir": Path(self.app_plugins_dir),
+            "disabled_plugins": list(
+                self.settings.get("disabled_plugins", [])),
+            "known_plugins": (list(self.settings["known_plugins"])
+                              if self.settings.get("known_plugins")
+                              is not None else None),
+        }
+        try:
+            worktree = self_maint_mod.prepare_work_copy(ROOT_DIR, APP_DIR)
+        except Exception as exc:
+            self.log(f"Maintenance work copy failed: {exc}")
+            QMessageBox.critical(self, "Forge maintenance",
+                                 f"Could not prepare the work copy:\n{exc}")
+            return False
+        self._self_maintenance_prior = prior
+        self._self_maintenance_active = True
+        self._self_maintenance_worktree = str(worktree)
+        self.workspace = str(worktree)
+        self.plugin_ctx.workspace = self.workspace
+        self.app_skills_dir = worktree / "skills"
+        self.app_plugins_dir = worktree / "plugins"
+        candidate_ids = self._candidate_plugin_ids(worktree)
+        disabled = set(self.settings.get("disabled_plugins", [])) \
+            | candidate_ids
+        self.settings["disabled_plugins"] = sorted(disabled)
+        self.save_settings()
+        self.rescan_extensions()
+        if self.mode_combo.currentText().lower() != "code":
+            self.mode_combo.setCurrentText("Code")
+        # The persistent maintenance conversation: one long-running
+        # room, separate from every project chat.
+        cid = self.settings.get("maintenance_conversation_id")
+        loaded = self.store.load(cid) if cid else None
+        if loaded:
+            loaded, repairs = normalize_history(loaded)
+            if repairs:
+                self.eventlog.record("history_normalized",
+                                     conversation_id=cid,
+                                     repairs=repairs)
+            self.conversation_id = cid
+            self.messages = loaded
+            if self.messages and self.messages[0].get("role") == "system":
+                self.messages[0]["content"] = self.build_system_prompt()
+            else:
+                self.messages.insert(
+                    0, {"role": "system",
+                        "content": self.build_system_prompt()})
+            self.render()
+            self._update_context_gauge()
+            self._plan_restore()
+        else:
+            self.conversation_id = None
+            self.messages = [{"role": "system",
+                              "content": self.build_system_prompt()}]
+            self.plan_state = None
+            self._plan_render()
+            self._deck_sync_plan()
+            self.render()
+            self._update_context_gauge()
+            self._sync_chat_tabs()
+        chosen = (str(model or "").strip()
+                  or str(self.settings.get("maintenance_model", "")).strip())
+        candidates = self._maintenance_model_candidates()
+        if not chosen and candidates:
+            chosen = candidates[0]
+        if chosen:
+            if self.model_combo.findText(chosen) < 0:
+                self.model_combo.addItem(chosen)
+            self.model_combo.setCurrentText(chosen)
+            self.settings["maintenance_model"] = chosen
+            self.save_settings()
+        self.refresh_projects()
+        if getattr(self, "run_win", None) is not None:
+            self.run_win.refresh()
+        self.log(f"🛠 Forge maintenance ACTIVE — work copy: {worktree}. "
+                 "Changes here are candidates, never live, until you "
+                 "install them from the Maintenance window.")
+        if getattr(self, "maintenance_win", None) is not None:
+            self.maintenance_win.refresh_models()
+            self.maintenance_win.refresh_transcript()
+            self.maintenance_win.refresh_changes()
+        return True
+
+    def deactivate_maintenance_session(self):
+        """Leave Forge maintenance: persist the maintenance
+        conversation, restore the live extension dirs, the owner's
+        disabled-plugins set, workspace, model, mode, and prior
+        conversation exactly as activation found them."""
+        if not self._self_maintenance_active:
+            return True
+        if (self.worker and self.worker.isRunning()) or \
+                (self._fold_thread is not None
+                 and self._fold_thread.isRunning()):
+            self.log("Maintenance stays active — a turn is running. "
+                     "Stop it first.")
+            return False
+        self.persist_conversation()
+        prior = self._self_maintenance_prior or {}
+        self._self_maintenance_active = False
+        self.app_skills_dir = Path(prior.get("app_skills_dir")
+                                   or self.app_skills_dir)
+        self.app_plugins_dir = Path(prior.get("app_plugins_dir")
+                                    or self.app_plugins_dir)
+        self.settings["disabled_plugins"] = list(
+            prior.get("disabled_plugins", []))
+        if prior.get("known_plugins") is None:
+            self.settings.pop("known_plugins", None)
+        else:
+            self.settings["known_plugins"] = list(prior["known_plugins"])
+        self.workspace = str(prior.get("workspace") or self.workspace)
+        self.plugin_ctx.workspace = self.workspace
+        self.save_settings()
+        self.rescan_extensions()
+        prior_mode = str(prior.get("mode") or "code")
+        if self.mode_combo.currentText().lower() != prior_mode:
+            self.mode_combo.setCurrentText(prior_mode.capitalize())
+        restored = False
+        cid = prior.get("conversation_id")
+        if cid:
+            self.load_conversation(cid)
+            restored = self.conversation_id == cid
+        if not restored:
+            self.new_chat()
+        prior_model = str(prior.get("model") or "").strip()
+        if prior_model:
+            if self.model_combo.findText(prior_model) < 0 and \
+                    providers_mod.is_provider_model(prior_model):
+                self.model_combo.addItem(prior_model)
+            if self.model_combo.findText(prior_model) >= 0:
+                self.model_combo.setCurrentText(prior_model)
+        self.refresh_projects()
+        if getattr(self, "run_win", None) is not None:
+            self.run_win.refresh()
+        self._self_maintenance_prior = None
+        self.log("🛠 Forge maintenance off — back to your session.")
+        if getattr(self, "maintenance_win", None) is not None:
+            self.maintenance_win.refresh_models()
+            self.maintenance_win.refresh_transcript()
+            self.maintenance_win.refresh_changes()
+        return True
+
+    def open_maintenance_window(self):
+        """The maintenance room: single instance, refreshed on open."""
+        win = getattr(self, "maintenance_win", None)
+        if win is None:
+            win = MaintenanceWindow(self)
+            self.maintenance_win = win
+        else:
+            win.refresh_models()
+            win.refresh_transcript()
+            win.refresh_changes()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    # ---------- Note 22: global creation tools ----------
+    def _on_extension_created(self, label: str):
+        self.log(f"✚ {label}")
+        self.rescan_extensions()
+
+    def _create_skill_tool(self, args: dict) -> str:
+        ok, message = create_mod.create_skill(
+            self.app_skills_dir, str(args.get("name", "")),
+            str(args.get("description", "")), str(args.get("body", "")))
+        if ok:
+            self.extension_created.emit(message.split(" — ")[0])
+        return message
+
+    def _create_plugin_tool(self, args: dict) -> str:
+        ok, message = create_mod.create_plugin(
+            self.app_plugins_dir, str(args.get("name", "")),
+            str(args.get("description", "")), str(args.get("code", "")))
+        if ok:
+            self.extension_created.emit(message.split(" — ")[0])
+        return message
+
+    def _update_skill_tool(self, args: dict) -> str:
+        ok, message = create_mod.update_skill(
+            self.app_skills_dir, str(args.get("name", "")),
+            str(args.get("description", "")), str(args.get("body", "")))
+        if ok:
+            self.extension_created.emit(message.split(" — ")[0])
+        return message
+
+    def _update_plugin_tool(self, args: dict) -> str:
+        ok, message = create_mod.update_plugin(
+            self.app_plugins_dir, str(args.get("name", "")),
+            str(args.get("description", "")), str(args.get("code", "")))
+        if ok:
+            pid = str(args.get("name", "")).strip()
+            # S6 (audit S1-25b): a successful update of an ENABLED
+            # plugin returns it to DISABLED — new code the owner has
+            # not reviewed never runs under an old trust decision.
+            # The state flips BEFORE the rescan fires, so the
+            # registry the rescan builds already excludes its tools;
+            # a plugin that was disabled stays disabled, untouched.
+            if pid and pid not in set(self.settings.get("disabled_plugins", [])):
+                self.settings["disabled_plugins"] = sorted(
+                    set(self.settings.get("disabled_plugins", [])) | {pid})
+                self.save_settings()
+                message += (f" Plugin '{pid}' was enabled, so the update has switched it "
+                            "OFF — re-enable it in Customize to run the new code.")
+            self.extension_created.emit(message.split(" — ")[0])
+        return message
+
+    def _house_project_local(self) -> str:
+        """Customize's housing button: move project-local skills/plugins
+        into the app folders, then rescan so the globals register."""
+        moved, skipped = create_mod.house_project_local(
+            self.workspace, self.app_skills_dir, self.app_plugins_dir)
+        self._project_local = create_mod.find_project_local(
+            self.workspace, self.app_skills_dir, self.app_plugins_dir)
+        lines = []
+        if moved:
+            lines.append("Housed globally: " + ", ".join(moved) + ".")
+        if skipped:
+            lines.append("Skipped: " + "; ".join(skipped) + ".")
+        if not lines:
+            lines.append("Nothing to house.")
+        report = "\n".join(lines)
+        self.log("🏠 Housing project-local extensions — " + report.replace("\n", " "))
+        self.rescan_extensions()
+        return report
+
+    def _customize_tools(self):
+        """Item #52: the kill switchboard's rows — every tool this
+        window can hand the agent: the built-ins (labeled
+        "built-in") plus each extra tool with its source label
+        (plugin name, "skills", "Forge shell", …)."""
+        rows = [(s["function"]["name"], "built-in") for s in TOOL_SCHEMAS]
+        rows += [(name, entry[3]) for name, entry in self._extra_tools().items()]
+        return rows
+
+    def open_customize(self):
+        was_disabled_plugins = set(self.settings.get("disabled_plugins", []))
+        dialog = CustomizeDialog(self, self.all_skills, self.all_plugins,
+                                 set(self.settings.get("disabled_skills", [])),
+                                 set(self.settings.get("disabled_plugins", [])),
+                                 load_connector_config(APP_DIR),
+                                 rules=list(self.settings.get("permission_rules", [])),
+                                 skribe_writes=bool(self.settings.get("skribe_writes", True)),
+                                 project_local=create_mod.find_project_local(
+                                     self.workspace, self.app_skills_dir, self.app_plugins_dir),
+                                 on_house=self._house_project_local,
+                                 tools=self._customize_tools(),
+                                 disabled_tools=set(self.settings.get("disabled_tools", [])),
+                                 goldfish_review=bool(self.settings.get("goldfish_review", True)))
+        if dialog.exec() == QDialog.Accepted:
+            disabled_skills, disabled_plugins, config, rules, skribe_on, disabled_tools = dialog.values()
+            self.settings["permission_rules"] = rules
+            self.settings["skribe_writes"] = skribe_on
+            # Item #56: the Goldfish toggle rides its own accessor —
+            # the values() tuple keeps its 6-element shape.
+            self.settings["goldfish_review"] = dialog.goldfish_on()
+            self.settings["disabled_skills"] = sorted(disabled_skills)
+            self.settings["disabled_plugins"] = sorted(disabled_plugins)
+            # Item #52: persisted like the other disabled sets — the
+            # next turn's worker is built without these tools.
+            self.settings["disabled_tools"] = sorted(disabled_tools)
+            self.save_settings()
+            vault_extract_failed = False
+            try:
+                # Secrets vault (GUIFX V1): typed keys move into the
+                # encrypted vault first; connectors.json is written
+                # WITHOUT them.  If the vault write fails, the
+                # original config is written instead — a key is
+                # never lost to a vault problem — but S2: that
+                # fallback is no longer silent (see the assertion
+                # below).  Sweep R48: the write itself stays atomic —
+                # write_text_private IS the pid-unique tmp + fsync +
+                # replace shape, at 0600.
+                try:
+                    file_config = vault_mod.extract_secrets(APP_DIR, config)
+                except Exception:
+                    file_config = config
+                    vault_extract_failed = True
+                fileperms.write_text_private(
+                    APP_DIR / "connectors.json",
+                    json.dumps(file_config, indent=2), encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.critical(self, "Connector config", str(exc))
+            # S2 no-plaintext-left assertion (audit S1-01/13): check
+            # the file that actually landed on disk, plus any vault
+            # failures the dialog collected on Save.
+            plaintext_left = vault_mod.plaintext_secret_keys(APP_DIR)
+            if plaintext_left or vault_extract_failed \
+                    or dialog._secret_vault_failures:
+                self.log("⚠ Vault failed — keys still in plain text "
+                         "in connectors.json: "
+                         + ", ".join(plaintext_left or
+                                     dialog._secret_vault_failures)
+                         + ". They keep working, but they are NOT "
+                         "protected until a vault write succeeds.")
+                QMessageBox.warning(
+                    self, "Secrets vault",
+                    "Vault failed — keys still in plain text in "
+                    "connectors.json. They keep working, but they "
+                    "are not protected until a vault write succeeds.")
+            # Item #69: new keys/enables/registry reach the live
+            # client now; the model combo refills from the merged
+            # local + cloud catalog.
+            self._rebuild_provider_client(config)
+            self.refresh_models_async()
+            if was_disabled_plugins - set(disabled_plugins):
+                # A plugin was just ENABLED: its code may never have run
+                # (disabled / brand-new plugins are not executed at
+                # load), so a full rescan is what loads it now — the
+                # registry filter alone cannot conjure un-run code.
+                # Toggling OFF needs no rescan: the owner filter in
+                # reload_extensions drops its tools immediately.
+                self.rescan_extensions()
+            else:
+                self.reload_extensions()
+            if self.messages and self.messages[0].get("role") == "system":
+                self.messages[0]["content"] = self.build_system_prompt()
+            self.log("Customize saved — skills/plugins/connectors updated.")
+        # Window rule: a New…/Edit… button in the dialog asked for a
+        # skill/plugin editor window. It opens now that the modal
+        # dialog is closed, so the window is fully usable; its saves
+        # rescan through the same path as the agent's tools.
+        requested = getattr(dialog, "requested_editor", None)
+        if requested is not None:
+            kind, item = requested
+            if kind == "skill":
+                self.open_skill_editor(item)
+            else:
+                self.open_plugin_editor(item)
+
+    def _skribe_enabled(self):
+        """Note 20: the SKRIBE gate needs BOTH the owner's toggle
+        (settings `skribe_writes`, default on) AND the SKRIBE skill
+        itself enabled — the grading pass instructs the model to load
+        that skill, so a skill switched off in Customize disables the
+        gate too."""
+        return bool(self.settings.get("skribe_writes", True)) and \
+            any(s.name == "skribe" for s in self.skills)
+
+    def _goldfish_enabled(self):
+        """Item #56: the Goldfish pass needs BOTH the owner's toggle
+        (settings `goldfish_review`, default on — the SKRIBE
+        convention) AND the goldfish skill itself enabled: the pass
+        is packaged as that skill, so a skill switched off in
+        Customize disables the pass too, exactly like SKRIBE."""
+        return bool(self.settings.get("goldfish_review", True)) and \
+            any(s.name == "goldfish" for s in self.skills)
+
+    def _seen_once(self, seen: set, key) -> bool:
+        """Sweep R59: the log-once dedupe sets (hook problems,
+        recipe problems, seat refusals) only ever GREW — a long
+        session with churning problems accumulated entries without
+        bound. Bounded: past 500 entries the set restarts, so a
+        still-live problem logs once more per 500 new ones rather
+        than the set growing forever. Returns True exactly when
+        the key is newly recorded — the caller logs then."""
+        if key in seen:
+            return False
+        if len(seen) >= 500:
+            seen.clear()
+        seen.add(key)
+        return True
+
+    def _turn_config(self):
+        """Hooks (global settings + project .forge/hooks.json) and verify
+        commands (project .forge/verify.json, else settings defaults).
+
+        S3 (audit S1-02): the PROJECT's hooks and verify commands are
+        shell commands a project file asks Forge to run automatically
+        — they used to run with no approval at all, so opening a
+        malicious project was enough. Now the project's content is
+        hashed and runs only when the owner has trusted that exact
+        content once (trust-on-first-use; the hashes live in owner
+        settings, outside the workspace, where project files cannot
+        write them). Owner-settings hooks and verify defaults are the
+        owner's own — always trusted, exactly as before."""
+        hook_list = [h for h in self.settings.get("hooks", []) if isinstance(h, dict)]
+        file_hooks, hook_problems = hooks_mod.load_hooks(
+            proj.forge_area(self.workspace) / "hooks.json")
+        # Audit C30: a broken hooks.json used to vanish silently. Log
+        # each distinct problem once per window life (this runs every
+        # turn); the problem string embeds the path, so it is its own
+        # dedupe key.
+        for problem in hook_problems:
+            if self._seen_once(self._hook_problems_seen, problem):
+                self.log("Hooks: " + problem)
+        if file_hooks and self._project_content_trusted(
+                "hooks", file_hooks,
+                [str(h.get("command", "")) for h in file_hooks]):
+            hook_list += file_hooks
+        project_verify: list[str] = []
+        try:
+            data = json.loads((proj.forge_area(self.workspace) / "verify.json").read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                project_verify = [str(data[k]) for k in ("lint", "test") if data.get(k)]
+                if isinstance(data.get("commands"), list):
+                    project_verify += [str(c) for c in data["commands"]]
+        except Exception as exc:
+            # Sweep R50: a BROKEN verify.json used to vanish into
+            # the settings fallback with no word — the owner could
+            # not tell his project's verify commands were being
+            # ignored. A MISSING file is the ordinary case (most
+            # projects have none) and stays silent; a present but
+            # unreadable one is logged, once per distinct problem.
+            verify_path = proj.forge_area(self.workspace) / "verify.json"
+            if verify_path.exists():
+                problem = f"Verify config unreadable ({verify_path}): {exc}"
+                if self._seen_once(self._hook_problems_seen, problem):
+                    self.log(problem)
+        verify = project_verify
+        if verify and not self._project_content_trusted(
+                "verify", verify, list(verify)):
+            # Untrusted project verify commands do not run; the
+            # owner's own saved defaults (trusted) take their place.
+            verify = []
+        if not verify:
+            verify = [str(c) for c in self.settings.get("verify_commands", [])]
+        return hook_list, verify
+
+    @staticmethod
+    def _project_content_hash(payload) -> str:
+        """S3: the trust key for project-supplied shell content — a
+        sha256 over its canonical JSON, so any edit to any command
+        (or hook field) changes the hash and re-asks."""
+        canonical = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _project_content_trusted(self, kind: str, payload,
+                                 commands: list) -> bool:
+        """S3 (audit S1-02): may this project's hooks/verify content
+        run? True when its hash matches the owner's stored trust for
+        this workspace; otherwise the owner is asked ONCE per changed
+        content (see _ask_project_hooks_trust — the same synchronous,
+        deck-bridgeable dialog the maintenance commands use, reached
+        here because _turn_config runs on the GUI thread before the
+        worker starts; scheduled and deck-sent turns assemble here
+        too, so the ask parks at the owner's gate like any approval,
+        F8 — it is never silently auto-trusted). A denial is cached
+        for the session only. Untrusted content NEVER runs."""
+        digest = self._project_content_hash(payload)
+        workspace = str(self.workspace)
+        store = self.settings.get("trusted_project_hooks")
+        entry = store.get(workspace) if isinstance(store, dict) else None
+        if isinstance(entry, dict) and entry.get(kind) == digest:
+            return True
+        denials = getattr(self, "_project_hook_denials", None)
+        if denials is None:
+            denials = self._project_hook_denials = set()
+        denial_key = (workspace, kind, digest)
+        if denial_key in denials:
+            return False
+        label = "hooks" if kind == "hooks" else "verify commands"
+        if self._ask_project_hooks_trust(kind, commands):
+            if not isinstance(store, dict):
+                store = {}
+                self.settings["trusted_project_hooks"] = store
+            entry = store.get(workspace)
+            if not isinstance(entry, dict):
+                entry = {}
+                store[workspace] = entry
+            entry[kind] = digest
+            self.save_settings()
+            self.log(f"Project {label} trusted for {workspace} — "
+                     "they will run automatically until their "
+                     "content changes.")
+            return True
+        denials.add(denial_key)
+        self.log(f"Project {label} skipped for {workspace} — not "
+                 "trusted, so they did not run. They will be asked "
+                 "about again only if their content changes or "
+                 "Forge restarts.")
+        return False
+
+    def _ask_project_hooks_trust(self, kind: str, commands: list) -> bool:
+        """The owner's trust decision for project-supplied shell
+        commands. Mirrors _maintenance_approved's wiring exactly —
+        same ApprovalDialog on the GUI thread, same phone-deck bridge
+        (the deck's /approve answers it, phone Stop = denial) — but
+        no worker is waiting and there is no remember button: the
+        approval IS the trust grant, recorded by the caller as a
+        content hash, not as a permission rule."""
+        label = "hooks" if kind == "hooks" else "verify commands"
+        listing = "\n".join(str(c) for c in commands)
+        target = f"{len(commands)} project {label} — {Path(str(self.workspace)).name}"
+        description = (
+            f"This project wants Forge to run these shell commands "
+            f"automatically as its {label} (on session start, around "
+            f"tool calls, and after edits — without asking each "
+            f"time):\n\n{listing}\n\n"
+            f"Approve only if you trust this project. Approving "
+            f"remembers this exact content for this project — any "
+            f"later edit asks again. Declining means they do not "
+            f"run.")
+        dialog = ApprovalDialog(self, "CODE FORGE shell",
+                                f"project {label}", target, description,
+                                show_remember=False)
+        self.deck.set_state(pending={"tool": f"project {label}",
+                                     "target": target,
+                                     "description": description[:1500]})
+
+        def _phone(ok):
+            if dialog.isVisible():
+                self.log("📱 Project trust answered from the phone.")
+                if ok:
+                    dialog._approve()
+                else:
+                    dialog.reject()
+
+        self.deck.approval_answered.connect(_phone)
+        _stop_as_deny = lambda: _phone(False)  # noqa: E731 — phone Stop = denial, as with tool approvals
+        self.deck.stop_requested.connect(_stop_as_deny)
+        try:
+            return dialog.exec() == QDialog.Accepted and dialog.approved
+        finally:
+            try:
+                self.deck.approval_answered.disconnect(_phone)
+                self.deck.stop_requested.disconnect(_stop_as_deny)
+            except Exception:
+                pass
+            self.deck.set_state(pending=None)
+
+    # ---------- settings ----------
+    def load_settings(self):
+        existed = DB_FILE.exists()
+        try:
+            settings = json.loads(DB_FILE.read_text())
+        except Exception:
+            if existed:
+                # Sweep R40: a settings file that exists but does
+                # not parse must not be silently treated as empty —
+                # the first save would then overwrite the owner's
+                # data with defaults, unrecoverably. Move it aside;
+                # the owner (or a future repair) can still read it.
+                try:
+                    DB_FILE.replace(
+                        DB_FILE.with_name(DB_FILE.name + ".corrupt"))
+                except OSError:
+                    pass
+            return {}
+        if not isinstance(settings, dict):
+            # Sweep R40: a hand-edited file holding a list or a
+            # scalar is not a settings dict — the old code returned
+            # it as-is and every later settings.get raised at
+            # startup. Preserve it like a corrupt file and start
+            # from defaults.
+            try:
+                DB_FILE.replace(
+                    DB_FILE.with_name(DB_FILE.name + ".corrupt"))
+            except OSError:
+                pass
+            return {}
+        if isinstance(settings, dict):
+            # Audit B20: the residency default lives with the settings
+            # so it is visible in settings.json and the owner can
+            # override it there (no dialog field — the send path reads
+            # it with the same "30m" fallback).
+            settings.setdefault("keep_alive", "30m")
+            # Audit B22: the thread-count default likewise — 0 means
+            # Ollama decides; the send path omits the option entirely
+            # at 0, so payloads stay exactly as they were pre-knob.
+            settings.setdefault("num_thread", 0)
+            # Min-p: the unset state is None (null in settings.json),
+            # NOT 0 — 0.0 is a real value the owner may mean
+            # (MiniCPM5's recommended min_p). Seeded so the key is
+            # visible in settings.json; while it is null the send
+            # path omits the option entirely, so payloads stay
+            # exactly as they were before the knob existed.
+            settings.setdefault("min_p", None)
+            # Audit C31: dictation — the whisper model stays resident
+            # between clips (True) instead of reloading per clip, and
+            # the microphone is picked by description ("" = the
+            # system default input). Both are read at use time, so
+            # editing settings.json takes effect without a restart.
+            settings.setdefault("dictation_keep_model", True)
+            settings.setdefault("mic_device", "")
+            # Audit D38: shadow checkpoints default OFF — the key
+            # lives with the settings so it is visible in
+            # settings.json; the Checkpoints dialog's mode combo is
+            # the owner's switch, and the send path reads it per
+            # turn, so a change takes effect on the next turn.
+            settings.setdefault("shadow_checkpoints", "off")
+        return settings
+
+    def save_settings(self):
+        self.settings["workspace"] = self.workspace
+        self.settings["projects"] = self.projects
+        # Atomic write (temp file in the same folder + replace): a
+        # crash mid-save can never leave a torn settings.json behind.
+        # Sweep R41: the temp name is unique to this process (two
+        # writers no longer share one .tmp path), the content is
+        # flushed and fsynced before the replace (a power cut right
+        # after save cannot leave an empty file the atomic replace
+        # made official), and a failure is logged and cleaned up
+        # instead of raising into whatever UI action saved.
+        # S2: the write goes through the shared private writer —
+        # the same unique temp, fsync and failure cleanup, plus
+        # the 0600 owner-only mode on settings.json.
+        try:
+            fileperms.write_text_private(
+                DB_FILE, json.dumps(self.settings, indent=2))
+        except Exception as exc:
+            log = getattr(self, "log", None)
+            if callable(log):
+                log(f"Settings could not be saved: {exc}")
+
+    def apply_density(self):
+        """G5: (re)apply the global stylesheet for the saved density
+        ("density" setting; Comfortable when unset or unknown).
+        Called at startup and whenever Settings saves, so a density
+        change reaches the running app with no restart."""
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(
+                build_style(self.settings.get("density", "comfortable")))
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = QWidget()
+        root_lay = QVBoxLayout(root); root_lay.setContentsMargins(0, 0, 0, 0); root_lay.setSpacing(0)
+        # --- Note 24: top bar. The hamburger lives OUTSIDE the sidebar so
+        # it stays reachable when the sidebar is collapsed away. ---
+        topbar = QFrame(); topbar.setObjectName("header"); topbar.setFixedHeight(42)
+        tl = QHBoxLayout(topbar); tl.setContentsMargins(10, 4, 10, 4); tl.setSpacing(8)
+        self.hamburger_btn = QPushButton("☰")
+        self.hamburger_btn.setObjectName("topbarBtn")
+        self.hamburger_btn.setToolTip("Collapse / expand the sidebar")
+        self.hamburger_btn.clicked.connect(self._toggle_sidebar)
+        tl.addWidget(self.hamburger_btn)
+        self.menu_btn = QPushButton("Menu")
+        self.menu_btn.setObjectName("topbarBtn")
+        self.menu_btn.setToolTip("Actions — new chat, settings, customize, schedule, phone deck, rescan, update, panels")
+        self._build_menu()
+        tl.addWidget(self.menu_btn)
+        self.view_btn = QPushButton("View")
+        self.view_btn.setObjectName("topbarBtn")
+        self.view_btn.setToolTip("View — every window and panel the Forge can open, in one menu")
+        self._build_view_menu()
+        tl.addWidget(self.view_btn)
+        # Owner's UI correction (2026-11-08): the rolodex strip is
+        # gone — the bar holds only the hamburger, Menu, and View,
+        # and the stretch keeps them at natural width on the left.
+        tl.addStretch(1)
+        root_lay.addWidget(topbar)
+        # Resizable panels (owner's order, 2026-11-10): the three
+        # columns ride a QSplitter — the sidebar and the inspector
+        # used to be setFixedWidth, so the owner could not widen a
+        # panel to read what was in it. The handle is 6px so it can
+        # actually be grabbed; it paints with the surface_splitter
+        # token, and the panels keep their own rim borders, so at
+        # the default sizes the seam reads as the same hairline it
+        # always was. Widths persist through forge/layout.py and
+        # are applied in _apply_layout.
+        body = QSplitter(Qt.Horizontal)
+        body.setHandleWidth(6)
+        body.setChildrenCollapsible(False)
+        self.main_splitter = body
+        root_lay.addWidget(body, 1)
+        # --- sidebar: projects + conversations ---
+        sidebar = QFrame(); sidebar.setObjectName("sidebar"); sidebar.setMinimumWidth(180)
+        self.sidebar = sidebar
+        sl = QVBoxLayout(sidebar); sl.setContentsMargins(14, 18, 14, 14); sl.setSpacing(9)
+        brand = QLabel("CODE FORGE"); brand.setObjectName("brand")
+        spark = QLabel(); spark.setPixmap(_brand_spark_pixmap())
+        brand_row = QWidget()
+        brand_lay = QHBoxLayout(brand_row)
+        brand_lay.setContentsMargins(0, 0, 0, 0); brand_lay.setSpacing(8)
+        brand_lay.addWidget(brand); brand_lay.addWidget(spark); brand_lay.addStretch(1)
+        sl.addWidget(brand_row)
+        sub = QLabel("v2.5 · LOCAL AGENT ENVIRONMENT"); sub.setObjectName("muted"); sl.addWidget(sub)
+        stamp = QLabel("B/N/B STUDIO · EST. 2026"); stamp.setObjectName("stamp"); sl.addWidget(stamp)
+        sl.addSpacing(16)
+        # Note 24: Projects folds as an accordion section.
+        proj_sec = AccordionSection("projects", "[01] PROJECTS")
+        self.project_list = QVBoxLayout(); self.project_list.setSpacing(4); proj_sec.body_layout.addLayout(self.project_list)
+        self.add_project_btn = QPushButton("＋   Add project folder")
+        self.add_project_btn.setObjectName("nav"); self.add_project_btn.clicked.connect(self.add_project)
+        proj_sec.body_layout.addWidget(self.add_project_btn)
+        self.templates_btn = QPushButton("＋   New project from template")
+        self.templates_btn.setObjectName("nav"); self.templates_btn.clicked.connect(self.open_templates_window)
+        proj_sec.body_layout.addWidget(self.templates_btn)
+        self.clone_btn = QPushButton("⧉   Create dev clone")
+        self.clone_btn.setObjectName("nav"); self.clone_btn.clicked.connect(self.create_dev_clone)
+        proj_sec.body_layout.addWidget(self.clone_btn)
+        self.promote_btn = QPushButton("⬆   Promote dev → live…")
+        self.promote_btn.setObjectName("nav"); self.promote_btn.clicked.connect(self.promote_dev)
+        proj_sec.body_layout.addWidget(self.promote_btn)
+        sl.addWidget(proj_sec)
+        sl.addSpacing(8)
+        # Note 24 amendment: the secondary action wall (Scheduled runs,
+        # Update & restart, Agent settings) moved into the hamburger menu —
+        # that diet is what pays for the chat list's room. New Chat and
+        # Fork are PINNED under the section header: folding the list can
+        # never hide them. The list itself lives in its own scroll area
+        # holding all of the sidebar's stretch, so every past chat stays
+        # reachable at any window size.
+        conv_sec = AccordionSection("conversations", "[02] CONVERSATIONS")
+        pinned = QWidget(); pin_lay = QVBoxLayout(pinned)
+        pin_lay.setContentsMargins(0, 0, 0, 0); pin_lay.setSpacing(9)
+        self.new_btn = QPushButton("＋   New conversation")
+        self.new_btn.setObjectName("nav"); self.new_btn.clicked.connect(self.new_chat); pin_lay.addWidget(self.new_btn)
+        self.fork_btn = QPushButton("⑂   Fork conversation…")
+        self.fork_btn.setObjectName("nav"); self.fork_btn.clicked.connect(self.fork_conversation); pin_lay.addWidget(self.fork_btn)
+        conv_sec.set_pinned(pinned)
+        # Audit C35: with the list reaching 200 chats, finding one
+        # needs a filter — typing re-renders the list from a store
+        # search (title + message text) instead of recent().
+        self.history_search = QLineEdit()
+        self.history_search.setObjectName("historySearch")
+        self.history_search.setPlaceholderText("Search conversations…")
+        self.history_search.setClearButtonEnabled(True)
+        self.history_search.textChanged.connect(lambda _text: self.refresh_history())
+        conv_sec.body_layout.addWidget(self.history_search)
+        self.history_scroll = QScrollArea(); self.history_scroll.setObjectName("historyScroll")
+        self.history_scroll.setWidgetResizable(True)
+        self.history_scroll.setFrameShape(QFrame.NoFrame)
+        self.history_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.history_scroll.setMinimumHeight(90)
+        history_content = QWidget(); history_content.setObjectName("historyContent")
+        self.history_list = QVBoxLayout(history_content); self.history_list.setSpacing(4)
+        self.history_list.setContentsMargins(0, 0, 0, 0)
+        self.history_scroll.setWidget(history_content)
+        conv_sec.body_layout.addWidget(self.history_scroll, 1)
+        sl.addWidget(conv_sec, 1)
+        self.workspace_label = QLabel(); self.workspace_label.setWordWrap(True)
+        self.workspace_label.setObjectName("muted"); sl.addWidget(self.workspace_label)
+        self.settings_btn = QPushButton("⚙   Agent settings")
+        self.settings_btn.setObjectName("nav"); self.settings_btn.clicked.connect(self.open_settings)
+        sl.addWidget(self.settings_btn)
+        self.main_splitter.addWidget(sidebar)
+        self.accordions = {"projects": proj_sec, "conversations": conv_sec}
+        # --- center ---
+        center = QWidget(); center.setMinimumWidth(320); cl = QVBoxLayout(center); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+        header = QFrame(); header.setObjectName("header"); header.setFixedHeight(74)
+        hl = QHBoxLayout(header); hl.setContentsMargins(20, 8, 20, 8)
+        title = QLabel("AGENT WORKSPACE"); title.setObjectName("section"); hl.addWidget(title)
+        hl.addSpacing(18)
+        gauge_box = QVBoxLayout(); gauge_box.setSpacing(3)
+        ram_row = QHBoxLayout()
+        ram_lab = QLabel("RAM"); ram_lab.setObjectName("stamp"); ram_row.addWidget(ram_lab)
+        self.ram_bar = QProgressBar(); self.ram_bar.setFixedWidth(120); self.ram_bar.setRange(0, 100)
+        ram_row.addWidget(self.ram_bar)
+        self.ram_text = QLabel("—"); self.ram_text.setObjectName("muted"); ram_row.addWidget(self.ram_text)
+        gauge_box.addLayout(ram_row)
+        cpu_row = QHBoxLayout()
+        cpu_lab = QLabel("CPU"); cpu_lab.setObjectName("stamp"); cpu_row.addWidget(cpu_lab)
+        self.cpu_bar = QProgressBar(); self.cpu_bar.setFixedWidth(120); self.cpu_bar.setRange(0, 100)
+        cpu_row.addWidget(self.cpu_bar)
+        self.cpu_text = QLabel("—"); self.cpu_text.setObjectName("muted"); cpu_row.addWidget(self.cpu_text)
+        gauge_box.addLayout(cpu_row)
+        hl.addLayout(gauge_box)
+        hl.addStretch()
+        loaded_box = QVBoxLayout()
+        loaded_lab = QLabel("LOADED MODEL"); loaded_lab.setObjectName("section"); loaded_box.addWidget(loaded_lab)
+        self.loaded_label = QLabel("none"); self.loaded_label.setStyleSheet(f"color:{TOKENS['text_base']};font-weight:700;font-size:12px;"); loaded_box.addWidget(self.loaded_label)
+        hl.addLayout(loaded_box)
+        hl.addSpacing(16)
+        self.model_combo = QComboBox(); self.model_combo.setMinimumWidth(200)
+        self.model_combo.setToolTip("Select an installed Ollama model")
+        hl.addWidget(self.model_combo)
+        # H1: the privacy badge — where THIS conversation's
+        # messages are processed, read off the same combo text
+        # persist_conversation saves as the conversation's model.
+        # Static text between changes: it updates only when the
+        # combo's text changes (a conversation load restoring its
+        # model, a pick, a models refresh) — no timer, no polling.
+        self.privacy_badge = QLabel("LOCAL ONLY")
+        self.privacy_badge.setToolTip(
+            "Where this conversation's messages are processed. "
+            "The Privacy window (View menu) shows the full picture.")
+        hl.addWidget(self.privacy_badge)
+        self.model_combo.currentTextChanged.connect(
+            lambda _text: self._update_privacy_badge())
+        self._update_privacy_badge()
+        self.mode_combo = QComboBox(); self.mode_combo.setMinimumWidth(104)
+        self.mode_combo.addItems(["Code", "Plan", "Design", "Architect", "Review", "Ask", "Write", "Research"])
+        self.mode_combo.setToolTip("Permission mode — Code: full tools · Plan: read + write the plan, no building · "
+                                   "Design: mockups/prototypes (HTML/CSS/SVG/MD), no program logic · "
+                                   "Architect: read + Markdown docs · Review: critique only, may write the report · "
+                                   "Ask: read-only (write tools are not even offered, so requests run shorter) · "
+                                   "Write: the document workshop — read/write/copy/edit any file in the project, no commands · "
+                                   "Research: gated deep research — a plan you approve, then budgeted browsing, reports in .forge/research/")
+        saved_mode = str(self.settings.get("mode", "code")).lower()
+        self.mode_combo.setCurrentText({m: m.capitalize() for m in perm_mod.MODES}.get(saved_mode, "Code"))
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        hl.addWidget(self.mode_combo)
+        self.council_check = QCheckBox("Council")
+        self.council_check.setToolTip("Council — when on for a turn, the finished work goes to the Reviewer Seat "
+                                      "(Agent settings → Reviewer model) for one critique and the driver revises "
+                                      "once. Off by default; costs one extra generation per turn.")
+        self.council_check.setChecked(bool(self.settings.get("council", False)))
+        self.council_check.toggled.connect(
+            lambda on: (self.settings.__setitem__("council", on), self.save_settings(),
+                        self.log("Council: on — turns get one review + one revision" if on else "Council: off")))
+        hl.addWidget(self.council_check)
+        # Connection is a LIGHT, not a sentence (owner's call): orange = connected, red = not.
+        self.connection = QLabel("●")
+        self.connection.setStyleSheet(f"color:{TOKENS['text_muted']};font-size:17px;")
+        self.connection.setToolTip("Checking Ollama…")
+        hl.addWidget(self.connection)
+        cl.addWidget(header)
+        # Chat tabs (owner directive, 2026-11-08 — Antigravity-style
+        # tabs): open conversations live as tabs above the chat.
+        # Click switches conversation, + opens a new chat tab, ×
+        # closes the tab — closing never deletes the conversation,
+        # which stays in the history list as always.
+        tab_row = QWidget(); tab_layout = QHBoxLayout(tab_row)
+        tab_layout.setContentsMargins(0, 0, 0, 0); tab_layout.setSpacing(4)
+        self.chat_tabs = QTabBar()
+        self.chat_tabs.setTabsClosable(True)
+        self.chat_tabs.setExpanding(False)
+        self.chat_tabs.setDocumentMode(True)
+        self.chat_tabs.currentChanged.connect(self._on_chat_tab_changed)
+        self.chat_tabs.tabCloseRequested.connect(self._close_chat_tab)
+        tab_layout.addWidget(self.chat_tabs, 1)
+        self.new_tab_btn = QPushButton("＋")
+        self.new_tab_btn.setToolTip("New conversation in a new tab")
+        self.new_tab_btn.clicked.connect(self._new_chat_tab)
+        tab_layout.addWidget(self.new_tab_btn)
+        # Item #54: the side-chat door sits with the conversation
+        # controls — a temporary fork of the current conversation
+        # for a quick question, discarded on close.
+        self.side_chat_btn = QPushButton("⑂ Side chat")
+        self.side_chat_btn.setToolTip("Open a side chat — a temporary fork of this conversation "
+                                      "for a quick question. It never saves, and closing it "
+                                      "discards it: nothing merges back into the main thread.")
+        self.side_chat_btn.clicked.connect(self.open_side_chat)
+        tab_layout.addWidget(self.side_chat_btn)
+        cl.addWidget(tab_row)
+        # Item #54: the side-chat banner — visible only while a side
+        # chat is open, naming the state and carrying its close (✕).
+        self.side_bar = QFrame()
+        self.side_bar.setStyleSheet(f"QFrame{{background:{TOKENS['surface_glass_bottom']};border-top:1px solid {TOKENS['rim']};border-bottom:1px solid {TOKENS['rim']};}}")
+        side_bar_lay = QHBoxLayout(self.side_bar)
+        side_bar_lay.setContentsMargins(16, 4, 8, 4)
+        side_bar_label = QLabel("Side chat — temporary, closing discards it")
+        side_bar_label.setObjectName("stamp")
+        side_bar_lay.addWidget(side_bar_label)
+        side_bar_lay.addStretch(1)
+        self.side_close_btn = QPushButton("✕")
+        self.side_close_btn.setToolTip("Close the side chat and discard it")
+        self.side_close_btn.clicked.connect(self.close_side_chat)
+        side_bar_lay.addWidget(self.side_close_btn)
+        self.side_bar.setVisible(False)
+        cl.addWidget(self.side_bar)
+        self._chat_tab_ids = []
+        self._chat_tab_sync = False
+        self._sync_chat_tabs()
+        self.chat = QTextBrowser(); self.chat.setOpenExternalLinks(True)
+        # Resend / Reply (owner request, 2026-11-10): the rendered
+        # bubbles carry per-message action anchors (forge-resend:N
+        # / forge-reply:N), so link clicks route through the
+        # window; real web links are re-opened by the handler itself.
+        self.chat.setOpenLinks(False)
+        self.chat.anchorClicked.connect(self._on_chat_anchor)
+        self.chat.setMaximumWidth(920)
+        chat_row = QWidget(); chat_layout = QHBoxLayout(chat_row)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.addStretch(1); chat_layout.addWidget(self.chat, 3); chat_layout.addStretch(1)
+        cl.addWidget(chat_row, 1)
+        self.receipt_bar = QLabel("🧾  Receipts from the shell will appear here — the model cannot write these.")
+        self.receipt_bar.setObjectName("stamp"); self.receipt_bar.setWordWrap(True)
+        self.receipt_bar.setStyleSheet(f"padding:6px 16px;background:{TOKENS['surface_glass_bottom']};border-top:1px solid {TOKENS['rim']};")
+        cl.addWidget(self.receipt_bar)
+        # Note 12's plan gate, promoted (owner directive, 2026-11-08):
+        # the plan is a WINDOW now (PlanWindow), not a bottom dock —
+        # same checklist, same Approve / Edit / Kill gate, aliased
+        # here so every existing caller reads the same widgets. It
+        # opens on its own when a plan draft lands (on_plan_ready).
+        self.plan_win = PlanWindow(self)
+        self.plan_list = self.plan_win.plan_list
+        self.goldfish_view = self.plan_win.goldfish_view
+        self.document_view = self.plan_win.document_view
+        self.plan_approve_btn = self.plan_win.plan_approve_btn
+        self.plan_edit_btn = self.plan_win.plan_edit_btn
+        self.plan_kill_btn = self.plan_win.plan_kill_btn
+        self.plan_comment_btn = self.plan_win.plan_comment_btn
+        self.plan_comment_edit = self.plan_win.plan_comment_edit
+        # The other modes get their own rooms too (same
+        # directive): one window each, created hidden and opened
+        # when the mode is picked — each a subclass built to its
+        # mode's function (2026-11-10 upgrade: Code's room with
+        # its Changes tab of walkthroughs, Design with preview +
+        # canvas, Architect with outline, Review with findings
+        # actions, Ask with open-source, Research with plans/
+        # reports + sources). Write joins with its Editor pane.
+        self.mode_windows = {
+            "code": CodeWindow(self, "code"),
+            "design": DesignWindow(self, "design"),
+            "architect": ArchitectWindow(self, "architect"),
+            "review": ReviewWindow(self, "review"),
+            "ask": AskWindow(self, "ask"),
+            "research": ResearchWindow(self, "research"),
+        }
+        self.mode_windows["write"] = WriteWindow(self, "write")
+        # The artifacts room (2026-11-08): plans, designs, reviews
+        # and walkthroughs as first-class records, read here.
+        self.artifacts_win = ArtifactsWindow(self)
+        # G2 (2026-11-09): the sessions room — every open chat in
+        # one list with its state, read-only over the tab/store
+        # data this window already keeps.
+        self.sessions_win = SessionsWindow(self)
+        # H1 (2026-11-09): the privacy room — the guarantee, what
+        # can leave this PC (from the live connector config),
+        # where the data lives, and the delete controls.
+        self.privacy_win = PrivacyWindow(self)
+        # H5 (2026-11-09): the session notes room and the "What
+        # the AI sees" room — the conversation's durable memory
+        # made visible: the notes file as an editor, and the exact
+        # context the next request carries as a read-only view.
+        self.notes_win = NotesWindow(self)
+        self.sees_win = WhatTheAiSeesWindow(self)
+        # H4 (2026-11-09): the models room — fit badges and
+        # provenance over the merged tags list. _models_data is
+        # the raw list _apply_models most recently landed (kept
+        # beside the combo, which only holds names); it exists
+        # before the room is built because the room reads it in
+        # its first refresh.
+        self._models_data = []
+        self.models_win = ModelsWindow(self)
+        # Item #64: mission control — every running workstream in
+        # one room (see MissionControlWindow). Created hidden like
+        # the other rooms; opened from the menus / palette.
+        self.mission_win = MissionControlWindow(self)
+        # Item C4: the templates shelf (see TemplatesWindow).
+        # Created hidden like the other rooms; opened from the
+        # projects section / menus / palette.
+        self.templates_win = TemplatesWindow(self)
+        # Item C8: the testing room — a live view over the run
+        # machinery (see TestingWindow). Created hidden like the
+        # other rooms; opened from the menus / palette.
+        self.testing_win = TestingWindow(self)
+        # Provider chat (owner ask, 2026-11-09): the hosted-model
+        # conversation that runs alongside the bench — created
+        # hidden like the other rooms; opened from the menus /
+        # palette. It owns its history and never touches the bench's.
+        self.provider_chat_win = ProviderChatWindow(self)
+        # Item C9: the turn timeline room — this conversation's
+        # turns with their time and estimated tokens, off the
+        # event log's own records (see TimelineWindow).
+        self.timeline_win = TimelineWindow(self)
+        # Item C5: the design canvas room — the active project's
+        # code-linked board (see DesignCanvasWindow). Created
+        # hidden like the other rooms; opened from the menus /
+        # palette.
+        self.design_canvas_win = DesignCanvasWindow(self)
+        # Skill/plugin editor windows (window rule, 2026-11-09):
+        # one room per item being created/edited, opened from
+        # Customize's New…/Edit… buttons. Edit windows are kept per
+        # folder name so re-opening raises the same room; New
+        # windows are tracked in a plain list (several may be open).
+        self._skill_editors = {}
+        self._plugin_editors = {}
+        self._new_editors = []
+        # Note 13A + Item 16 + Item #50: the run surface is its own
+        # window (RunWindow) — per-project since #50, loading the
+        # active project's runnable files — created hidden and
+        # opened via open_run_window(). The ForgeWindow aliases its
+        # controls, so the run machinery (start / stop / stream /
+        # process-group kill) reads the same from every caller.
+        self.run_win = RunWindow(self)
+        self.run_status = self.run_win.run_status
+        self.run_file_list = self.run_win.run_file_list
+        self.run_start_btn = self.run_win.run_start_btn
+        self.run_stop_btn = self.run_win.run_stop_btn
+        self.run_rescan_btn = self.run_win.run_rescan_btn
+        self.run_empty_label = self.run_win.run_empty_label
+        # G6: there is no single run pane to alias anymore — the
+        # surface is the block stack on run_win (blocks_text() is
+        # the transcript, clear_blocks() the clear).
+        # Item #51: the run surface's git panel controls, aliased
+        # the same way so callers and tests reach them on the window.
+        self.git_changes_list = self.run_win.git_changes_list
+        self.git_status_label = self.run_win.git_status_label
+        self.git_diff_view = self.run_win.git_diff_view
+        self.git_stage_btn = self.run_win.git_stage_btn
+        self.git_init_btn = self.run_win.git_init_btn
+        self.git_commit_message = self.run_win.git_commit_message
+        self.git_commit_btn = self.run_win.git_commit_btn
+        self.git_push_btn = self.run_win.git_push_btn
+        # The Debug room: single instance like the other rooms; the
+        # ONE debugger.DebugSession lives on this window (below,
+        # beside the run machinery), and both the room and the
+        # agent's debug_* tools drive it.
+        self.debug_win = DebugWindow(self)
+        compose = QFrame(); compose.setStyleSheet(f"QFrame{{background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {TOKENS['surface_compose_top']}, stop:1 {TOKENS['surface_compose_bottom']});border:1px solid {TOKENS['rim']};border-radius:{TOKENS['radius_compose']};}}")
+        compose_layout = QVBoxLayout(compose); compose_layout.setContentsMargins(16, 10, 16, 12); compose_layout.setSpacing(6)
+        self.image_label = QLabel(""); self.image_label.setObjectName("muted"); compose_layout.addWidget(self.image_label)
+        # Item #71: the attachment strip — pending attachments as
+        # thumbnails (images) / named chips (files) with a remove ✕
+        # each, directly above the input where the owner composes.
+        # Hidden while nothing is pending; _refresh_attach_strip
+        # rebuilds it from pending_attachments on every change. (The
+        # image_label above stays in the layout — the strip is now
+        # the attachment surface; nothing writes the label anymore.)
+        self.attach_strip = QWidget()
+        self.attach_strip_layout = QHBoxLayout(self.attach_strip)
+        self.attach_strip_layout.setContentsMargins(0, 0, 0, 0)
+        self.attach_strip_layout.setSpacing(8)
+        self.attach_strip.setVisible(False)
+        compose_layout.addWidget(self.attach_strip)
+        self.input = QTextEdit()
+        self.input.setPlaceholderText("Message your local agent…  (Enter to send · Shift+Enter for newline)")
+        self.input.setFixedHeight(88); self.input.installEventFilter(self)
+        compose_layout.addWidget(self.input)
+        self._setup_mention_completer()
+        # Note 14 #3: the context gauge — how full the model's window
+        # is, in the same gauge family as the header RAM/CPU bars
+        # (steel, amber when high, red when nearly full). The numbers
+        # are ESTIMATES counted locally from characters, and every
+        # label says so; the gauge only ever reports — it holds
+        # nothing back. Right-click offers a manual fold.
+        ctx_row = QHBoxLayout()
+        ctx_lab = QLabel("CONTEXT"); ctx_lab.setObjectName("stamp"); ctx_row.addWidget(ctx_lab)
+        self.ctx_bar = QProgressBar(); self.ctx_bar.setRange(0, 100)
+        self.ctx_bar.setTextVisible(False)
+        self.ctx_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ctx_bar.customContextMenuRequested.connect(self._context_gauge_menu)
+        ctx_row.addWidget(self.ctx_bar, 1)
+        self.ctx_text = QLabel("~0 / 8,192 tokens"); self.ctx_text.setObjectName("muted")
+        ctx_row.addWidget(self.ctx_text)
+        compose_layout.addLayout(ctx_row)
+        ember_row = QHBoxLayout()
+        self.ember = EmberWidget(); ember_row.addWidget(self.ember, 1)
+        self.ember_label = QLabel("COLD"); self.ember_label.setObjectName("stamp"); ember_row.addWidget(self.ember_label)
+        compose_layout.addLayout(ember_row)
+        row = QHBoxLayout()
+        self.attach_btn = QPushButton("＋ Attach"); self.attach_btn.clicked.connect(self.attach_file); row.addWidget(self.attach_btn)
+        self.mic_btn = QPushButton("🎙 Dictate"); self.mic_btn.clicked.connect(self.toggle_dictation); row.addWidget(self.mic_btn)
+        self._recorder = None
+        mic_ok, mic_why = voice_mod.available()
+        if not mic_ok:
+            self.mic_btn.setEnabled(False)
+            self.mic_btn.setToolTip("Voice input unavailable: " + mic_why)
+        self.stream_label = QLabel("LOCAL INFERENCE · TOOL CALLS REQUIRE APPROVAL")
+        self.stream_label.setObjectName("muted"); row.addWidget(self.stream_label); row.addStretch()
+        self.stop_btn = QPushButton("Stop"); self.stop_btn.setEnabled(False); self.stop_btn.clicked.connect(self.stop_generation)
+        row.addWidget(self.stop_btn)
+        self.send_btn = QPushButton("Send  ↗"); self.send_btn.setObjectName("primary"); self.send_btn.clicked.connect(lambda: self.send_message())
+        row.addWidget(self.send_btn)
+        compose_layout.addLayout(row)
+        cl.addWidget(compose)
+        self.main_splitter.addWidget(center)
+        # --- inspector ---
+        inspector = QFrame(); inspector.setObjectName("inspector"); inspector.setMinimumWidth(200)
+        il = QVBoxLayout(inspector); il.setContentsMargins(14, 18, 14, 14); il.setSpacing(10)
+        # Note 24: Agent Control folds as an accordion section; its action
+        # buttons (Customize, Phone deck, Rescan) moved into the hamburger
+        # menu with the rest of the diet.
+        control_sec = AccordionSection("agent_control", "[03] AGENT CONTROL")
+        self.agent_state = QLabel("●  IDLE"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
+        control_sec.body_layout.addWidget(self.agent_state)
+        control_sec.body_layout.addSpacing(8)
+        self.ext_counts = QLabel(); self.ext_counts.setWordWrap(True); self.ext_counts.setObjectName("muted")
+        control_sec.body_layout.addWidget(self.ext_counts)
+        self.watch_check = QCheckBox("Watch for AI! / AI? comments in project files")
+        self.watch_check.setToolTip("When you save a file with a comment ending in AI! (do it) or AI? (answer it), "
+                                    "the Forge picks it up as a task — write in your editor, the agent works here.")
+        self.watch_check.setChecked(bool(self.settings.get("watch_ai", False)))
+        self.watch_check.toggled.connect(lambda on: (self.settings.__setitem__("watch_ai", on), self.save_settings(),
+                                                     self.log("AI-comment watch " + ("ON — write AI! in a file and save." if on else "off."))))
+        control_sec.body_layout.addWidget(self.watch_check)
+        self.deck_url = QLabel("")
+        self.deck_url.setWordWrap(True)
+        self.deck_url.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        control_sec.body_layout.addWidget(self.deck_url)
+        il.addWidget(control_sec)
+        self.accordions["agent_control"] = control_sec
+        # Note 24: the activity log is a DOCK — closable from the dock
+        # toolbar or the menu; closed means out of the layout entirely.
+        activity_dock = QWidget()
+        al = QVBoxLayout(activity_dock); al.setContentsMargins(0, 0, 0, 0); al.setSpacing(10)
+        t = QLabel("ACTIVITY LOG"); t.setObjectName("section"); al.addWidget(t)
+        self.log_filter = QLineEdit(); self.log_filter.setPlaceholderText("Filter log…")
+        self.log_filter.textChanged.connect(self._apply_log_filter); al.addWidget(self.log_filter)
+        self.activity = QPlainTextEdit(); self.activity.setReadOnly(True); self.activity.setMaximumBlockCount(400)
+        self.activity.setPlaceholderText("Agent events will appear here."); al.addWidget(self.activity, 1)
+        self._log_lines: list[str] = []
+        export_btn = QPushButton("Export session summary"); export_btn.clicked.connect(self.export_summary)
+        al.addWidget(export_btn)
+        clear_btn = QPushButton("Clear activity"); clear_btn.clicked.connect(self._clear_log); al.addWidget(clear_btn)
+        il.addWidget(activity_dock, 1)
+        self.activity_dock = activity_dock
+        self.main_splitter.addWidget(inspector)
+        self.inspector = inspector
+        # Only the center grows/shrinks with the window; the side
+        # panels hold the widths the owner left them at. Dragging a
+        # handle saves (debounced — a drag fires splitterMoved per
+        # pixel, and a settings write per pixel would be silly).
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(2, 0)
+        self._split_save_timer = QTimer(self)
+        self._split_save_timer.setSingleShot(True)
+        self._split_save_timer.setInterval(400)
+        self._split_save_timer.timeout.connect(self._save_layout)
+        self.main_splitter.splitterMoved.connect(
+            lambda *_: self._split_save_timer.start())
+        self.setCentralWidget(root)
+        self.setStatusBar(QStatusBar())
+        self.statusBar().showMessage("Ready · Local-first · Ollama")
+        # Note 24: register the docks and restore the persisted layout —
+        # the bench reopens the way the owner left it.
+        self._docks = {}
+        self._dock_open = {"activity": True, "receipts": True}
+        self._register_dock("activity", self.activity_dock, il, stretch=1)
+        self._register_dock("receipts", self.receipt_bar, cl)
+        for sec in self.accordions.values():
+            sec.toggled.connect(lambda key, open_: self._save_layout())
+        self._apply_layout()
+        # Dock toggles also ride keyboard shortcuts, and Ctrl+K
+        # opens the command palette (Note 14 item 5) over all of it.
+        QShortcut(QKeySequence("Ctrl+Shift+A"), self).activated.connect(
+            lambda: self.set_dock_open("activity", not self._dock_open.get("activity", True)))
+        QShortcut(QKeySequence("Ctrl+Shift+R"), self).activated.connect(
+            lambda: self.set_dock_open("receipts", not self._dock_open.get("receipts", True)))
+        QShortcut(QKeySequence("Ctrl+Shift+P"), self).activated.connect(
+            self.open_plan_window)
+        QShortcut(QKeySequence("Ctrl+Shift+B"), self).activated.connect(
+            self.open_run_window)
+        QShortcut(QKeySequence("Ctrl+Shift+U"), self).activated.connect(self.open_ui_builder)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self.open_snapshots)
+        QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(self.open_command_palette)
+        QShortcut(QKeySequence("Ctrl+B"), self).activated.connect(self._toggle_sidebar)
+        self._refresh_panels()
+        self.refresh_projects()
+        self.refresh_history()
+        self._load_seat_file()
+
+    # ---------- Note 24: collapsible shell ----------
+    def _build_menu(self):
+        """The hamburger MENU holds the sidebar's old button wall (the
+        diet that pays for the chat list's room) plus the dock toggles.
+        Nothing that existed as a button is lost — it lives here."""
+        menu = QMenu(self)
+        self.act_new = menu.addAction("＋   New conversation", self.new_chat)
+        self.act_fork = menu.addAction("⑂   Fork conversation…", self.fork_conversation)
+        menu.addSeparator()
+        self.act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
+        self.act_customize = menu.addAction("⚒   Customize — skills · plugins · connectors", self.open_customize)
+        self.act_schedule = menu.addAction("⏰   Scheduled runs…", self.open_schedule)
+        self.act_deck = menu.addAction("📱   Phone deck: OFF", self._toggle_deck)
+        self.act_welcome = menu.addAction("☕   Donate / Support Code Forge…", self.show_welcome)
+        self.act_welcome.setToolTip("Code Forge is free — support its development via the owner's Cash App")
+        self.act_deck_qr = menu.addAction("📱   Deck QR code…", self._show_deck_link)
+        self.act_deck.setToolTip("Serve a local-network phone page: watch the agent, approve from your "
+                                 "phone, send prompts. Token in the URL — shown only here.")
+        self.act_rescan = menu.addAction("↻   Rescan skills & plugins", self.rescan_extensions)
+        self.act_rescan.setToolTip("Pick up skills/plugins created since launch — including ones the agent just wrote (Note 18)")
+        self.act_builder = menu.addAction("🖌   UI builder…", self.open_ui_builder)
+        self.act_builder.setToolTip("Note 13B: lay out a window visually — live preview + exportable PySide6 code")
+        self.act_snapshots = menu.addAction("📸   Snapshots…", self.open_snapshots)
+        self.act_snapshots.setToolTip("Note 14 item 1: git restore points for the current project — take one, roll back")
+        self.act_checkpoints = menu.addAction("🧷   Checkpoints…", self.open_checkpoints)
+        self.act_checkpoints.setToolTip("Audit D38: shadow restore points kept OUTSIDE the project — per write step or per turn, for any project")
+        self.act_bench = menu.addAction("🏁   Forge Bench…", self.open_bench)
+        self.act_bench.setToolTip("Audit D37: fifteen fixed, test-scored tasks against any installed model — the seat race, settled with numbers")
+        self.act_recipes = menu.addAction("📋   Recipes…", self.open_recipes)
+        self.act_recipes.setToolTip("Audit D41: parameterized prompt files from the data folder's recipes/ — run one with fresh values")
+        self.act_update = menu.addAction("⬆   Update & restart…", self.apply_update)
+        self.act_maintenance = menu.addAction("🛠   Forge maintenance…", self.open_maintenance_window)
+        self.act_maintenance.setToolTip("Item #69: the dedicated cloud self-maintenance room — Groq/Gemini/EXAONE repair Forge itself in a guarded work copy; you approve any install")
+        menu.addSeparator()
+        self.act_dock_receipts = menu.addAction(
+            "🧾   Receipts panel",
+            lambda: self.set_dock_open("receipts", not self._dock_open.get("receipts", True)))
+        self.act_dock_receipts.setCheckable(True); self.act_dock_receipts.setChecked(True)
+        self.act_dock_activity = menu.addAction(
+            "📜   Activity log panel",
+            lambda: self.set_dock_open("activity", not self._dock_open.get("activity", True)))
+        self.act_dock_activity.setCheckable(True); self.act_dock_activity.setChecked(True)
+        self.act_plan_window = menu.addAction(
+            "🗂   Plan window", self.open_plan_window)
+        self.act_plan_window.setToolTip("The plan gate is its own window now, not a panel (owner directive, 2026-11-08)")
+        self.act_run_window = menu.addAction(
+            "▶   Run window", self.open_run_window)
+        self.act_debug_window = menu.addAction(
+            "🐞   Debug window", self.open_debug_window)
+        self.act_debug_window.setToolTip("Run a Python file under the debugger: breakpoints, step, inspect — the agent's debug tools drive the same session")
+        self.act_artifacts_window = menu.addAction(
+            "🧩   Artifacts window", self.open_artifacts_window)
+        self.act_sessions_window = menu.addAction(
+            "👥   Sessions window", self.open_sessions_window)
+        self.act_sessions_window.setToolTip("G2: every open chat in one list — state, model, project, last activity; click a row to go to it")
+        self.act_privacy_window = menu.addAction(
+            "🔒   Privacy window", self.open_privacy_window)
+        self.act_privacy_window.setToolTip("H1: what never leaves this PC, what can (per chat, your choice of model), where your data lives, and how to delete it")
+        self.act_notes_window = menu.addAction(
+            "📝   Session notes window", self.open_notes_window)
+        self.act_notes_window.setToolTip("H5: the current conversation's notes file — Forge's durable memory of plans, steps and folds, yours to read and edit")
+        self.act_sees_window = menu.addAction(
+            "👁   What the AI sees window", self.open_sees_window)
+        self.act_sees_window.setToolTip("H5: exactly what the next request sends the model — system prompt, folded summary, session notes, and the turns, in order")
+        self.act_models_window = menu.addAction(
+            "🤖   Models window", self.open_models_window)
+        self.act_models_window.setToolTip("H4: every model Forge can pick — its size, whether it fits this PC's RAM at your context setting, and where it came from; cloud models carry no fit badge")
+        self.act_mission_window = menu.addAction(
+            "🛰   Mission control", self.open_mission_control)
+        self.act_mission_window.setToolTip("Item #64: every running turn across conversations — what is running, what is parked at a gate, what finished")
+        self.act_templates_window = menu.addAction(
+            "🧰   Templates", self.open_templates_window)
+        self.act_templates_window.setToolTip("Item C4: start a new project from a template that ships with Code Forge")
+        self.act_testing_window = menu.addAction(
+            "🧪   Testing window", self.open_testing_window)
+        self.act_testing_window.setToolTip("Item C8: watch the project's tests run live — streamed output, the runner's own tally, and the session's run history")
+        self.act_provider_chat = menu.addAction(
+            "💬   Provider chat", self.open_provider_chat)
+        self.act_provider_chat.setToolTip("Talk with a hosted model (Groq / Gemini / EXAONE) alongside the bench — conversation only, no tools; the local agent keeps working untouched")
+        self.act_timeline_window = menu.addAction(
+            "🕰   Turn timeline", self.open_timeline)
+        self.act_timeline_window.setToolTip("Item C9: this conversation's completed turns — time, generations and estimated tokens per turn, with its soft budget state")
+        self.act_design_canvas = menu.addAction(
+            "🎨   Design canvas", self.open_design_canvas)
+        self.act_design_canvas.setToolTip("Item C5: the project's code-linked design board — frames that reference files, note cards, and variants with lineage; saved as .forge/design/canvas.json")
+        self.act_run_window.setToolTip("Note 13A + shell round 2: the run surface is its own window, not a panel")
+        self.main_menu = menu
+        self.menu_btn.setMenu(menu)
+
+    def _build_view_menu(self):
+        """Item 16: the VIEW menu — the one directory of everything
+        openable: the standalone windows and dialogs first, then the
+        three remaining panel toggles. Every entry calls the SAME
+        method the main menu and the palette already
+        call; the toggles' checked state is kept in sync by
+        set_dock_open, whichever door was used."""
+        menu = QMenu(self)
+        self.view_act_run = menu.addAction("▶   Run window", self.open_run_window)
+        self.view_act_debug = menu.addAction("🐞   Debug window", self.open_debug_window)
+        self.view_act_artifacts = menu.addAction("🧩   Artifacts window", self.open_artifacts_window)
+        self.view_act_sessions = menu.addAction("👥   Sessions window", self.open_sessions_window)
+        self.view_act_privacy = menu.addAction("🔒   Privacy window", self.open_privacy_window)
+        self.view_act_notes = menu.addAction("📝   Session notes window", self.open_notes_window)
+        self.view_act_sees = menu.addAction("👁   What the AI sees window", self.open_sees_window)
+        self.view_act_models = menu.addAction("🤖   Models window", self.open_models_window)
+        self.view_act_mission = menu.addAction("🛰   Mission control", self.open_mission_control)
+        self.view_act_templates = menu.addAction("🧰   Templates…", self.open_templates_window)
+        self.view_act_testing = menu.addAction("🧪   Testing window", self.open_testing_window)
+        self.view_act_provider_chat = menu.addAction("💬   Provider chat", self.open_provider_chat)
+        self.view_act_timeline = menu.addAction("🕰   Turn timeline", self.open_timeline)
+        self.view_act_design_canvas = menu.addAction("🎨   Design canvas", self.open_design_canvas)
+        self.view_act_builder = menu.addAction("🖌   UI builder…", self.open_ui_builder)
+        self.view_act_snapshots = menu.addAction("📸   Snapshots…", self.open_snapshots)
+        self.view_act_checkpoints = menu.addAction("🧷   Checkpoints…", self.open_checkpoints)
+        self.view_act_bench = menu.addAction("🏁   Forge Bench…", self.open_bench)
+        self.view_act_recipes = menu.addAction("📋   Recipes…", self.open_recipes)
+        self.view_act_customize = menu.addAction("⚒   Customize — skills · plugins · connectors", self.open_customize)
+        self.view_act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
+        menu.addSeparator()
+        self.view_act_dock_receipts = menu.addAction(
+            "🧾   Receipts panel",
+            lambda: self.set_dock_open("receipts", not self._dock_open.get("receipts", True)))
+        self.view_act_dock_receipts.setCheckable(True); self.view_act_dock_receipts.setChecked(True)
+        self.view_act_dock_activity = menu.addAction(
+            "📜   Activity log panel",
+            lambda: self.set_dock_open("activity", not self._dock_open.get("activity", True)))
+        self.view_act_dock_activity.setCheckable(True); self.view_act_dock_activity.setChecked(True)
+        self.view_act_plan_window = menu.addAction(
+            "🗂   Plan window", self.open_plan_window)
+        self.view_menu = menu
+        self.view_btn.setMenu(menu)
+
+    def _toggle_sidebar(self):
+        self.set_sidebar_collapsed(self.sidebar.isVisible())
+
+    def set_sidebar_collapsed(self, collapsed):
+        self.sidebar.setVisible(not collapsed)
+        self._save_layout()
+
+    def _register_dock(self, name, widget, layout, stretch=0):
+        self._docks[name] = {"widget": widget, "layout": layout,
+                             "index": layout.indexOf(widget), "stretch": stretch}
+
+    def set_dock_open(self, name, open_):
+        """Closed = removed from the layout entirely, not min-sized."""
+        info = self._docks.get(name)
+        if info is None:
+            return
+        open_ = bool(open_)
+        widget, layout = info["widget"], info["layout"]
+        if open_:
+            if layout.indexOf(widget) < 0:
+                layout.insertWidget(min(info["index"], layout.count()), widget)
+                if info["stretch"]:
+                    layout.setStretchFactor(widget, info["stretch"])
+            widget.show()
+        else:
+            if layout.indexOf(widget) >= 0:
+                layout.removeWidget(widget)
+            widget.hide()
+        self._dock_open[name] = open_
+        btn = {"activity": getattr(self, "activity_dock_btn", None),
+               "receipts": getattr(self, "receipts_dock_btn", None)}.get(name)
+        if btn is not None and btn.isChecked() != open_:
+            btn.blockSignals(True); btn.setChecked(open_); btn.blockSignals(False)
+        # Both menus carry the panel toggles (Menu and View) — keep
+        # every copy's check in sync, whichever door was used.
+        for attr in (f"act_dock_{name}", f"view_act_dock_{name}"):
+            act = getattr(self, attr, None)
+            if act is not None and act.isChecked() != open_:
+                act.setChecked(open_)
+        self._save_layout()
+
+    def _layout_state(self):
+        return {
+            "sidebar_collapsed": not self.sidebar.isVisible(),
+            "accordions": {k: s.is_open() for k, s in self.accordions.items()},
+            "docks": [n for n, o in self._dock_open.items() if o],
+            "panel_sizes": self._panel_sizes_state(),
+        }
+
+    def _panel_sizes_state(self):
+        """The splitter's current [sidebar, inspector] widths for
+        persistence. A collapsed sidebar reports width 0 in the
+        splitter — that is the hamburger's state, not a width the
+        owner chose, so the last saved width stands in for it."""
+        saved = layout_mod.read_layout(self.settings)["panel_sizes"]
+        splitter = getattr(self, "main_splitter", None)
+        if splitter is None:
+            return saved
+        sizes = splitter.sizes()
+        if len(sizes) < 3:
+            return saved
+        side = sizes[0] if sizes[0] >= layout_mod.PANEL_BOUNDS[0][0] else saved[0]
+        insp = sizes[2] if sizes[2] >= layout_mod.PANEL_BOUNDS[1][0] else saved[1]
+        return [side, insp]
+
+    def _apply_panel_sizes(self, panel_sizes, _retries=0):
+        """Give the splitter the saved panel widths; the center
+        takes whatever width remains. Before the window is shown
+        the splitter has no real width to divide, so the first
+        application defers to the event loop (bounded retries) —
+        at the window's minimum size the widths always fit."""
+        splitter = getattr(self, "main_splitter", None)
+        if splitter is None:
+            return
+        side, insp = panel_sizes
+        handles = splitter.handleWidth() * 2
+        total = splitter.width()
+        if total < side + insp + handles + 320:
+            if _retries < 50:
+                QTimer.singleShot(
+                    0, lambda: self._apply_panel_sizes(panel_sizes, _retries + 1))
+            return
+        splitter.setSizes([side, total - side - insp - handles, insp])
+
+    def _save_layout(self):
+        if not hasattr(self, "_docks"):
+            return
+        layout_mod.write_layout(self.settings, self._layout_state())
+        self.save_settings()
+
+    def _apply_layout(self):
+        state = layout_mod.read_layout(self.settings)
+        self.sidebar.setVisible(not state["sidebar_collapsed"])
+        for key, sec in self.accordions.items():
+            if key in state["accordions"]:
+                sec.set_open(state["accordions"][key])
+        for name in layout_mod.KNOWN_DOCKS:
+            self.set_dock_open(name, name in state["docks"])
+        self._apply_panel_sizes(state["panel_sizes"])
+
+    # ---------- Note 13A + Item 16 + Item #50: run surface ----------
+    def open_run_window(self):
+        """Shell round 2 + item #50: the run surface is its own
+        window, opened from both menus, the palette,
+        and Ctrl+Shift+B. Single instance — opening it again raises
+        the same window. Opening (re)loads the active project's
+        runnable files; it never starts one."""
+        win = self.run_win
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_debug_window(self):
+        """The Debug room: single instance, raised on re-open,
+        opened from both menus and the palette. Opening (re)loads
+        the active project's Python files; it never starts one."""
+        win = self.debug_win
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_skill_editor(self, skill=None):
+        """The skill editor window (window rule): one room per skill
+        being created or edited — an existing skill's room is raised
+        on re-open, a New Skill window is fresh each time. Opened
+        from Customize's New skill… / Edit… buttons; saves rescan
+        through the same extension_created path the agent's
+        create_skill/update_skill tools fire."""
+        if skill is not None:
+            win = self._skill_editors.get(skill.folder.name)
+            if win is None:
+                win = SkillEditorWindow(self, self.app_skills_dir, skill,
+                                        on_saved=self._on_extension_created)
+                self._skill_editors[skill.folder.name] = win
+        else:
+            win = SkillEditorWindow(self, self.app_skills_dir, None,
+                                    on_saved=self._on_extension_created)
+            self._new_editors.append(win)
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_plugin_editor(self, plugin=None):
+        """The plugin editor window (window rule): the plugin
+        counterpart of open_skill_editor, opened from Customize's
+        New plugin… / Edit… buttons."""
+        if plugin is not None:
+            win = self._plugin_editors.get(plugin.folder.name)
+            if win is None:
+                win = PluginEditorWindow(self, self.app_plugins_dir, plugin,
+                                         on_saved=self._on_extension_created)
+                self._plugin_editors[plugin.folder.name] = win
+        else:
+            win = PluginEditorWindow(self, self.app_plugins_dir, None,
+                                     on_saved=self._on_extension_created)
+            self._new_editors.append(win)
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _on_mode_changed(self, text):
+        """Picking a mode opens that mode's own window (owner
+        directive, 2026-11-08: each option gets a window, not a
+        panel) — Code included, since the 2026-11-10 upgrade
+        gave it a room of its own. The mode setting itself is
+        saved exactly as before."""
+        self.settings["mode"] = text.lower()
+        self.save_settings()
+        self.log(f"Mode: {text}")
+        key = text.lower()
+        if key == "plan":
+            self.open_plan_window()
+        elif key in getattr(self, "mode_windows", {}):
+            self.open_mode_window(key)
+
+    def open_plan_window(self):
+        """The plan gate's window: single instance, raised on
+        re-open. Opened by the menus, the palette, Ctrl+Shift+P,
+        picking Plan mode, and on its own when a plan draft lands."""
+        win = getattr(self, "plan_win", None)
+        if win is None:
+            return
+        win.set_project(self.workspace)
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_mode_window(self, key):
+        """A document mode's room (Design / Architect / Review /
+        Ask): single instance per mode, raised on re-open, titled
+        for the active project."""
+        win = getattr(self, "mode_windows", {}).get(key)
+        if win is None:
+            return
+        win.set_project(self.workspace)
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_artifacts_window(self):
+        """The artifacts room: single instance, refreshed on open
+        so what the last turn produced is already listed."""
+        win = getattr(self, "artifacts_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_sessions_window(self):
+        """G2: the sessions room: single instance, refreshed on
+        open so the states it shows are the states right now."""
+        win = getattr(self, "sessions_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_privacy_window(self):
+        """H1: the privacy room: single instance, refreshed on
+        open so the provider lines and counts it shows are the
+        facts right now."""
+        win = getattr(self, "privacy_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_notes_window(self):
+        """H5: the session notes room: single instance, refreshed
+        on open so the editor shows the current conversation's
+        file as it is on disk right now."""
+        win = getattr(self, "notes_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_sees_window(self):
+        """H5: the "What the AI sees" room: single instance,
+        refreshed on open so the context it shows is the context
+        the next request would carry right now."""
+        win = getattr(self, "sees_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    # Scout phase 1: an Ollama tag is ONE shell token — letters,
+    # digits and the . _ : / - characters tags are made of.
+    # Anything else (spaces, quotes, ; & | $ `) never reaches a
+    # command string, so a tag can never smuggle a second
+    # command into the Run window's shell.
+    _PULL_TAG_PATTERN = r"^[A-Za-z0-9._:/-]+$"
+
+    def pull_model_via_terminal(self, tag):
+        """Scout phase 1 (owner's correction, 2026-11-09):
+        pulling a model means the TERMINAL pulls it. Forge
+        opens the Run window and starts "ollama pull <tag>"
+        through the run surface's own machinery (start_run),
+        so the pull streams into a run block like any other
+        run and the Run window's Stop stops it. No HTTP pull
+        client, by the owner's word.
+
+        Returns True when the command was handed to the run
+        surface. A refused tag (empty, or not a single strict
+        tag token) and a busy run surface return False and say
+        why on the Models window's pull note. Phase 2's scout
+        proposals call this same entry."""
+        tag = str(tag or "").strip()
+        win = getattr(self, "models_win", None)
+        if not tag or not re.match(self._PULL_TAG_PATTERN, tag):
+            if win is not None:
+                win.show_pull_note(
+                    "That doesn't look like an Ollama tag — use "
+                    "a single tag like qwen3:4b or user/model:"
+                    "tag, with no spaces or shell characters.")
+            return False
+        if self.run_is_running():
+            if win is not None:
+                win.show_pull_note(
+                    "A run is already going in the Run window — "
+                    "stop it or let it finish, then pull.")
+            return False
+        if win is not None:
+            win.show_pull_note("")
+        self.open_run_window()
+        self.start_run(f"ollama pull {tag}", self.workspace)
+        return True
+
+    def open_models_window(self):
+        """H4: the models room: single instance, refreshed on
+        open so the badges it shows are computed from the model
+        list and RAM figures as they are right now."""
+        win = getattr(self, "models_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _refresh_models_window(self):
+        """H4: the models room follows the model list — refreshed
+        (only while visible) whenever a tags fetch lands or fails,
+        so its badges can never describe a list the combo no
+        longer shows. Called at the tail of _apply_models and
+        _apply_models_error."""
+        win = getattr(self, "models_win", None)
+        if win is not None and win.isVisible():
+            win.refresh()
+
+    def _refresh_note_windows(self):
+        """H5: the notes and sees rooms follow the current
+        conversation — refreshed (only while visible) on every
+        conversation switch, so neither can show another chat's
+        memory. Called at the tail of load_conversation and
+        new_chat; tab switches arrive through load_conversation."""
+        for attr in ("notes_win", "sees_win"):
+            win = getattr(self, attr, None)
+            if win is not None and win.isVisible():
+                win.refresh()
+
+    def _update_privacy_badge(self):
+        """H1: LOCAL ONLY for a local (Ollama) model; CLOUD ·
+        <Provider> when the model ID names a hosted provider.
+        Derived from the model combo — the same text
+        persist_conversation saves as the conversation's model —
+        so the badge can never disagree with where the next
+        message will actually be sent."""
+        badge = getattr(self, "privacy_badge", None)
+        if badge is None:
+            return
+        combo = getattr(self, "model_combo", None)
+        model = combo.currentText().strip() if combo is not None else ""
+        provider, _bare = providers_mod.split_model_id(model)
+        if provider in providers_mod.PROVIDERS:
+            badge.setText(
+                f"CLOUD · {providers_mod.PROVIDER_LABELS[provider]}")
+            badge.setStyleSheet(_PRIVACY_BADGE_CLOUD)
+        else:
+            badge.setText("LOCAL ONLY")
+            badge.setStyleSheet(_PRIVACY_BADGE_LOCAL)
+
+    def delete_all_conversations(self):
+        """H1: the Privacy window's delete-everything for chats —
+        every stored conversation goes through the store's own
+        delete, each plan sidecar (APP_DIR/plans/<id>.json, the
+        layout planning.py documents) goes with its conversation,
+        and the session state resets the way delete_conversation
+        resets it (fresh chat, tabs resynced, history refreshed).
+        Returns the number deleted, or None when refused because
+        a turn or a context fold is running."""
+        if (self.worker and self.worker.isRunning()) or (
+                self._fold_thread is not None
+                and self._fold_thread.isRunning()):
+            self.log("Can't delete all conversations while a turn "
+                     "is running.")
+            return None
+        ids = [row["id"] for row in self.store.recent(100000)]
+        for cid in ids:
+            self.store.delete(cid)
+            try:
+                (APP_DIR / "plans" / f"{int(cid)}.json").unlink(
+                    missing_ok=True)
+            except Exception:
+                pass
+            # H5: each conversation's notes file goes with it.
+            notes_mod.delete_notes(APP_DIR, cid)
+        self._chat_tab_ids = []
+        self.new_chat()
+        self.refresh_history()
+        self.log(f"Deleted all conversations ({len(ids)}).")
+        return len(ids)
+
+    def delete_all_forge_data(self):
+        """H1: the Privacy window's nuclear option — remove
+        Forge's stored data under APP_DIR, then rebuild the live
+        state on the same load paths startup uses (fresh store,
+        fresh event log, settings reloaded from the now-absent
+        file, provider client rebuilt on the now-absent connector
+        config), so Forge keeps running on fresh defaults.
+        Project files and Ollama's model storage live outside
+        APP_DIR and are never touched. Returns the list of removed
+        names, or None when refused (a turn, a fold, or a
+        maintenance session is in progress)."""
+        if (self.worker and self.worker.isRunning()) or (
+                self._fold_thread is not None
+                and self._fold_thread.isRunning()) or getattr(
+                self, "_self_maintenance_active", False):
+            self.log("Can't delete all data while a turn or "
+                     "maintenance is running.")
+            return None
+        removed = []
+        for name in ("conversations.sqlite3",
+                     "conversations.sqlite3-wal",
+                     "conversations.sqlite3-shm",
+                     "conversations.sqlite3-journal",
+                     "settings.json", "settings.json.tmp",
+                     "connectors.json", "seats.json",
+                     "dictation.wav", "update_manifest.json",
+                     "resume_state.json", "update_result.json"):
+            target = APP_DIR / name
+            try:
+                if target.is_file():
+                    target.unlink()
+                    removed.append(name)
+            except OSError:
+                pass
+        for name in ("logs", "plans", "notes", "recipes", "bench-results",
+                     "checkpoints", "self-maintenance"):
+            target = APP_DIR / name
+            try:
+                if target.is_dir():
+                    shutil.rmtree(target)
+                    removed.append(name + "/")
+            except OSError:
+                pass
+        self.store = ConversationStore(APP_DIR / "conversations.sqlite3")
+        self.eventlog = EventLog(APP_DIR / "logs")
+        self.settings = self.load_settings()
+        self.projects = list(self.settings.get("projects", []))
+        self._rebuild_provider_client()
+        self._chat_tab_ids = []
+        self.plan_state = None
+        self.new_chat()
+        self.refresh_history()
+        self.refresh_projects()
+        self._update_privacy_badge()
+        self.log("Deleted all Code Forge data stored on this PC. "
+                 "Project files and Ollama models were not touched.")
+        return removed
+
+    def _record_artifact(self, kind, title, text, workspace=None,
+                         conversation_id=None):
+        """File one artifact for a project — the stage's by
+        default; a background turn's settle (Item #64) passes its
+        own workspace/conversation so its work product files where
+        the work happened. Capture must never break the work it
+        records — a failure is a log line, nothing more."""
+        if not (text or "").strip():
+            return
+        try:
+            artifacts_mod.record(
+                workspace or self.workspace, kind, title, text,
+                conversation_id=(conversation_id
+                                 if conversation_id is not None
+                                 else self.conversation_id))
+        except Exception as exc:
+            self.log(f"Artifact capture failed ({kind}): {exc}")
+
+    # ---------- Item #66: owner comments on artifacts ----------
+
+    def _send_artifact_comment(self, entry, comment):
+        """An owner comment on a filed artifact starts a revision
+        turn. The turn runs in the artifact's OWN conversation
+        when the record names one (the revision belongs with the
+        exchange that produced the original), else in the current
+        conversation; the prompt names the artifact and points at
+        its file — artifacts are plain files under the project's
+        .forge/artifacts/, and the agent's read tools are the
+        honest way to carry the full text (an artifact body can
+        run to 200k characters, far past what a prompt should
+        inline). The turn's reply files on settle as a NEW
+        artifact (see _file_artifact_revision): same kind, the
+        comment and the original's file name on its record, the
+        original never overwritten. Every refusal is plain words —
+        the (ok, message) shape the phone prompt path returns."""
+        comment = str(comment or "").strip()
+        if not comment:
+            return False, ("Type the change you want first — an "
+                           "empty comment can't revise anything.")
+        if self.worker and self.worker.isRunning():
+            return False, ("A turn is already running — the "
+                           "comment waits until the bench is free.")
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            return False, ("A context fold is running — try the "
+                           "comment again in a moment.")
+        if getattr(self, "_side_chat", None) is not None:
+            return False, ("Close the side chat first — an "
+                           "artifact comment belongs to the main "
+                           "thread, and side-chat turns are never "
+                           "filed.")
+        if self.mode_combo.currentText().lower() == "plan":
+            return False, ("Plan mode drafts plans — switch to "
+                           "another mode to comment on an artifact, "
+                           "so the revision is a direct turn.")
+        if not self.model_combo.currentText().strip():
+            return False, ("No model selected — pick one on the "
+                           "bench first.")
+        entry = dict(entry or {})
+        title = str(entry.get("title") or "Artifact")
+        kind = str(entry.get("kind") or "note")
+        fname = str(entry.get("file") or "")
+        # The artifact's own conversation, when the record names
+        # one: the revision turn goes there. A conversation from
+        # another project is NOT chased — the artifact's file
+        # lives here, so the turn runs here and says so.
+        target = entry.get("conversation_id")
+        if target and target != self.conversation_id:
+            _model, proj = self.store.meta(target)
+            if proj and proj != self.workspace:
+                self.log("Artifact comment: the conversation that "
+                         f"produced '{title}' belongs to another "
+                         "project — the revision turn runs in the "
+                         "current conversation instead.")
+            else:
+                self.load_conversation(target)
+                if self.conversation_id != target:
+                    self.log("Artifact comment: the conversation "
+                             f"that produced '{title}' could not "
+                             "be opened — the revision turn runs "
+                             "in the current conversation instead.")
+        prompt = (
+            "[ARTIFACT COMMENT] The owner commented on an artifact "
+            "you produced.\n\n"
+            f"Artifact: {kind} — \"{title}\"\n"
+            f"File: .forge/artifacts/{fname} — read it for the "
+            "current text in full.\n\n"
+            f"Owner's comment:\n{comment}\n\n"
+            "Revise the artifact to address the comment. Reply "
+            "with the COMPLETE revised artifact text and nothing "
+            "else — your reply is filed as the new version of "
+            "this artifact; the original stays on record "
+            "untouched.")
+        self._pending_artifact_comment = {
+            "entry": entry, "comment": comment, "prompt": prompt,
+            "conversation_id": self.conversation_id,
+            "workspace": self.workspace}
+        before = self.worker
+        self.input.setPlainText(prompt)
+        self.send_message()
+        if getattr(self, "_send_refusal", None):
+            refusal = self._send_refusal
+            self._pending_artifact_comment = None
+            return False, refusal
+        # Started = a NEW worker object is the bench's, or the
+        # send is in the pre-send fold pipeline (the fold starts
+        # the worker when it settles). Worker identity, not
+        # isRunning(): a fast turn can finish its thread before
+        # this check runs, but its settle slot cannot — the GUI
+        # thread is here, not in the event loop.
+        folding = self._fold_thread is not None \
+            and self._fold_thread.isRunning()
+        if not folding and (self.worker is None
+                            or self.worker is before):
+            self._pending_artifact_comment = None
+            return False, ("The revision turn didn't start — see "
+                           "the bench log.")
+        self.log(f"Artifact comment sent on '{title}': "
+                 f"{comment[:120]}")
+        return True, (f"Revision turn started — its reply files "
+                      f"as a new {kind} artifact when it lands.")
+
+    def _claim_artifact_comment(self, prompt, conversation_id):
+        """If the turn that just settled IS the pending artifact-
+        comment turn, consume its marker and return it; else None,
+        marker untouched. Matching is by the prompt's shell prefix
+        + conversation: a marker must never claim an unrelated
+        turn's filing, and must never leak past its own turn's
+        settle (a failed turn's claim files nothing — the caller
+        just consumes)."""
+        marker = getattr(self, "_pending_artifact_comment", None)
+        if not marker:
+            return None
+        if conversation_id != marker.get("conversation_id"):
+            return None
+        if not str(prompt or "").startswith("[ARTIFACT COMMENT]"):
+            return None
+        self._pending_artifact_comment = None
+        return marker
+
+    def send_canvas_frame_to_bench(self, board, frame):
+        """Item C5: "send frame to bench" — a NORMAL turn
+        composed from the frame's metadata and the head of its
+        linked source (forge/design_canvas.compose_bench_prompt),
+        started through the same input + send_message path as an
+        artifact comment. Nothing about the turn is special after
+        composition: same gates, same worker, same settle. Every
+        refusal is plain words in the (ok, message) shape."""
+        if not isinstance(frame, dict) or not frame.get("id"):
+            return False, "No frame to send — select one first."
+        if self.worker and self.worker.isRunning():
+            return False, ("A turn is already running — the frame "
+                           "waits until the bench is free.")
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            return False, ("A context fold is running — try again "
+                           "in a moment.")
+        if getattr(self, "_side_chat", None) is not None:
+            return False, ("Close the side chat first — a canvas "
+                           "turn belongs to the main thread.")
+        if self.mode_combo.currentText().lower() == "plan":
+            return False, ("Plan mode drafts plans — switch to "
+                           "another mode to send a frame, so it "
+                           "runs as a direct turn.")
+        if not self.model_combo.currentText().strip():
+            return False, ("No model selected — pick one on the "
+                           "bench first.")
+        excerpt = design_canvas_mod.frame_excerpt(self.workspace, frame)
+        prompt = design_canvas_mod.compose_bench_prompt(
+            board or {}, frame, excerpt)
+        before = self.worker
+        self.input.setPlainText(prompt)
+        self.send_message()
+        if getattr(self, "_send_refusal", None):
+            return False, self._send_refusal
+        folding = self._fold_thread is not None \
+            and self._fold_thread.isRunning()
+        if not folding and (self.worker is None
+                            or self.worker is before):
+            return False, ("The frame's turn didn't start — see "
+                           "the log for the refusal.")
+        label = design_canvas_mod.frame_label(board or {}, frame)
+        return True, (f"Sent \"{label}\" to the bench — the turn "
+                      "is running in the main window.")
+
+    def _on_chat_anchor(self, url):
+        """Route a chat-bubble link click. The per-message action
+        anchors (forge-resend:N / forge-reply:N, N = the message's
+        index in self.messages at render time) dispatch to
+        resend_message / reply_to_message and their plain-words
+        outcome lands in the log. Real web links keep the behaviour
+        setOpenExternalLinks used to give them — the handler opens
+        them in the browser itself, since openLinks is off. The
+        index rides the URL's path, never the host: Qt parses a
+        bare-number host as an IPv4 address (forge-resend://2
+        reports host 0.0.0.2), which would eat the index."""
+        scheme = url.scheme()
+        if scheme in ("http", "https"):
+            QDesktopServices.openUrl(url)
+            return
+        if scheme not in ("forge-resend", "forge-reply"):
+            return
+        try:
+            index = int(url.path())
+        except (TypeError, ValueError):
+            return
+        if scheme == "forge-resend":
+            _ok, note = self.resend_message(index)
+        else:
+            _ok, note = self.reply_to_message(index)
+        self.log(note)
+
+    def resend_message(self, index):
+        """Resend (owner request, 2026-11-10) — EDIT-FIRST, never an
+        automatic re-send: load one of the owner's own sent messages
+        back into the composer exactly as written, so he can edit
+        and send it himself. Nothing is sent, no turn starts, the
+        history is not touched and nothing persists. A draft already
+        in the box is never overwritten — the refusal says so in
+        plain words and the draft survives."""
+        messages = getattr(self, "messages", None) or []
+        if not isinstance(index, int) or not 0 <= index < len(messages):
+            return False, ("That message is no longer there to "
+                           "resend.")
+        message = messages[index]
+        if message.get("role") != "user" or message.get("summary"):
+            return False, ("Resend is for your own sent messages — "
+                           "that block isn't one.")
+        text = message.get("content") or ""
+        if not text.strip():
+            return False, "That message has no text to load."
+        if self.input.toPlainText().strip():
+            return False, ("Your message box already holds a draft "
+                           "— send or clear it first; resend won't "
+                           "overwrite it.")
+        self.input.setPlainText(text)
+        cursor = self.input.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input.setTextCursor(cursor)
+        self.input.setFocus()
+        return True, ("Loaded into the message box — edit and send "
+                      "when ready.")
+
+    def reply_to_message(self, index):
+        """Reply (owner request, 2026-11-10): quote an earlier block
+        — the owner's or the agent's — at the head of the composer
+        as a markdown-style quote block (quote_block_for, capped),
+        the owner's existing draft preserved verbatim below it and
+        the cursor placed where his typing belongs: right after the
+        quote, ahead of the preserved draft (at the end when there
+        is no draft). The quote is ordinary composer text — it
+        travels with his next message when HE sends; no history is
+        rewritten, nothing branches, nothing persists."""
+        messages = getattr(self, "messages", None) or []
+        if not isinstance(index, int) or not 0 <= index < len(messages):
+            return False, ("That message is no longer there to "
+                           "reply to.")
+        message = messages[index]
+        if message.get("role") not in ("user", "assistant") \
+                or message.get("summary"):
+            return False, ("Reply works on your messages and the "
+                           "agent's replies — that block isn't one.")
+        text = message.get("content") or ""
+        if not text.strip():
+            return False, "That message has no text to quote."
+        quote = quote_block_for(text)
+        draft = self.input.toPlainText()
+        if draft.strip():
+            self.input.setPlainText(quote + "\n\n" + draft)
+            place = len(quote) + 2
+        else:
+            self.input.setPlainText(quote + "\n\n")
+            place = len(quote) + 2
+        cursor = self.input.textCursor()
+        cursor.setPosition(place)
+        self.input.setTextCursor(cursor)
+        self.input.setFocus()
+        return True, ("Quoted into the message box — type your "
+                      "reply after it.")
+
+    def _file_artifact_revision(self, text, marker, workspace=None,
+                                conversation_id=None):
+        """File a comment turn's reply as the revision of the
+        artifact the owner commented on: a NEW artifact of the
+        same kind, titled '<title> (revised)', with the owner's
+        comment and the original's file name on its record
+        (forge/artifacts.py carries both fields). The original is
+        never overwritten. Capture must never break the turn it
+        records — the _record_artifact discipline."""
+        entry = marker.get("entry") or {}
+        kind = str(entry.get("kind") or "note")
+        title = str(entry.get("title") or "Artifact") + " (revised)"
+        try:
+            saved = artifacts_mod.record(
+                workspace or self.workspace, kind, title, text,
+                conversation_id=(conversation_id
+                                 if conversation_id is not None
+                                 else self.conversation_id),
+                comment=marker.get("comment", ""),
+                revises=str(entry.get("file") or ""))
+        except Exception as exc:
+            self.log(f"Artifact revision capture failed ({kind}): {exc}")
+            return
+        self.log(f"Artifact revision filed: "
+                 f"{saved.get('file', '')} "
+                 f"(revises {entry.get('file', '')}).")
+        if (workspace or self.workspace) == self.workspace:
+            self.artifacts_win.refresh()
+
+    def run_is_running(self):
+        return self._run_thread is not None and self._run_thread.isRunning()
+
+    def _set_run_controls(self, running):
+        self.run_stop_btn.setEnabled(running)
+        # The file list and Rescan stay live while a run streams —
+        # the owner may line up the next file or reload the list;
+        # neither launches anything. Run's state is forced here
+        # rather than re-derived from the thread: this call happens
+        # BEFORE thread.start(), when isRunning() cannot be true
+        # yet. On the way back to idle, the surface re-syncs Run
+        # against its selection.
+        if running:
+            self.run_start_btn.setEnabled(False)
+        else:
+            self.run_win._sync_run_enabled()
+
+    def _append_run_output(self, text):
+        # G6: streamed lines land in the ACTIVE run block; the
+        # run surface owns the container-level follow rule.
+        self.run_win.append_output(text)
+        # C1: every streamed line is also the Watch seat's input
+        # — the monitor classifies what the Run machinery already
+        # captured; nothing is scraped or re-read. This method is
+        # the single stream entry point (only RunThread.line feeds
+        # it): the run's "$ command" banner lives in the block's
+        # header (run_win.new_block) and the finish/fail trailers
+        # ride RunBlock.finish/fail, so neither ever flows through
+        # the classifier — a command line containing an error
+        # string must not alert on itself.
+        for line in str(text).splitlines() or [""]:
+            try:
+                alert = self._run_monitor.observe_line(line)
+            except Exception:
+                alert = None
+            if alert is not None:
+                self._note_monitor_alert(alert)
+
+    def start_run(self, command, cwd):
+        """The owner's own run: he picked a file on the run surface
+        and pressed Run, so no approval — the command launches in
+        the project folder, in its own process group, and streams
+        here. Item #50 made the command and folder explicit
+        parameters: they come from the surface's selected entry, not
+        from a typed command box."""
+        if self.run_is_running():
+            return
+        command = str(command or "").strip()
+        if not command:
+            return
+        cwd = str(cwd or "").strip() or self.workspace
+        if not Path(cwd).is_dir():
+            self.run_status.setText(f"not a folder: {cwd}")
+            return
+        # C1: a fresh run is a fresh watch — the seat's session
+        # starts with the run and ends with it (the run's own
+        # lifecycle IS the monitoring session's lifecycle).
+        self._run_monitor.begin(command)
+        self.run_win.refresh_watch()
+        self.deck.set_state(monitor={"alerts": [], "watching": True})
+        self.run_win.new_block(command, cwd)
+        self.run_status.setText("running…")
+        thread = run_mod.RunThread(command, cwd, self)
+        thread.line.connect(self._append_run_output)
+        thread.run_finished.connect(self._on_run_finished)
+        thread.failed.connect(self._on_run_failed)
+        # Item C8: the testing room observes the SAME thread's
+        # signals — a view over this machinery, never a fork of it.
+        thread.line.connect(self.testing_win.note_run_line)
+        thread.run_finished.connect(self.testing_win.note_run_finished)
+        thread.failed.connect(self.testing_win.note_run_failed)
+        # Sweep R60: a finished run thread is released — the
+        # reference (and the QThread object behind it) used to live
+        # for the whole session.
+        thread.finished.connect(lambda t=thread: self._run_thread_settled(t))
+        self._run_thread = thread
+        self.testing_win.note_run_started(command, cwd)
+        self._set_run_controls(True)
+        thread.start()
+
+    def _run_thread_settled(self, thread):
+        if self._run_thread is thread:
+            self._run_thread = None
+        thread.deleteLater()
+
+    def stop_run(self):
+        if self.run_is_running():
+            self.run_status.setText("stopping…")
+            self.run_stop_btn.setEnabled(False)
+            self._run_thread.stop()
+
+    def _on_run_finished(self, code, stopped):
+        label = "stopped" if stopped else f"exited {code}"
+        self.run_status.setText(label)
+        block = self.run_win.active_block()
+        if block is not None:
+            block.finish(label, block.elapsed(),
+                         success=(code == 0 and not stopped))
+        # C1: the finish is a watch event too — an unexplained
+        # non-zero exit is itself an alert.
+        try:
+            alert = self._run_monitor.observe_finish(code, stopped)
+        except Exception:
+            alert = None
+        if alert is not None:
+            self._note_monitor_alert(alert)
+        self.deck.set_state(monitor={
+            "alerts": self._run_monitor.active(), "watching": False})
+        # Scout phase 1: a terminal pull that finished cleanly
+        # changed what Ollama holds — refresh the model list so
+        # the new model lands in the combo and the Models room
+        # (whose own refresh rides the apply path).
+        if (code == 0 and not stopped and block is not None
+                and block.command.startswith("ollama pull ")):
+            self.refresh_models_async()
+        self._set_run_controls(False)
+
+    def _on_run_failed(self, message):
+        self.run_status.setText(f"could not start: {message}")
+        block = self.run_win.active_block()
+        if block is not None:
+            block.fail(str(message), block.elapsed())
+        # C1: a run that could not start ends the watch session too.
+        self._run_monitor.end()
+        self.deck.set_state(monitor={
+            "alerts": self._run_monitor.active(), "watching": False})
+        self._set_run_controls(False)
+
+    # ---------- C1: the Watch seat (monitoring) ----------
+
+    def _note_monitor_alert(self, alert):
+        """One alert lands everywhere alerts already live: the Run
+        window's list, the bench activity log (which the deck's
+        ACTIVITY card and push_log mirror), the deck's dedicated
+        monitor field, and the event log as a `monitor_alert`
+        record. Pure presentation — noting an alert NEVER triggers
+        a proposal; proposals are the owner's button press only."""
+        line = (f"👁 Watch alert · {alert['kind']} · {alert['detail']}"
+                f" — {alert['evidence'][:120]}")
+        self.log(line)
+        try:
+            self.eventlog.record(
+                "monitor_alert", alert_kind=alert["kind"],
+                detail=alert["detail"], evidence=alert["evidence"],
+                count=alert["count"])
+        except Exception:
+            pass
+        self.run_win.refresh_watch()
+        self.deck.set_state(monitor={
+            "alerts": self._run_monitor.active(),
+            "watching": self.run_is_running()})
+
+    def _watch_seat_model(self):
+        """Resolve the Watch seat exactly the way _start_turn
+        resolves the tester: the seats file first (read RAW here —
+        seats.load_seat_file's sanitizer drops this seat's name;
+        monitor.monitor_seat_config applies the same shape rules),
+        then the `watch_model` setting, then the roster default —
+        every candidate judged by seats.resolve_seat_model, and a
+        provider model additionally by the #69 registry under the
+        'watch' role, falling back to the roster default like the
+        tester's registry fallback."""
+        raw = {}
+        try:
+            import json as _json
+            seat_path = APP_DIR / "seats.json"
+            if seat_path.exists():
+                parsed = _json.loads(
+                    seat_path.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    raw = parsed
+        except Exception:
+            raw = {}
+        model, refused = monitor_mod.resolve_watch_model(
+            self.settings.get("watch_model", ""), raw,
+            self.settings.get("governing_roster", ""))
+        if refused is not None:
+            self._log_seat_refusal("Watch", refused, model)
+        if providers_mod.is_provider_model(model) and \
+                not providers_mod.model_allowed(
+                    self._provider_config(), model,
+                    scope="project", role="watch"):
+            self.log(f"Watch seat: provider model '{model}' is not "
+                     "registry-allowed as watch — "
+                     f"{monitor_mod.DEFAULT_WATCH_MODEL} holds the "
+                     "seat instead.")
+            model = monitor_mod.DEFAULT_WATCH_MODEL
+        return model
+
+    def request_monitor_fix(self, alert):
+        """The alert button's action — the ONLY way a proposal is
+        ever requested (owner-triggered; automatic proposal
+        generation is out of C1 v1 by design). One generation on
+        the Watch seat, off the GUI thread (SummarizeThread's
+        shape); the reply is handled by _on_monitor_fix_ready."""
+        if self._monitor_thread is not None \
+                and self._monitor_thread.isRunning():
+            self.log("👁 Watch: a fix proposal is already being "
+                     "drafted — wait for it to reach the gate.")
+            return
+        root = Path(self.workspace)
+        listing = []
+        for path in sorted(root.rglob("*")):
+            if any(part in watch_mod.SKIP_DIRS for part in path.parts):
+                continue
+            if path.is_file():
+                listing.append(path.relative_to(root).as_posix())
+            if len(listing) >= monitor_mod.MAX_PROPOSAL_FILES:
+                break
+
+        def _read(rel):
+            try:
+                from .tools import _inside
+                target = _inside(root, rel)
+                if target.is_file() and \
+                        target.stat().st_size <= 200_000:
+                    return target.read_text(encoding="utf-8",
+                                            errors="replace")
+            except Exception:
+                pass
+            return None
+
+        model = self._watch_seat_model()
+        messages = monitor_mod.build_fix_messages(alert, listing, _read)
+        # The watch seat budgets at ITS OWN model's window.
+        options = {"temperature": 0.2,
+                   "num_ctx": self._resolve_budget(model)}
+        thread = SummarizeThread(self.client, model, messages, options)
+        thread.done.connect(
+            lambda text: self._on_monitor_fix_ready(text, alert, listing))
+        thread.failed.connect(
+            lambda why: self.log(
+                f"👁 Watch: the seat could not draft a fix ({why})."))
+        thread.finished.connect(
+            lambda t=thread: self._monitor_thread_settled(t))
+        self._monitor_thread = thread
+        self.log(f"👁 Watch: asking {short_model(model)} for a fix "
+                 f"proposal — {alert['kind']} · {alert['detail']}.")
+        thread.start()
+
+    def _monitor_thread_settled(self, thread):
+        if self._monitor_thread is thread:
+            self._monitor_thread = None
+        thread.deleteLater()
+
+    def _on_monitor_fix_ready(self, text, alert, listing):
+        """The seat's reply becomes a GATED write_file proposal:
+        parsed strictly, diffed against the file on disk, and
+        presented through request_approval — the same gate, dialog
+        and deck pending card as any agent write. Approval applies
+        through the worker's own execute_tool(write_file); denial
+        (or a dialog that never ran) writes nothing."""
+        from .tools import describe_tool, execute_tool
+        parsed = monitor_mod.parse_fix_reply(text, listing)
+        if parsed is None:
+            self.log("👁 Watch: the seat's reply was not one whole-file "
+                     "fix for a project file — no proposal was made.")
+            return
+        rel, content = parsed
+        args = {"path": rel, "content": content}
+        diff = diff_mod.diff_for_approval("write_file", args,
+                                          self.workspace)
+        description = describe_tool("write_file", args, self.workspace)
+        # The gate must name its proposer: request_approval labels
+        # the dialog from the stage worker — the one place a
+        # monitor proposal would otherwise wear the wrong name is
+        # the gate itself, so the seat is swapped in for exactly
+        # this presentation and restored immediately after.
+        prior_worker = self.worker
+        self.worker = _WatchGateAsker(self._watch_seat_model())
+        try:
+            self.request_approval("write_file", args, description, diff)
+        finally:
+            self.worker = prior_worker
+        answer = getattr(self, "_watch_gate_answer", None)
+        self._watch_gate_answer = None
+        if answer is not True:
+            self.log("👁 Watch: fix not approved — nothing was written.")
+            return
+        try:
+            result = execute_tool("write_file", args, self.workspace)
+        except Exception as exc:
+            self.log(f"👁 Watch: the approved fix could not be "
+                     f"applied: {exc}")
+            return
+        self.log(f"👁 Watch: approved fix applied — {result}")
+        # An applied fix can resolve the alert that raised it and
+        # can retire the whole watch list; the honest v1 state is
+        # 'the owner judged it', so the alert REMAINS in the list
+        # with the application on the record (log + event log).
+        try:
+            self.eventlog.record("monitor_fix_applied", path=rel,
+                                 alert_kind=alert.get("kind", ""))
+        except Exception:
+            pass
+
+    # ---------- Debug: ONE session, two drivers (window + agent) ----------
+    def debug_session_live(self):
+        return self._debug_session is not None and self._debug_session.alive
+
+    def debug_start_session(self, target, breakpoints=(), workspace=None):
+        """Start the bench's one debug session (forge/debugger) and
+        return its entry state. Refusals come back as an "error"
+        state, never an exception, so both callers (the Debug
+        window on its control thread, the agent's debug_start tool
+        on the worker thread) render them the same way. A session
+        that fails to be born is not kept."""
+        if self.debug_session_live():
+            return {"status": "error",
+                    "output": "A debug session is already live for "
+                              f"{self._debug_session.target} — stop it first."}
+        if self.run_is_running():
+            return {"status": "error",
+                    "output": "A run is live in the Run window — stop it "
+                              "before debugging (one program at a time)."}
+        session = debugger_mod.DebugSession(workspace or self.workspace)
+        try:
+            state = session.start(target, breakpoints)
+        except ValueError as exc:
+            return {"status": "error", "output": str(exc)}
+        self._debug_session = session if session.alive else None
+        return state
+
+    def debug_stop_session(self):
+        session = self._debug_session
+        self._debug_session = None
+        if session is None:
+            return {"status": "idle", "output": "No debug session is live."}
+        return session.stop()
+
+    def _format_debug_state(self, state, session=None):
+        """A debug state as the plain text a tool result carries:
+        where it stopped (or that it finished), what it printed,
+        and — at a stop — the frame's locals."""
+        status = state.get("status", "")
+        lines = []
+        if status == "stopped":
+            where = state.get("file") or "?"
+            lines.append(f"Stopped at {where}:{state.get('line')} "
+                         f"in {state.get('function') or '?'}()")
+        elif status == "finished":
+            lines.append("The program finished; the debug session is closed.")
+        elif status == "running":
+            lines.append("The program is still running — it has not "
+                         "stopped at a breakpoint.")
+        else:
+            lines.append(state.get("output") or "The debug call failed.")
+        output = str(state.get("output") or "").strip()
+        if output and status != "error":
+            lines.append(output)
+        if status == "stopped" and session is not None:
+            locals_text = session.locals_text()
+            if locals_text:
+                lines.append(f"Locals: {locals_text}")
+        if status == "finished" and self._debug_session is session:
+            self._debug_session = None
+        return "\n".join(lines)
+
+    def _debug_tool_start(self, args, workspace):
+        path = str(args.get("path", "")).strip()
+        if not path:
+            return "debug_start needs a 'path' — a Python file in the workspace."
+        try:
+            breakpoints = debugger_mod.parse_breakpoints(
+                str(args.get("breakpoints", "")), path)
+        except ValueError as exc:
+            return str(exc)
+        state = self.debug_start_session(path, breakpoints,
+                                         workspace=workspace)
+        session = self._debug_session
+        if state.get("status") == "error" or session is None:
+            return state.get("output") or "The debug session did not start."
+        # The agent starts a session to stand somewhere useful: run
+        # to the first breakpoint (or the end) before reporting.
+        state = session.continue_()
+        return self._format_debug_state(state, session)
+
+    def _debug_tool_step(self, args):
+        session = self._debug_session
+        if session is None:
+            return "No debug session is live — start one with debug_start."
+        state = session.step_into() if args.get("into") else session.step_over()
+        return self._format_debug_state(state, session)
+
+    def _debug_tool_continue(self, args):
+        session = self._debug_session
+        if session is None:
+            return "No debug session is live — start one with debug_start."
+        return self._format_debug_state(session.continue_(), session)
+
+    def _debug_tool_inspect(self, args):
+        session = self._debug_session
+        if session is None:
+            return "No debug session is live — start one with debug_start."
+        expr = str(args.get("expression", "")).strip()
+        if not expr:
+            return session.locals_text()
+        return session.inspect(expr)
+
+    def _debug_tool_stop(self, args):
+        if self._debug_session is None:
+            return "No debug session is live."
+        self.debug_stop_session()
+        return "Debug session stopped; its process is gone."
+
+    # ---------- Note 13B: visual UI builder ----------
+    def open_ui_builder(self):
+        """Note 13B: the visual UI builder. A dialog, not a dock —
+        the bench's docks are bottom strips sized for text panes, and
+        a design canvas needs a window of its own."""
+        UiBuilderDialog(self, self.workspace).exec()
+
+    # ---------- Note 14 item 1: git snapshots ----------
+    def open_snapshots(self):
+        """Note 14 item 1: the snapshots dialog for the current
+        project. Constructed fresh each time, so after a project
+        switch it opens on the new folder."""
+        SnapshotsDialog(self, self.workspace).exec()
+
+    # ---------- Audit D38: shadow checkpoints ----------
+    def open_checkpoints(self):
+        """Audit D38: the shadow checkpoints dialog for the current
+        project. The shadow lives under APP_DIR keyed by the
+        project's path, so after a project switch it opens on the
+        new project's own checkpoint list; the mode combo writes
+        the owner's setting through the window's save path."""
+        CheckpointsDialog(self, self.workspace, APP_DIR,
+                          settings=self.settings,
+                          save_settings=self.save_settings,
+                          log=self.log).exec()
+
+    # ---------- Audit D37: forge-bench ----------
+    def open_bench(self):
+        """Audit D37: the forge-bench dialog — fifteen fixed,
+        test-scored tasks against any installed model, run in
+        throwaway folders. The model list is the window's own combo
+        contents (the installed models, as loaded), and the bench
+        rides the window's Ollama client on its own thread."""
+        models = [self.model_combo.itemText(i)
+                  for i in range(self.model_combo.count())]
+        BenchDialog(self, models, self.client, log=self.log,
+                    current=self.model_combo.currentText(),
+                    disabled_tools=list(self.settings.get(
+                        "disabled_tools", [])),
+                    bench_max_cycles=self.settings.get(
+                        "bench_max_cycles")).exec()
+
+    # ---------- Audit D41: recipes ----------
+    def open_recipes(self):
+        """Audit D41: the recipes dialog — the owner's
+        parameterized prompt files from APP_DIR/recipes/, run with
+        fresh values through the normal send path. Constructed
+        fresh each time, so recipes authored since launch are
+        picked up."""
+        RecipesDialog(self, APP_DIR,
+                      log_problems=self._note_recipe_problems).exec()
+
+    def _note_recipe_problems(self, problems):
+        """Audit D41 (the C30 pattern): recipe load problems reach
+        the activity log once per distinct problem per window life
+        — the dialog opens (and reports them) as often as the owner
+        likes; the log should not repeat them."""
+        for problem in problems:
+            if self._seen_once(self._recipe_problems_seen, problem):
+                self.log("Recipes: " + problem)
+
+    # ---------- Note 14 item 5: command palette ----------
+    def palette_actions(self):
+        """(entries, bindings) for the command palette, generated
+        from live state at open time: the fixed catalog from
+        forge/palette.py, the deck entries' enabled state read off
+        the deck server, then one entry per known project, per
+        mode, and per installed model. Every binding is the SAME
+        callable the topbar, the menu, the sidebar project list,
+        the mode combo, or the model combo already uses — the
+        palette is a second door to the same rooms, never a
+        second implementation."""
+        entries = palette_mod.base_catalog()
+        deck_running = bool(getattr(self.deck, "_server", None))
+        for entry in entries:
+            if entry["id"] == "deck_start":
+                entry["enabled"] = not deck_running
+            elif entry["id"] == "deck_stop":
+                entry["enabled"] = deck_running
+        entries += palette_mod.project_entries(self.projects, self.workspace)
+        mode_names = [self.mode_combo.itemText(i)
+                      for i in range(self.mode_combo.count())]
+        entries += palette_mod.mode_entries(mode_names,
+                                            self.mode_combo.currentText())
+        model_names = [self.model_combo.itemText(i)
+                       for i in range(self.model_combo.count())]
+        entries += palette_mod.model_entries(model_names,
+                                             self.model_combo.currentText())
+        bindings = {
+            "new_chat": self.new_chat,
+            "dock_activity": lambda: self.set_dock_open(
+                "activity", not self._dock_open.get("activity", True)),
+            "dock_receipts": lambda: self.set_dock_open(
+                "receipts", not self._dock_open.get("receipts", True)),
+            "plan_window": self.open_plan_window,
+            "run_window": self.open_run_window,
+            "test_now": self.test_now,
+            "debug_window": self.open_debug_window,
+            "artifacts_window": self.open_artifacts_window,
+            "sessions_window": self.open_sessions_window,
+            "privacy_window": self.open_privacy_window,
+            "session_notes": self.open_notes_window,
+            "what_ai_sees": self.open_sees_window,
+            "models_window": self.open_models_window,
+            "mission_control": self.open_mission_control,
+            "templates": self.open_templates_window,
+            "testing_window": self.open_testing_window,
+            "provider_chat": self.open_provider_chat,
+            "turn_timeline": self.open_timeline,
+            "design_canvas": self.open_design_canvas,
+            "customize": self.open_customize,
+            "settings": self.open_settings,
+            "snapshots": self.open_snapshots,
+            "ui_builder": self.open_ui_builder,
+            "schedule": self.open_schedule,
+            "update": self.apply_update,
+            "maintenance": self.open_maintenance_window,
+            "rescan": self.rescan_extensions,
+            "deck_start": self._toggle_deck,
+            "deck_stop": self._toggle_deck,
+            # G1 catalog completeness (ported at the G1 merge):
+            # the menu-only dialogs and the EXTFIX editor windows
+            # join the catalog, bound to the same methods the
+            # menu / Customize's recorded editor request already
+            # land on.
+            "bench": self.open_bench,
+            "checkpoints": self.open_checkpoints,
+            "recipes": self.open_recipes,
+            "skill_new": self.open_skill_editor,
+            "plugin_new": self.open_plugin_editor,
+        }
+        for entry in self.projects:
+            path = entry.get("path", "")
+            if path:
+                bindings[f"project:{path}"] = (
+                    lambda p=path: self.set_project(p))
+        for name in mode_names:
+            bindings[f"mode:{name.lower()}"] = (
+                lambda t=name: self.mode_combo.setCurrentText(t))
+        for name in model_names:
+            if name and name.strip():
+                bindings[f"model:{name}"] = (
+                    lambda t=name: self.model_combo.setCurrentText(t))
+        return entries, bindings
+
+    def open_command_palette(self):
+        """Note 14 item 5: Ctrl+K — one key combo, type the action,
+        done. Built fresh on each open so projects, modes, and the
+        deck's state are as they are right now.
+
+        G1 (ported at the G1 merge): the dialog gets the owner's
+        recents (settings key "palette_recents", most recent
+        first) for its Recent section, and a pick that actually
+        runs is pushed onto that list and saved through the same
+        settings path every other preference uses — no separate
+        store."""
+        entries, bindings = self.palette_actions()
+        recents = [r for r in self.settings.get("palette_recents", [])
+                   if isinstance(r, str)]
+
+        def dispatch(entry_id):
+            fn = bindings.get(entry_id)
+            if fn is None:
+                return
+            fn()
+            self.settings["palette_recents"] = palette_mod.push_recent(
+                self.settings.get("palette_recents", []), entry_id)
+            self.save_settings()
+
+        PaletteDialog(self, entries, dispatch, recents=recents).exec()
+
+    # ---------- panels / log ----------
+    def _refresh_panels(self):
+        n_conn = sum(1 for p in self.plugins if p.kind == "connector")
+        self.ext_counts.setText(
+            f"{len(self.skills)} skill(s) · {len(self.plugins) - n_conn} plugin(s) · "
+            f"{n_conn} connector(s)\nManaged in Customize — nothing else belongs on this wall.")
+
+    def log(self, message):
+        line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+        self._log_lines.append(line)
+        if len(self._log_lines) > 400:
+            # Audit B16: the stored history used to grow for the life
+            # of the process (and the deck sync shipped from the whole
+            # list every 3 s). Keep the newest 400 lines — the panel
+            # filter and the deck only ever present a tail of it.
+            del self._log_lines[:-400]
+        if not self.log_filter.text() or self.log_filter.text().lower() in line.lower():
+            self.activity.appendPlainText(line)
+
+    def _apply_log_filter(self, text):
+        self.activity.setPlainText("\n".join(
+            l for l in self._log_lines if not text or text.lower() in l.lower()))
+
+    def _clear_log(self):
+        self._log_lines = []
+        self.activity.clear()
+
+    def export_summary(self):
+        summary = self.eventlog.session_summary()
+        out = Path(self.workspace) / "FORGE-SESSION-SUMMARY.md"
+        try:
+            out.write_text(summary, encoding="utf-8")
+            self.log(f"Session summary exported → {out}")
+            self.receipt_bar.setText(f"🧾  SHELL RECEIPT · export → {out.name} · {datetime.now().strftime('%H:%M:%S')}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Export error", str(exc))
+
+    def refresh_gauges(self):
+        self._deck_sync()
+        # Off the UI thread: a slow /api/ps answer must never hitch the chat
+        # (that stall was part of v2 feeling slower than v1).
+        if self._gauge_busy:
+            return
+        self._gauge_busy = True
+
+        def work():
+            try:
+                snap = governor.snapshot(self.client.base_url, timeout=0.7)
+            except Exception:
+                snap = {}
+            self._gauge_busy = False
+            if snap:
+                self.gauge_ready.emit(snap)
+
+        try:
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            # Sweep R42: _gauge_busy is cleared inside the worker —
+            # if the thread cannot even start, the flag would stick
+            # True and the gauges would freeze for the whole
+            # session. Reset it here so the next tick retries.
+            self._gauge_busy = False
+            self.log("Gauge refresh could not start — will retry on the next tick.")
+
+    def _apply_gauges(self, snap):
+        self._gauge_snap = snap
+        used = max(0.0, snap["total_gb"] - snap["avail_gb"])
+        pct = int(100 * used / snap["total_gb"]) if snap["total_gb"] else 0
+        self.ram_bar.setValue(pct)
+        self.ram_bar.setObjectName("hot" if pct >= 80 else "")
+        self.ram_bar.style().unpolish(self.ram_bar); self.ram_bar.style().polish(self.ram_bar)
+        self.ram_text.setText(f"{used:.1f}/{snap['total_gb']:.0f} GB used")
+        cpu_pct = min(100, int(100 * snap["load_1min"] / max(1, snap["threads"])))
+        self.cpu_bar.setValue(cpu_pct)
+        self.cpu_bar.setObjectName("hot" if snap["cpu_busy"] else "")
+        self.cpu_bar.style().unpolish(self.cpu_bar); self.cpu_bar.style().polish(self.cpu_bar)
+        self.cpu_text.setText(f"load {snap['load_1min']:.2f} / {snap['threads']} threads")
+        loaded = ", ".join(short_model(m) for m in snap["ollama_loaded"]) if snap["ollama_loaded"] else "none"
+        self.loaded_label.setText(loaded)
+
+    # ---------- projects ----------
+    def refresh_projects(self):
+        while self.project_list.count():
+            item = self.project_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for entry in self.projects:
+            path = entry.get("path", "")
+            btn = QPushButton(("▣  " if path == self.workspace else "▢  ") + entry.get("name", Path(path).name))
+            btn.setObjectName("navActive" if path == self.workspace else "nav")
+            btn.setToolTip(path)
+            btn.clicked.connect(lambda checked=False, p=path: self.set_project(p))
+            self.project_list.addWidget(btn)
+        self.workspace_label.setText("PROJECT ROOT\n" + self.workspace)
+
+    def add_project(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose a project folder", str(Path.home()))
+        if not folder:
+            return
+        if not any(e.get("path") == folder for e in self.projects):
+            self.projects.append({"name": Path(folder).name, "path": folder})
+        self.set_project(folder)
+        self.save_settings()
+
+    def set_project(self, path: str):
+        # Item #64: a detachable turn moves to the background and
+        # the switch proceeds (the stream keeps its own workspace,
+        # captured at its start); otherwise the classic refusal.
+        if not self._leave_stage(
+                "Project switch ignored — a turn is running."):
+            return
+        self.workspace = path
+        Path(self.workspace).mkdir(parents=True, exist_ok=True)
+        proj.ensure_project(self.workspace)
+        self.plugin_ctx.workspace = self.workspace
+        # Item #50: the run surface follows the active project —
+        # it rescans and retitles for the new folder (list + title
+        # only; a live run is never disturbed by a refresh).
+        if getattr(self, "run_win", None) is not None:
+            self.run_win.refresh()
+        # Item C8: the testing room re-resolves its test command
+        # for the new project the same way.
+        if getattr(self, "testing_win", None) is not None:
+            self.testing_win.refresh_command()
+        # Item C5: the design canvas loads the new project's
+        # board (its refresh reloads when the workspace differs).
+        if getattr(self, "design_canvas_win", None) is not None:
+            self.design_canvas_win.refresh()
+        # The mode windows retitle for the new project too.
+        if getattr(self, "plan_win", None) is not None:
+            self.plan_win.set_project(self.workspace)
+        for mode_win in getattr(self, "mode_windows", {}).values():
+            mode_win.set_project(self.workspace)
+        self.save_settings()
+        self.refresh_projects()
+        self.new_chat()
+        self.log(f"Project active: {path} (instructions + sources + uploads under .forge/)")
+
+    def _copy_in_progress(self) -> bool:
+        return self._copy_thread is not None and self._copy_thread.isRunning()
+
+    def create_dev_clone(self):
+        if self._copy_in_progress():
+            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            return
+        src = Path(self.workspace)
+        dest = src.parent / (src.name + "-dev")
+        if dest.exists():
+            QMessageBox.information(self, "Dev clone", f"Dev clone already exists:\n{dest}")
+            return
+        self._start_clone_copy(src, dest)
+
+    def _start_clone_copy(self, src, dest):
+        """The clone's copy half (audit B16): the copytree runs on a
+        CopyTreeThread; the bookkeeping the synchronous version did
+        after it — project list, settings, log line, event record —
+        happens in the completion slot, unchanged. A second
+        clone/promote asked for mid-copy is logged and refused."""
+        src, dest = Path(src), Path(dest)
+        if self._copy_in_progress():
+            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            return
+        self.log(f"Cloning {src.name} → {dest.name} — copying in the background…")
+        thread = CopyTreeThread(src, dest)
+
+        def _done():
+            self._copy_thread = None
+            if not any(e.get("path") == str(dest) for e in self.projects):
+                self.projects.append({"name": dest.name, "path": str(dest)})
+            self.save_settings(); self.refresh_projects()
+            self.log(f"Dev clone created → {dest}. Point the agent at the clone; promote when it earns it.")
+            self.eventlog.record("dev_clone_created", path=str(dest))
+
+        def _failed(why):
+            self._copy_thread = None
+            QMessageBox.critical(self, "Clone error", why)
+
+        thread.done.connect(_done)
+        thread.failed.connect(_failed)
+        self._copy_thread = thread
+        thread.start()
+
+    def _start_promote_copy(self, dev, live, changed_count):
+        """The promote's copy half (audit B16): same shape as
+        _start_clone_copy — copytree on a CopyTreeThread, and the
+        log line + event record the synchronous version produced
+        land in the completion slot, unchanged."""
+        dev, live = Path(dev), Path(live)
+        if self._copy_in_progress():
+            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            return
+        self.log("Promoting dev → live — copying in the background…")
+        thread = CopyTreeThread(dev, live, dirs_exist_ok=True)
+
+        def _done():
+            self._copy_thread = None
+            self.log(f"PROMOTED dev → live ({changed_count} differing file(s) copied).")
+            self.eventlog.record("promote", files=changed_count, path=str(live))
+
+        def _failed(why):
+            self._copy_thread = None
+            QMessageBox.critical(self, "Promote error", why)
+
+        thread.done.connect(_done)
+        thread.failed.connect(_failed)
+        self._copy_thread = thread
+        thread.start()
+
+    def promote_dev(self):
+        if self._copy_in_progress():
+            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            return
+        live = Path(self.workspace)
+        dev = live.parent / (live.name + "-dev")
+        if live.name.endswith("-dev"):
+            QMessageBox.information(self, "Promote", "You are IN the dev clone. Switch to the live project first, then promote.")
+            return
+        if not dev.is_dir():
+            QMessageBox.information(self, "Promote", "No dev clone found beside this project.")
+            return
+        changed = []
+
+        def walk(dcmp):
+            for name in dcmp.diff_files:
+                changed.append(str(Path(dcmp.left) / name))
+            for sub in dcmp.subdirs.values():
+                walk(sub)
+
+        try:
+            walk(filecmp.dircmp(dev, live))
+        except Exception as exc:
+            # Sweep R49: a failed comparison used to fall through
+            # with whatever partial `changed` list the walk had
+            # gathered — and the dialog below presented it as the
+            # complete difference. A promote decided on a partial
+            # diff can overwrite the live project wrongly; abort
+            # and say so instead.
+            self.log(f"Promote: the dev/live comparison failed ({exc}) — nothing was promoted.")
+            QMessageBox.critical(self, "Promote",
+                                 f"The comparison between the dev clone and the live project failed:\n{exc}\n\nNothing was promoted.")
+            return
+        listing = "\n".join(changed[:30]) or "(no differing files found)"
+        box = QMessageBox(self)
+        box.setWindowTitle("Promote dev → live")
+        box.setText(f"Copy the dev clone over the live project?\n\n{dev}\n→\n{live}\n\nDiffering files:\n{listing}")
+        yes = box.addButton("Promote", QMessageBox.AcceptRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() != yes:
+            return
+        self._start_promote_copy(dev, live, len(changed))
+
+    # ---------- conversations ----------
+    def build_system_prompt(self) -> str:
+        parts = [self.settings.get("system_prompt", SYSTEM_PROMPT), HOUSE_RULES]
+        instructions = proj.project_instructions(self.workspace)
+        if instructions:
+            parts.append("Project instructions (owner-written, this project only):\n" + instructions)
+        sources = proj.sources_index_text(self.workspace)
+        if sources:
+            parts.append(sources)
+        hints = proj.hints_text(self.workspace)
+        if hints:
+            parts.append("Project hints — the owner's standing instructions for THIS project "
+                         "(from .forge/hints.md). Follow them unless the owner's current "
+                         "message says otherwise:\n" + hints)
+        production = prod_mod.context_text(prod_mod.load_markings(self.workspace))
+        if production:
+            parts.append(production)
+        if self.settings.get("repo_map", True):
+            try:
+                project_map = repomap.build_map(self.workspace)
+            except Exception as exc:
+                project_map = ""
+                # Sweep R50: a broken project map used to vanish
+                # silently — the model simply lost its map with no
+                # word anywhere. Logged once per distinct problem.
+                problem = f"Project map unavailable: {exc}"
+                seen = getattr(self, "_hook_problems_seen", None)
+                if seen is not None and problem not in seen:
+                    seen.add(problem)
+                    self.log(problem)
+            if project_map:
+                parts.append(project_map)
+        skills_idx = skills_index_text(self.skills)
+        if skills_idx:
+            parts.append(skills_idx)
+        mode_now = str(self.settings.get("mode", "code")).lower()
+        guidance = perm_mod.MODE_GUIDANCE.get(mode_now)
+        if guidance:
+            parts.append(guidance)
+        macro_idx = macros_mod.index_text(self.macros)
+        if macro_idx:
+            parts.append(macro_idx)
+        parts.append(
+            "Self-extension (owner's standing instruction): skills and plugins are GLOBAL — "
+            "they live in the Forge's own skills/ and plugins/ folders and are available in "
+            "every project. When the owner asks you to create a skill, use create_skill; to "
+            "create a plugin or tool, use create_plugin; to change a skill or plugin that "
+            "already exists, use update_skill / update_plugin (the create tools refuse "
+            "names that are already taken). NEVER save a skill or plugin into "
+            "the current project folder with write_file — it would only exist in that one "
+            "project. Creation takes effect after an automatic rescan. A plugin you create "
+            "starts DISABLED — the owner enables it in Customize. Say plainly in chat what "
+            "you created and where it lives.")
+        scratch_path = proj.forge_area(self.workspace) / "scratchpad.md"
+        try:
+            scratch = scratch_path.read_text(encoding="utf-8")
+            body = "\n".join(l for l in scratch.splitlines() if not l.startswith("#")).strip()
+            if body:
+                parts.append("Project scratchpad (your persistent notes here):\n" + body[:700])
+        except Exception as exc:
+            # Sweep R50: a MISSING scratchpad is the ordinary case
+            # and stays silent; a present-but-unreadable one is a
+            # real loss (the model's notes vanished from its
+            # prompt) and is logged once per distinct problem.
+            if scratch_path.exists():
+                problem = f"Project scratchpad unreadable: {exc}"
+                seen = getattr(self, "_hook_problems_seen", None)
+                if seen is not None and problem not in seen:
+                    seen.add(problem)
+                    self.log(problem)
+        # Item #69: a maintenance turn carries the maintenance
+        # charter and the work-copy path — the engineer always knows
+        # which tree is the candidate and which is live.
+        if getattr(self, "_self_maintenance_active", False):
+            work = getattr(self, "_self_maintenance_worktree", None) \
+                or str(self_maint_mod.worktree_dir(APP_DIR))
+            parts.append(self_maint_mod.MAINTENANCE_CHARTER
+                         + f"\nMaintenance work copy: {work}"
+                         + f"\nLive app root (reference only, never "
+                           f"edit directly): {ROOT_DIR}")
+        return "\n\n".join(parts)
+
+    def render(self, messages=None):
+        # Sweep R63: `messages or self.messages` made an explicit
+        # EMPTY list render the full history — None is the only
+        # "not given" there is.
+        if messages is None:
+            messages = self.messages
+        html = ['<div style="max-width:840px;margin:0 auto;">']
+        visible = 0
+        for index, m in enumerate(messages):
+            if m.get("summary"):
+                # Note 14 #3: a folded span renders as a divider with
+                # the summary itself — the fold is visible, never a
+                # silent rewrite of the conversation.
+                raw = m.get("content") or ""
+                if raw.startswith(context_mod.SUMMARY_PREFIX):
+                    raw = raw[len(context_mod.SUMMARY_PREFIX):]
+                body = raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+                if not body:
+                    continue
+                visible += 1
+                count = m.get("folded_count")
+                label = "EARLIER CONVERSATION SUMMARIZED TO FIT THE CONTEXT WINDOW"
+                if count:
+                    label += f" — ~{count} MESSAGES FOLDED"
+                html.append(f'<div style="margin:20px 0;padding:10px 14px;max-width:92%;border:1px dashed #51483c;border-radius:8px;">'
+                            f'<b style="color:#ddbb8f">{label}</b><br>'
+                            f'<div style="line-height:1.55;margin-top:6px;color:#b8ac9a;">{body}</div></div>')
+                continue
+            role = m.get("role")
+            if role not in ("user", "assistant"):
+                continue
+            body = (m.get("content") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+            if not body:
+                continue
+            visible += 1
+            if role == "user":
+                html.append(f'<div style="margin:18px 0 18px auto;padding:13px 16px;background:#2a2620;border:1px solid #5a482e;border-radius:12px;max-width:78%;"><b style="color:#ddbb8f">YOU</b><br><span>{body}</span><div style="margin-top:8px;"><a href="forge-resend:{index}" style="color:#a39a8b;">Resend</a> · <a href="forge-reply:{index}" style="color:#a39a8b;">Reply</a></div></div>')
+            elif m.get("reviewer"):
+                # Sweep R28: the reviewer NAME is data (a model tag
+                # the owner typed or a roster file carried) — the
+                # body beside it is escaped, and the name now is
+                # too: raw, it could inject markup into the bench.
+                reviewer_label = short_model(str(m["reviewer"])).replace(
+                    "&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                html.append(f'<div style="margin:20px 0;padding:8px 4px;max-width:92%;border-left:3px solid #b48fdd;padding-left:12px;"><b style="color:#b48fdd">REVIEWER · {reviewer_label}</b><br><div style="line-height:1.55;margin-top:8px;">{body}</div></div>')
+            else:
+                html.append(self._assistant_bubble_html(m.get("content"), index))
+        if visible == 0:
+            html.append('<div style="margin:60px auto;max-width:560px;color:#a39a8b;line-height:1.7;">'
+                        '<b style="color:#eae6df;font-size:15px;">The bench is clear.</b><br>'
+                        'Ask for code, a fix, an explanation — or use <b style="color:#eae6df;">＋ Attach</b> to hand the agent a file.<br>'
+                        'Tools ask your approval first. Approvals have no clock on them.<br>'
+                        'Skills, plugins and connectors live under <b style="color:#eae6df;">Customize</b> on the right.</div>')
+        html.append('</div>')
+        # Scroll discipline (owner report, 2026-11-08: "the chat
+        # window never lets me scroll up"): a repaint follows the
+        # text ONLY when the reader is already at the bottom. A
+        # reader who has scrolled up keeps their place — the parked
+        # plan gate holds a turn open indefinitely, and the 120 ms
+        # repaint tick used to yank the view back to the bottom on
+        # every tick for as long as the gate sat open.
+        bar = self.chat.verticalScrollBar()
+        pinned = bar.value() >= bar.maximum() - 8
+        place = bar.value()
+        self.chat.setHtml(''.join(html))
+        if pinned:
+            bar.setValue(bar.maximum())
+        else:
+            bar.setValue(min(place, bar.maximum()))
+
+    @staticmethod
+    def _assistant_bubble_html(content, index=None):
+        """The plain assistant bubble's HTML — the one fragment the
+        full render and the incremental streaming repaint share, so
+        both paths escape and wrap the text identically. The full
+        render passes the message's index and the bubble gains its
+        Reply anchor; the streaming repaint passes none — an
+        in-flight bubble carries no actions, they arrive with the
+        settled render."""
+        body = (content or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+        links = ""
+        if index is not None:
+            links = (f'<div style="margin-top:8px;">'
+                     f'<a href="forge-reply:{index}" style="color:#a39a8b;">Reply</a></div>')
+        return (f'<div style="margin:20px 0;padding:8px 4px;max-width:92%;background:#26221d;border:1px solid #5a482e;border-radius:12px;">'
+                f'<b style="color:#ffb347">LINUX FORGE</b><br>'
+                f'<div style="line-height:1.55;margin-top:8px;">{body}</div>{links}</div>')
+
+    def _on_render_tick(self):
+        """The 120 ms repaint tick. While a turn is streaming, only
+        the in-flight bubble changes, so repaint just its tail of the
+        document (audit B14); any other tick keeps the canonical full
+        render the timer always drove."""
+        if self.worker is not None and self.worker.isRunning():
+            self._render_stream()
+        else:
+            self.render()
+            # Sweep R25: the timer exists to repaint a stream. A
+            # tick that finds no turn running owes exactly one final
+            # repaint (this one) — left running, it rebuilt the full
+            # history HTML every 120 ms for as long as a parked gate
+            # held the window, which is CPU the owner's machine
+            # feels. The next turn's first token restarts it.
+            self._render_timer.stop()
+
+    def _render_stream(self):
+        """Incremental streaming repaint (audit B14).
+
+        When the bookkeeping still matches — the tracked bubble is
+        the last message and the message count is unchanged — replace
+        only the document tail from the bubble's block start onward.
+        Anything else (first tick, a new cycle's bubble, a replaced
+        message list) falls back to ONE full render() and re-anchors;
+        on_finished's full render heals the turn's final state anyway.
+        """
+        bubble = self.messages[-1] if self.messages else None
+        anchored = (
+            bubble is not None
+            and bubble is self._stream_bubble
+            and len(self.messages) == self._stream_prefix_len + 1
+            and self._stream_anchor is not None
+        )
+        if not anchored:
+            self.render()
+            self._establish_stream_anchor()
+            return
+        cursor = QTextCursor(self.chat.document())
+        cursor.setPosition(self._stream_anchor)
+        cursor.movePosition(QTextCursor.MoveOperation.End,
+                            QTextCursor.MoveMode.KeepAnchor)
+        # Same scroll discipline as render(): follow the stream
+        # only when the reader is already riding the bottom.
+        bar = self.chat.verticalScrollBar()
+        pinned = bar.value() >= bar.maximum() - 8
+        cursor.insertHtml(self._assistant_bubble_html(bubble.get("content")))
+        if pinned:
+            bar.setValue(bar.maximum())
+
+    def _establish_stream_anchor(self):
+        """(Re)point the streaming bookkeeping at the tail bubble
+        after a full render. A full render lays a plain assistant
+        bubble out as exactly two blocks — header, then body — so the
+        bubble begins at the second-to-last block. When the tail is
+        not such a bubble (reviewer/summary/empty — shapes render()
+        draws differently or skips), the anchor stays unset and the
+        next tick falls back to a full render again, the old behavior.
+        """
+        self._stream_bubble = None
+        self._stream_prefix_len = 0
+        self._stream_anchor = None
+        if not self.messages:
+            return
+        bubble = self.messages[-1]
+        if bubble.get("role") != "assistant" or bubble.get("reviewer") \
+                or bubble.get("summary"):
+            return
+        if not (bubble.get("content") or ""):
+            return
+        doc = self.chat.document()
+        if doc.blockCount() < 2:
+            return
+        header = doc.findBlockByNumber(doc.blockCount() - 2)
+        if not header.text().startswith("LINUX FORGE"):
+            return
+        self._stream_bubble = bubble
+        self._stream_prefix_len = len(self.messages) - 1
+        self._stream_anchor = header.position()
+
+    def refresh_history(self):
+        # Note 24 amendment: the list is scrollable and must be able to
+        # reach EVERY past chat — the old recent(12) cap silently hid
+        # anything older than the twelve newest.
+        # Audit C35: a non-empty search box swaps the source from
+        # recent() to search() — same cap, same row shape.
+        query = ""
+        search_box = getattr(self, "history_search", None)
+        if search_box is not None:
+            query = search_box.text().strip()
+        rows = self.store.search(query) if query else self.store.recent(200)
+        # Sweep R45: this rebuild runs on every persist and every
+        # search keystroke and used to deleteLater/recreate up to
+        # 200 buttons each time. When the rows that would be drawn
+        # are unchanged, the standing buttons already say the same
+        # thing — skip the rebuild. updated_at is deliberately NOT
+        # in the signature: it changes on every persist of the
+        # active conversation and would defeat the skip; it only
+        # feeds a tooltip.
+        signature = (query, tuple(
+            (r.get("id"), r.get("title"), r.get("model")) for r in rows))
+        if signature == getattr(self, "_history_signature", None):
+            return
+        self._history_signature = signature
+        while self.history_list.count():
+            item = self.history_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for row in rows:
+            label = "◷  " + (row["title"] or "Conversation")
+            if row.get("model"):
+                label += f"  ·  {short_model(row['model'])}"
+            button = QPushButton(label)
+            button.setObjectName("nav"); button.setToolTip(row["updated_at"])
+            button.clicked.connect(lambda checked=False, cid=row["id"]: self.load_conversation(cid))
+            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, b=button, cid=row["id"], t=row["title"] or "Conversation":
+                    self._history_context_menu(b, cid, t, pos))
+            self.history_list.addWidget(button)
+        self.history_list.addStretch(1)
+
+    def _history_context_menu(self, button, conversation_id, title, pos):
+        """Audit C35: the per-chat actions live on the history button's
+        right-click menu — export the transcript, or delete the chat."""
+        menu = QMenu(self)
+        export_act = menu.addAction("Export conversation…")
+        delete_act = menu.addAction("Delete conversation")
+        chosen = menu.exec(button.mapToGlobal(pos))
+        if chosen == export_act:
+            self.export_conversation(conversation_id, title)
+        elif chosen == delete_act:
+            self.delete_conversation(conversation_id)
+
+    def export_conversation(self, conversation_id, title="Conversation"):
+        text = self.store.export_text(conversation_id)
+        if text is None:
+            self.log("Export failed — that conversation no longer exists.")
+            return
+        safe = "".join(ch for ch in title if ch.isalnum() or ch in " -_").strip()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export conversation", f"{safe or 'conversation'}.md",
+            "Markdown files (*.md)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self.log(f"Export failed: {exc}")
+            return
+        self.log(f"Exported conversation to {path}")
+
+    def delete_conversation(self, conversation_id):
+        if conversation_id == self.conversation_id and (
+                (self.worker and self.worker.isRunning())
+                or (self._fold_thread is not None and self._fold_thread.isRunning())):
+            self.log("Can't delete the open conversation while a turn is running.")
+            return
+        answer = QMessageBox.question(
+            self, "Delete conversation",
+            "Delete this conversation? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        if not self.store.delete(conversation_id):
+            self.refresh_history()
+            return
+        # H5: the conversation's notes file goes with it.
+        notes_mod.delete_notes(APP_DIR, conversation_id)
+        if conversation_id in getattr(self, "_chat_tab_ids", []):
+            self._chat_tab_ids.remove(conversation_id)
+        if conversation_id == self.conversation_id:
+            self.new_chat()
+        self.refresh_history()
+        self.log("Deleted a conversation.")
+
+    def persist_conversation(self):
+        # Item #54: while a side chat is open, self.messages is the
+        # ephemeral fork — it must never reach the store. The main
+        # thread owes nothing here: every main-thread change is
+        # persisted at the moment it happens, so the record on disk
+        # is already exactly the state the fork was taken from.
+        if getattr(self, "_side_chat", None) is not None:
+            return
+        if any(m.get("role") == "user" for m in self.messages):
+            self.conversation_id = self.store.save(
+                self.conversation_id, self.messages,
+                model=self.model_combo.currentText().strip() or None,
+                project=self.workspace)
+            # Item #69: while maintenance is active, this save IS
+            # the persistent maintenance conversation — remember its
+            # id in settings so the room reopens where it left off.
+            if getattr(self, "_self_maintenance_active", False):
+                self.settings["maintenance_conversation_id"] = \
+                    self.conversation_id
+                self.save_settings()
+            self.refresh_history()
+            self._sync_chat_tabs()
+
+    # ---------- Item #54: side chats ----------
+    def open_side_chat(self):
+        """Open a side chat: a temporary fork of the current
+        conversation, WITH its context, for a quick question that
+        must not pollute the main thread. The fork is a deep copy —
+        the main list is stashed untouched and restored verbatim on
+        close; the fork is never persisted (persist_conversation
+        stands down while one is open) and closing discards it:
+        nothing merges back."""
+        if getattr(self, "_side_chat", None) is not None:
+            return
+        if self.worker and self.worker.isRunning():
+            self.log("Side chat held — a turn is running.")
+            return
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self.log("Side chat held — a context fold is running.")
+            return
+        if getattr(self, "_self_maintenance_active", False):
+            self.log("Side chat held — the maintenance room keeps "
+                     "its own single thread.")
+            return
+        # A draft plan sits in the ONE window plan slot awaiting its
+        # gate, and every turn end settles (kills) a draft — a side
+        # turn would kill the main thread's waiting plan. The gate
+        # gets its decision first.
+        if self.plan_state and self.plan_state.get("status") == "draft":
+            self.log("Side chat held — a plan is waiting at the gate. "
+                     "Approve or kill it first.")
+            return
+        self._side_chat = {"messages": self.messages}
+        self.messages = copy.deepcopy(self.messages)
+        self.side_bar.setVisible(True)
+        self.side_chat_btn.setEnabled(False)
+        self.render()
+        self._update_context_gauge()
+        self.log("Side chat opened — a temporary fork of this "
+                 "conversation. It is never saved; closing it "
+                 "discards it.")
+
+    def close_side_chat(self):
+        """Close the side chat: discard the fork and restore the
+        main thread exactly as it was — list, view, gauge. Also the
+        discard path for conversation switches (load / new / fork /
+        maintenance entry call this once their own mid-turn guards
+        have passed)."""
+        side = getattr(self, "_side_chat", None)
+        if side is None:
+            return
+        if self.worker and self.worker.isRunning():
+            self.log("Side chat stays open until the turn ends.")
+            return
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self.log("Side chat stays open until the fold settles.")
+            return
+        self.messages = side["messages"]
+        self._side_chat = None
+        self.side_bar.setVisible(False)
+        self.side_chat_btn.setEnabled(True)
+        self.render()
+        self._update_context_gauge()
+        self.log("Side chat closed — discarded. Nothing was merged "
+                 "back into the main thread.")
+
+    def load_conversation(self, conversation_id):
+        # Item #64: with Parallel turns above 1 a detachable turn
+        # moves to the background and the load proceeds; the
+        # classic refusal stands whenever the turn may not detach
+        # (see _leave_stage for the pinned reasons).
+        if not self._leave_stage(
+                "Conversation load ignored — a turn is running."):
+            return
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self.log("Conversation load ignored — a context fold is running.")
+            return  # a fold is mid-flight against the current history
+        loaded = self.store.load(conversation_id)
+        if not loaded:
+            return
+        # Note 26 (load-time half): every stored history reaches a worker
+        # through this one method — opening a conversation, the fork
+        # result, and resume-state restore all land here. Repair
+        # template-breaking shapes in memory before that can happen;
+        # the record on disk is NOT rewritten, and the repairs are
+        # receipted to the event log.
+        loaded, repairs = normalize_history(loaded)
+        if repairs:
+            self.eventlog.record("history_normalized",
+                                 conversation_id=conversation_id,
+                                 repairs=repairs)
+            self.log("History repaired on load: " + ", ".join(repairs) + ".")
+        # Item #54: switching conversations discards an open side
+        # chat — the fork belonged to the thread being left.
+        if getattr(self, "_side_chat", None) is not None:
+            self.close_side_chat()
+        self._reset_turn_scoped_state()
+        self.conversation_id = conversation_id
+        self.messages = loaded
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = self.build_system_prompt()
+        # F6: restore the conversation's own model — never silently continue under another.
+        model, project = self.store.meta(conversation_id)
+        if model:
+            names = [self.model_combo.itemText(i) for i in range(self.model_combo.count())]
+            if model in names:
+                self.model_combo.setCurrentText(model)
+                self.log(f"Conversation's model restored: {model}")
+            else:
+                self.log(f"⚠ This conversation used '{model}', which is not installed. "
+                         f"Current model: {self.model_combo.currentText()} — check before sending.")
+        if project and project != self.workspace and Path(project).is_dir():
+            self.workspace = project
+            proj.ensure_project(project)
+            self.plugin_ctx.workspace = project
+            # set_project's remaining bookkeeping, mirrored (minus
+            # new_chat — loading a conversation must not wipe it): the
+            # run surface follows the restored project (item #50:
+            # rescan + retitle), and the restore is persisted like
+            # any other project switch.
+            if getattr(self, "run_win", None) is not None:
+                self.run_win.refresh()
+            self.save_settings()
+            self.refresh_projects()
+            self.log(f"Conversation's project restored: {project}")
+            if self.messages and self.messages[0].get("role") == "system":
+                self.messages[0]["content"] = self.build_system_prompt()
+        self.render()
+        self._update_context_gauge()
+        self.log(f"Loaded conversation {conversation_id}.")
+        self._plan_restore()
+        # H5: the notes/sees rooms follow the conversation.
+        self._refresh_note_windows()
+        # Item #64: a live turn belonging to this conversation
+        # comes back onto the bench with it.
+        self._maybe_reattach_stream(conversation_id)
+        # Item C9: a conversation that crossed its soft token
+        # budget in the background is announced once, now that
+        # it is the one on the bench.
+        self._check_soft_budget(conversation_id)
+
+    # ---------- Note 12: planning workflow ----------
+    def _plan_restore(self):
+        """Load the conversation's plan sidecar (APP_DIR/plans/). A
+        plan that was mid-flight when the app closed — draft at the
+        gate, or running — restores as INTERRUPTED: completed steps
+        stay ticked, the step that was active shows interrupted, and
+        nothing pretends the turn is still alive."""
+        plan = planning_mod.load_plan(APP_DIR, self.conversation_id)
+        if plan and plan["status"] in ("draft", "running"):
+            for step in plan["steps"]:
+                if step["state"] == "active":
+                    step["state"] = "interrupted"
+            plan["status"] = "interrupted"
+            planning_mod.save_plan(APP_DIR, self.conversation_id, plan)
+        self.plan_state = plan
+        self._plan_render()
+        self._deck_sync_plan()
+        self._sync_chat_tabs()
+
+    def _plan_render(self):
+        self.plan_list.clear()
+        plan = self.plan_state
+        gate = bool(plan and plan["status"] == "draft")
+        for btn in (self.plan_approve_btn, self.plan_edit_btn, self.plan_kill_btn,
+                    self.plan_comment_btn):
+            btn.setEnabled(gate)
+        self.plan_comment_edit.setEnabled(gate)
+        if not plan:
+            self.plan_list.addItem("No plan. In Plan mode, the agent's first answer "
+                                   "is drafted as a plan and held here for your call.")
+            self.goldfish_view.clear()
+            self.document_view.clear()
+            return
+        marks = {"done": "✓", "active": "▸", "pending": "·", "interrupted": "✗"}
+        for i, step in enumerate(plan["steps"]):
+            line = f"{marks.get(step['state'], '·')}  {i + 1}. {step['text']}"
+            if step.get("resource"):
+                line += f"    ({step['resource']})"
+            self.plan_list.addItem(line)
+        skribe = plan.get("skribe") or ""
+        if skribe.startswith("NOT VERIFIED"):
+            self.plan_list.addItem(f"✗  SKRIBE verification — {skribe}")
+        elif skribe:
+            self.plan_list.addItem(f"✓  SKRIBE verification — {skribe}")
+        else:
+            self.plan_list.addItem("·  SKRIBE verification — the final step, graded by the gate")
+        # Item #56: the Goldfish rendering lives in its own view
+        # under the checklist — the checklist's rows stay exactly
+        # the plan's steps plus the SKRIBE line, as before.
+        goldfish_text = goldfish_mod.format_result(plan.get("goldfish"))
+        self.goldfish_view.setPlainText(
+            goldfish_text or
+            "Goldfish review — no review on record for this plan.")
+        # Item #58: the plan document under the review — the full
+        # text the checklist was extracted from. A bare-list draft
+        # (or a pre-#58 sidecar) has none on record.
+        self.document_view.setPlainText(plan.get("document") or "")
+
+    def _plan_persist(self):
+        if self.plan_state is not None and self.conversation_id:
+            planning_mod.save_plan(APP_DIR, self.conversation_id, self.plan_state)
+        self._deck_sync_plan()
+
+    def _deck_sync_plan(self):
+        self.deck.set_state(plan=planning_mod.deck_plan(self.plan_state))
+        self._deck_sync_documents()
+
+    def _deck_sync_documents(self):
+        """The deck's DOCUMENTS list (2026-11-09): the project's
+        deliverable documents as phone downloads — the artifacts
+        (plans, designs, reviews, walkthroughs) plus the Markdown
+        documents filed directly under .forge/ (plan documents the
+        model writes there). Paths are project-relative; the deck
+        server confines downloads to the project root."""
+        docs = []
+        try:
+            for e in artifacts_mod.list_artifacts(self.workspace)[:12]:
+                docs.append({
+                    "name": f"{e.get('kind', 'note')} — {e.get('title', '')}",
+                    "path": ".forge/artifacts/" + str(e.get("file", ""))})
+            forge_dir = Path(self.workspace) / ".forge"
+            if forge_dir.is_dir():
+                loose = sorted(
+                    (p for p in forge_dir.glob("*.md")
+                     if p.name not in ("instructions.md", "scratchpad.md")),
+                    key=lambda p: p.stat().st_mtime, reverse=True)
+                for p in loose[:6]:
+                    docs.append({"name": p.name, "path": f".forge/{p.name}"})
+        except OSError:
+            pass
+        self.deck.set_state(documents=docs)
+
+    def _plan_resource_text(self) -> str:
+        """The per-step resource line: the governor's current
+        measurement, formatted for a checklist row. INFORMATION ONLY
+        — the owner's standing ruling is that the governor measures
+        and never governs: this method's only caller writes its
+        result into a label, and nothing in the execution path reads
+        it, branches on it, or waits for it. A snapshot that fails
+        yields an empty line, never an exception into the turn."""
+        # Sweep R29: the line is informational, and the gauges
+        # already poll the governor on a background thread — format
+        # from the LAST snapshot they landed instead of calling
+        # governor.snapshot() synchronously here on the GUI thread
+        # (up to 0.7 s of freeze per plan step). No snapshot yet →
+        # no line, exactly as a failed snapshot read used to read.
+        snap = getattr(self, "_gauge_snap", None)
+        if not snap:
+            return ""
+        try:
+            return f"RAM free {snap['avail_gb']:.1f} GB at step start"
+        except Exception:
+            return ""
+
+    def on_plan_goldfish(self, result):
+        """Item #56: the worker's Goldfish pass finished — the result
+        rides into the plan state on_plan_ready is about to build
+        (the worker emits this signal first). Pure record-keeping:
+        the findings are advisory and touch nothing else."""
+        self._pending_goldfish = result
+        summary = goldfish_mod.summary_line(result)
+        if summary:
+            self.log("🐠 " + summary + " — findings are in the Plan window.")
+
+    def on_plan_document(self, text):
+        """Item #58: the worker's plan document, emitted just
+        before plan_ready — folded into the plan state there, the
+        same pattern as the Goldfish result. The document is the
+        plan's full text; the gate shows it under the checklist."""
+        self._pending_plan_document = text
+
+    def on_plan_ready(self, steps):
+        """The worker drafted a plan and is parked at the gate."""
+        self.plan_state = planning_mod.new_plan(
+            list(steps), request=self._pending_plan_request,
+            document=self._pending_plan_document or "")
+        self._pending_plan_document = None
+        # Item #56: fold in the Goldfish result emitted just before.
+        self.plan_state["goldfish"] = self._pending_goldfish
+        self._pending_goldfish = None
+        # Item #66: a fresh draft starts with a clean comment box
+        # and no revision under way.
+        self._plan_revising = False
+        self.plan_comment_edit.clear()
+        self._plan_render()
+        self.open_plan_window()
+        request = (self._pending_plan_request or "").strip()
+        # Item #58: the artifact IS the plan document (the full
+        # text lives in the plan .md under .forge/artifacts/);
+        # a bare-list draft keeps the historical steps-only body.
+        document = self.plan_state.get("document") or ""
+        self._record_artifact(
+            "plan", request.splitlines()[0][:60] if request else "Plan",
+            document or
+            ((f"Request: {request}\n\n" if request else "")
+             + planning_mod.format_steps(list(steps))))
+        self._plan_persist()
+        self.agent_state.setText("●  PAUSED — PLAN AWAITING YOUR CALL")
+        self.agent_state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
+        self.ember.set_mode("paused"); self.ember_label.setText("PAUSED")
+        self.log(f"Plan drafted: {len(steps)} step(s). Approve, edit, or kill it — "
+                 "nothing runs until you decide.")
+
+    def _plan_gate_action(self, action, comment=None):
+        plan = self.plan_state
+        if not plan or plan["status"] != "draft":
+            return
+        if action == "comment":
+            self._plan_comment(comment)
+            return
+        if getattr(self, "_plan_revising", False):
+            # Item #66: the driver is mid-revision against a gate
+            # comment — there is no parked decision to release, and
+            # resolving one now would strand the gate when the
+            # revision lands. The gate re-opens then.
+            self.log("The driver is revising the plan against your "
+                     "comment — the gate re-opens when the revision "
+                     "lands.")
+            return
+        if action == "edit":
+            self._plan_edit()
+            return
+        worker = self.worker if (self.worker and self.worker.isRunning()) else None
+        if action == "kill":
+            plan["status"] = "killed"
+            self._plan_render()
+            self._plan_persist()
+            self.log("Plan killed — nothing was executed.")
+            if worker:
+                worker.resolve_plan("kill")
+            return
+        # approve: the (possibly edited) steps are what runs.
+        plan["status"] = "running"
+        self._plan_render()
+        self._plan_persist()
+        self.log(f"Plan approved: {len(plan['steps'])} step(s). Working them in order.")
+        # H5: the approval is a decision the fold must not eat —
+        # it goes in the conversation's notes file.
+        _req_lines = (plan.get("request") or "").strip().splitlines()
+        notes_mod.append_entry(
+            APP_DIR, self.conversation_id,
+            f"Plan approved: {_req_lines[0][:80] if _req_lines else 'Plan'} "
+            f"({len(plan['steps'])} step(s))")
+        if worker:
+            worker.resolve_plan("approve", [s["text"] for s in plan["steps"]])
+        else:
+            # The worker is somehow gone (Stop raced the click): the
+            # gate has nothing to release, so the plan cannot run.
+            plan["status"] = "interrupted"
+            self._plan_render()
+            self._plan_persist()
+
+    def _plan_comment(self, comment=None):
+        """Item #66: the gate's fourth action. The owner's comment
+        settles the gate as a REVISION — the comment is recorded on
+        the plan sidecar first, then handed to the parked worker,
+        which rewrites the draft against it and returns to this
+        same gate (on_plan_revised). It is never an approval:
+        nothing executes on a comment. An empty comment is refused
+        in words — the draft keeps waiting, exactly as it was. The
+        deck passes its comment text in; the desktop reads its own
+        comment box (and only the desktop's box is cleared)."""
+        plan = self.plan_state
+        if not plan or plan["status"] != "draft":
+            return
+        if getattr(self, "_plan_revising", False):
+            self.log("A revision is already under way against your "
+                     "last comment — the gate re-opens when it lands.")
+            return
+        from_desktop = comment is None
+        if from_desktop:
+            comment = self.plan_comment_edit.toPlainText()
+        comment = str(comment or "").strip()
+        if not comment:
+            self.log("Type the change you want first — an empty "
+                     "comment can't revise the plan, and the draft "
+                     "is still waiting at the gate.")
+            self.statusBar().showMessage(
+                "Empty comment — the drafted plan still waits.")
+            return
+        planning_mod.record_comment(plan, comment)
+        self._plan_persist()
+        if from_desktop:
+            self.plan_comment_edit.clear()
+        self.log(f"Plan comment sent: {comment[:120]}")
+        worker = self.worker if (self.worker and self.worker.isRunning()) else None
+        if worker:
+            self._plan_revising = True
+            # The gate's controls close while the driver revises —
+            # there is no parked decision to release until the
+            # revision lands and _plan_render re-opens them.
+            for btn in (self.plan_approve_btn, self.plan_edit_btn,
+                        self.plan_kill_btn, self.plan_comment_btn):
+                btn.setEnabled(False)
+            self.plan_comment_edit.setEnabled(False)
+            worker.resolve_plan("revise", comment=comment)
+        else:
+            # No live turn holds the gate (Stop raced the click):
+            # the comment stays on the plan's record, and the
+            # draft's settle speaks for the gate from here.
+            self.log("No live turn is holding the gate — the "
+                     "comment is on the plan's record, but no "
+                     "revision is running.")
+
+    def on_plan_revised(self, steps, document):
+        """Item #66: the worker revised the draft against the
+        owner's gate comment and is parked at the gate again. The
+        SAME plan state updates in place — the comment history and
+        the Goldfish record ride it — the checklist and document
+        re-render, and the gate waits for the owner's next call."""
+        plan = self.plan_state
+        if not plan:
+            return
+        self._plan_revising = False
+        plan["steps"] = [{"text": str(t), "state": "pending", "resource": ""}
+                         for t in steps]
+        if document:
+            plan["document"] = document
+        self._plan_render()
+        self._plan_persist()
+        self.log(f"Plan revised against your comment: {len(steps)} "
+                 "step(s). Approve, edit, comment again, or kill "
+                 "it — nothing runs until you decide.")
+
+    def _plan_edit(self):
+        plan = self.plan_state
+        if not plan or plan["status"] != "draft":
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit the plan — one step per line")
+        dialog.setMinimumWidth(560)
+        lay = QVBoxLayout(dialog)
+        lay.addWidget(QLabel("Rewrite the steps freely — numbering is optional. "
+                             "Saving re-reads them; Approve then runs THIS plan."))
+        editor = QPlainTextEdit()
+        editor.setPlainText(planning_mod.format_steps(
+            [s["text"] for s in plan["steps"]]))
+        editor.setMinimumHeight(220)
+        lay.addWidget(editor)
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
+        lay.addWidget(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        steps = planning_mod.steps_from_editor(editor.toPlainText())
+        if not steps:
+            self.log("Plan edit left no steps — the drafted plan stands.")
+            return
+        plan["steps"] = [{"text": t, "state": "pending", "resource": ""}
+                         for t in steps]
+        self._plan_render()
+        self._plan_persist()
+        self.log(f"Plan edited: {len(steps)} step(s). Approve when ready.")
+
+    def on_plan_active(self, idx):
+        plan = self.plan_state
+        if not plan or plan["status"] != "running":
+            return
+        if 0 <= idx < len(plan["steps"]):
+            step = plan["steps"][idx]
+            if step["state"] == "pending":
+                step["state"] = "active"
+            # Display-only measurement for the row (see
+            # _plan_resource_text — it cannot hold anything).
+            step["resource"] = self._plan_resource_text()
+            self._plan_render()
+            self._plan_persist()
+
+    def on_plan_step_done(self, idx):
+        plan = self.plan_state
+        if not plan or plan["status"] != "running":
+            return
+        if 0 <= idx < len(plan["steps"]):
+            plan["steps"][idx]["state"] = "done"
+            self._plan_render()
+            self._plan_persist()
+            self.log(f"Plan step {idx + 1} of {len(plan['steps'])} done.")
+            # H5: done-steps are exactly what a fold loses — the
+            # notes file keeps them on disk.
+            notes_mod.append_entry(
+                APP_DIR, self.conversation_id,
+                f"Step done: {plan['steps'][idx]['text']}")
+            # C3: a finished plan step is a meaningful boundary —
+            # the settle that ends this turn judges the workspace's
+            # untested tab at the cadence's smaller boundary floor.
+            self._cadence_boundary.add(self.workspace)
+
+    def on_plan_turn_done(self, outcome):
+        plan = self.plan_state
+        if not plan:
+            return
+        if outcome.get("cancelled"):
+            for step in plan["steps"]:
+                if step["state"] == "active":
+                    step["state"] = "interrupted"
+            plan["status"] = "interrupted"
+        else:
+            plan["status"] = "done"
+        verified = int(outcome.get("verified", 0))
+        unverified = int(outcome.get("unverified", 0))
+        if not self._skribe_enabled():
+            plan["skribe"] = "off in settings"
+        elif not outcome.get("graded"):
+            plan["skribe"] = "no writes to verify"
+        elif unverified:
+            plan["skribe"] = (f"NOT VERIFIED — {unverified} file(s) unverified, "
+                              f"{verified} verified")
+        else:
+            plan["skribe"] = f"{verified} file(s) verified"
+        self._plan_render()
+        self._plan_persist()
+        self.log(f"Plan turn settled: {outcome.get('steps_done', 0)}/"
+                 f"{outcome.get('steps_total', 0)} step(s) announced done · "
+                 f"SKRIBE: {plan['skribe']}.")
+
+    def _plan_settle_draft(self):
+        """A worker that ends while its plan still sits at the gate
+        (Stop released the wait as a kill) leaves the checklist
+        honest: the draft is marked killed, never left hanging."""
+        self._plan_revising = False
+        if self.plan_state and self.plan_state["status"] == "draft":
+            self.plan_state["status"] = "killed"
+            self._plan_render()
+            self._plan_persist()
+
+    def open_schedule(self):
+        dialog = ScheduleDialog(self, list(self.settings.get("scheduled_jobs", [])), self.workspace)
+        if dialog.exec() == QDialog.Accepted:
+            self.settings["scheduled_jobs"] = dialog.jobs
+            self.save_settings()
+            self.log(f"Schedule saved — {len(dialog.jobs)} job(s).")
+
+    def _scheduler_tick(self):
+        if self.worker and self.worker.isRunning():
+            return
+        jobs = list(self.settings.get("scheduled_jobs", []))
+        due = sched.due_jobs(jobs)
+        if not due:
+            if jobs != self.settings.get("scheduled_jobs", []):
+                self.settings["scheduled_jobs"] = jobs
+                self.save_settings()
+            return
+        job = due[0]
+        name = str(job.get("name", ""))
+        # Sweep R36: the pre-job bench state — if the send fails,
+        # the tick restores the workspace and conversation it
+        # switched away from instead of leaving the owner somewhere
+        # he never navigated to. (mark_run below was already
+        # post-send; the STATE switch was the destructive half.)
+        prev_workspace = self.workspace
+        prev_cid = self.conversation_id
+
+        def _rollback():
+            if self.workspace != prev_workspace:
+                self.workspace = prev_workspace
+                self.plugin_ctx.workspace = prev_workspace
+                self.refresh_projects()
+            if prev_cid is not None and prev_cid != self.conversation_id:
+                self.load_conversation(prev_cid)
+        # A job is marked run ONLY after its send actually starts a
+        # worker — a send that raises or early-returns (no model
+        # selected, say) must not consume the slot; the job stays due
+        # and retries on the next tick instead of missing silently.
+        try:
+            workspace = job.get("workspace")
+            if workspace and workspace != self.workspace and Path(workspace).is_dir():
+                self.workspace = workspace
+                proj.ensure_project(workspace)
+                self.plugin_ctx.workspace = workspace
+                self.refresh_projects()
+            self.log(f"⏰ Scheduled job firing: {job.get('name')} — if it needs approval, it will park and wait for you.")
+            self.eventlog.record("scheduled_job", name=name[:60])
+            self.new_chat()
+            self.input.setPlainText(job.get("prompt", ""))
+            self.send_message()
+        except Exception as exc:
+            self.log(f"⏰ Scheduled job '{name}' could not start — it will retry on the next tick. ({exc})")
+            _rollback()
+            return
+        if self.worker is not None and self.worker.isRunning():
+            sched.mark_run(job)
+            self.settings["scheduled_jobs"] = jobs
+            self.save_settings()
+        else:
+            self.log(f"⏰ Scheduled job '{name}' could not start — it will retry on the next tick.")
+            _rollback()
+
+    def _watch_tick(self):
+        # C1: the Watch seat's stall check runs on EVERY tick, ahead
+        # of the AI-comment gate below (watch_ai is the comment
+        # feature's switch; the run monitor is not behind it).
+        if self.run_is_running():
+            try:
+                alert = self._run_monitor.check_stall()
+            except Exception:
+                alert = None
+            if alert is not None:
+                self._note_monitor_alert(alert)
+        if not self.settings.get("watch_ai", False):
+            return
+        if self.worker and self.worker.isRunning():
+            return
+        markers = watch_mod.scan(self.workspace, self._watch_seen)
+        if not markers:
+            return
+        # Only the dispatched marker is marked seen. The rest stay
+        # unseen, so the next idle tick picks up the next one — one
+        # marker per turn, in scan order, none silently dropped.
+        m = markers[0]
+        mark = "AI!" if m["kind"] == "task" else "AI?"
+        before = self.worker
+        self.new_chat()
+        self.input.setPlainText(
+            f"In {m['file']} (line {m['line']}) I wrote: {m['text']}\n"
+            f"{'Do it.' if m['kind'] == 'task' else 'Answer it, and if the answer belongs in the file, add it as a comment.'} "
+            f"When it is handled, remove the {mark} marker from that line.")
+        self.send_message()
+        # Sweep R35: seen-marking happens only AFTER the send is
+        # confirmed started (a new worker, or the pre-send fold
+        # pipeline that starts one when it settles). It used to be
+        # recorded BEFORE dispatch, so a send that refused (no
+        # model selected, a provider guard) consumed the marker
+        # forever — the task silently never ran.
+        folding = self._fold_thread is not None \
+            and self._fold_thread.isRunning()
+        started = folding or (self.worker is not None
+                              and self.worker is not before)
+        if not started:
+            self.log(f"✎ AI-comment in {m['file']}:{m['line']} could not "
+                     "start a turn — it stays in place and will be "
+                     "picked up again on the next idle tick.")
+            return
+        self._watch_seen.add(m["key"])
+        self.settings["watch_seen"] = sorted(self._watch_seen)[-500:]
+        # Sweep R58: the in-memory set takes the same cap as the
+        # persisted copy — it used to grow for the whole session
+        # while only the saved list was capped.
+        self._watch_seen = set(self.settings["watch_seen"])
+        self.save_settings()
+        self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}) — running it now.")
+        if len(markers) > 1:
+            self.log(f"✎ {len(markers) - 1} more AI marker(s) waiting — they run one per turn.")
+        self.eventlog.record("watch_pickup", file=m["file"], line=m["line"], marker_kind=m["kind"])
+
+    def apply_update(self, zip_path=None):
+        # Item #69: a caller holding a candidate package (the
+        # Maintenance window) hands its zip straight over — the same
+        # updater flow, no file dialog. A non-path argument (a Qt
+        # action's checked flag arriving through a signal) means the
+        # classic dialog path, byte-for-byte as before.
+        if not isinstance(zip_path, (str, Path)):
+            zip_path = None
+        if zip_path is not None:
+            # S6 (audit S1-22): a handed-over path is a self-
+            # maintenance candidate — verify the zip against the
+            # sha256 its sidecar recorded at build time BEFORE the
+            # updater is spawned. A mismatch (or no recorded hash)
+            # refuses the install outright; nothing is extracted.
+            # The manual dialog flow below is owner-picked and has
+            # no sidecar to trust, so it is NOT hash-gated.
+            try:
+                candidate = self_maint_mod.verify_candidate_package(zip_path)
+            except self_maint_mod.MaintenanceError as exc:
+                QMessageBox.warning(self, "Update", str(exc))
+                return
+            self.log("Candidate checksum verified — sha256 "
+                     f"{str(candidate.get('sha256', ''))[:12]}…")
+            extras = []
+        else:
+            dialog = UpdateDialog(self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            zip_path, extras = dialog.values()
+        if zip_path and not Path(zip_path).is_file():
+            QMessageBox.warning(self, "Update", f"File not found: {zip_path}")
+            return
+        self.persist_conversation()
+        last_prompt = next((m.get("content", "") for m in reversed(self.messages)
+                            if m.get("role") == "user"), "")
+        upd.write_resume_state(APP_DIR, {
+            "conversation_id": self.conversation_id, "workspace": self.workspace,
+            "mode": self.mode_combo.currentText().lower(),
+            "was_running": bool(self.worker and self.worker.isRunning()),
+            "last_prompt": last_prompt, "reason": "update"})
+        upd.spawn_updater(ROOT_DIR, APP_DIR, zip_path, extras)
+        self.log("Update handed to the external updater — quitting to install. See you in a moment.")
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+        QTimer.singleShot(400, QApplication.instance().quit)
+
+    def _restore_resume_state(self):
+        result = upd.read_update_result(APP_DIR)
+        if result:
+            if result.get("ok"):
+                self.log("⬆ Update installed cleanly. " + " · ".join(result.get("steps", [])[-2:]))
+            else:
+                self.log(f"⚠ Update problem: {result.get('error', 'unknown')} — the previous version may still be in place.")
+            upd.clear_update_result(APP_DIR)
+        state = upd.read_resume_state(APP_DIR)
+        if not state:
+            return
+        upd.clear_resume_state(APP_DIR)
+        cid = state.get("conversation_id")
+        if cid:
+            self.load_conversation(cid)
+        if state.get("mode"):
+            self.mode_combo.setCurrentText(state["mode"].capitalize())
+        if state.get("was_running") and state.get("last_prompt"):
+            self.input.setPlainText(state["last_prompt"])
+            self.log("↩ Picked up where you left off — your interrupted task is in the input box. Send resumes it.")
+        elif state.get("reason") == "update":
+            self.log("↩ Back from the update — same conversation, same place.")
+
+    def _toggle_deck(self):
+        if self.deck._server:
+            self.deck.stop()
+            self.act_deck.setText("📱   Phone deck: OFF")
+            self.deck_url.setText("")
+            dlg = getattr(self, "_deck_link_dialog", None)
+            if dlg is not None:
+                dlg.close()
+            self.log("Phone deck off.")
+        else:
+            # Sweep R107: a failed bind (port already held) surfaces
+            # as a plain log line and the deck stays OFF — the raw
+            # OSError used to escape the toggle as a traceback and
+            # leave the button state lying about a half-started deck.
+            try:
+                self.deck.start()
+            except DeckError as exc:
+                self.log(str(exc))
+                return
+            self._deck_sync()
+            self.act_deck.setText("📱   Phone deck: ON")
+            self.deck_url.setText(self.deck.url)
+            # S4 (audit S1-07): the log is a FULL-capture record —
+            # the deck's key never goes in it. Host:port only; the
+            # full link lives on screen and in the QR window.
+            self.log("Phone deck live on this network only: "
+                     f"http://{lan_ip()}:{self.deck.port}/ "
+                     "(the link with its key is in the deck panel)")
+            self._show_deck_link()
+        # Keep any deck-button mirror in sync, whichever door
+        # (menu, palette) turned the deck on or off.
+        deck_btn = getattr(self, "deck_btn", None)
+        if deck_btn is not None:
+            deck_btn.setChecked(bool(self.deck._server))
+
+    def show_welcome(self):
+        """Pop the startup welcome screen (owner request,
+        2026-11-10): the donate / buy-me-a-coffee window, shown
+        by main() at launch and re-openable any time from the
+        menu (the same callable, like every other window). It
+        opens either way: if the QR cannot be rendered, the
+        window says so and shows the plain Cash App link."""
+        dlg = getattr(self, "_welcome_dialog", None)
+        if dlg is None:
+            dlg = WelcomeDialog(self)
+            self._welcome_dialog = dlg
+        dlg.show(); dlg.raise_(); dlg.activateWindow()
+        return dlg
+
+    def _show_deck_link(self):
+        """Pop the deck-link QR window (owner request, 2026-11-08):
+        scan it, close it, done — nothing parked in the inspector.
+        Called automatically when the deck starts, and from the menu
+        any time while the deck is live. The window opens either way:
+        if the QR cannot be rendered, the window says so and shows the
+        plain URL big enough to type. This must never fail silently —
+        the first version returned without a word when its QR library
+        was missing, and the owner got no window at all (2026-11-08)."""
+        if not self.deck._server:
+            self.log("Phone deck is off — start it to get its QR code.")
+            return
+        pix = qr_mod.qr_pixmap(self.deck.url, scale=8)
+        if pix is None:
+            self.log("⚠ QR code could not be rendered — the deck-link "
+                     "window shows the address to type instead.")
+        dlg = getattr(self, "_deck_link_dialog", None)
+        if dlg is None:
+            dlg = DeckLinkDialog(self)
+            self._deck_link_dialog = dlg
+        dlg.set_link(self.deck.url, pix)
+        dlg.show(); dlg.raise_(); dlg.activateWindow()
+
+    def _on_phone_prompt(self, text):
+        self._deliver_phone_prompt(text)
+
+    def _deliver_phone_prompt(self, text):
+        """A phone prompt's one road into the bench — the same road
+        it has always taken (the /project command form, the mid-turn
+        queue, then the ordinary send path), now RETURNING the
+        (ok, message) the deck reports back to the phone, so a send
+        from the couch is never a leap of faith: received, queued,
+        or refused, in words."""
+        stripped = text.strip()
+        if stripped == "/project" or stripped.startswith("/project "):
+            return self._phone_project_command(stripped[len("/project"):].strip())
+        fold_busy = self._fold_thread is not None and self._fold_thread.isRunning()
+        # Item #64: at the parallel cap the prompt queues too — a
+        # background settle drains it when a slot frees. Only
+        # background streams count: the stage's own busyness is the
+        # check above, exactly as before.
+        at_cap = len([s for s in self._live_streams()
+                      if not self._is_stage(s)]) \
+            >= self._max_parallel_turns()
+        if (self.worker and self.worker.isRunning()) or fold_busy or at_cap:
+            # Sweep R51: the queue was unbounded — a phone (or a
+            # stuck sender) could pile prompts up all day and the
+            # bench would play them back for hours. Twenty held is
+            # a generous backlog; past it the phone hears the truth.
+            if len(self._phone_queue) >= 20:
+                self.log("📱 Phone prompt refused — 20 prompts are already held.")
+                return False, ("The queue is full (20 prompts held) — "
+                               "this one was not kept. Try again when "
+                               "a turn ends.")
+            while len(self._phone_queue_ws) < len(self._phone_queue):
+                self._phone_queue_ws.append(None)
+            self._phone_queue.append(text)
+            self._phone_queue_ws.append(self.workspace)
+            position = len(self._phone_queue)
+            self.log(f"📱 Phone prompt queued until the current turn ends "
+                     f"(#{position} in line).")
+            if position == 1:
+                return True, "Queued — it runs when the current turn ends."
+            return True, (f"Queued — #{position} in line; it runs after "
+                          f"the prompts ahead of it.")
+        self.log("📱 Phone prompt received.")
+        self.input.setPlainText(text)
+        self.send_message()
+        # Item #71: if the send path refused (the multimodal
+        # guard), the phone hears the refusal itself — the blanket
+        # "Received" would be a lie about a turn that never ran.
+        if getattr(self, "_send_refusal", None):
+            return False, self._send_refusal
+        return True, "Received — the Forge is on it."
+
+    def _drain_phone_queue(self):
+        """Fire the oldest held phone prompt, if any — one per turn
+        end (finished OR failed), so prompts sent during a long turn
+        play back in the order they arrived instead of overwriting
+        each other in a single slot."""
+        while self._phone_queue:
+            queued = self._phone_queue.pop(0)
+            queued_ws = self._phone_queue_ws.pop(0) \
+                if self._phone_queue_ws else None
+            if queued_ws is not None and queued_ws != self.workspace:
+                # Sweep R51: queued under another project — running
+                # it here would send the words into the wrong
+                # codebase's conversation. Drop it, say so, and
+                # look at the next in line.
+                self.log(f"📱 A held phone prompt belonged to another "
+                         f"project ({queued_ws}) and was dropped "
+                         "rather than run here.")
+                continue
+            # Sweep R55: the singleShot carries the window as its
+            # context object — a callback that outlives the window
+            # dies with it instead of firing into a destroyed bench.
+            QTimer.singleShot(400, self, lambda: self._on_phone_prompt(queued))
+            return
+
+    def _deck_prompt_delivery(self, text, holder):
+        """GUI-thread slot for the deck's blocking /prompt round trip."""
+        if holder.get("expired"):
+            # Sweep R101: the deck's waiter already timed out and
+            # told the phone the bench didn't answer — this queued
+            # delivery is STALE and must not act now (the bench has
+            # moved on). Release the holder and drop it.
+            holder["event"].set()
+            return
+        try:
+            holder["result"] = self._deliver_phone_prompt(str(text))
+        except Exception as exc:
+            holder["result"] = (False, f"Prompt failed: {exc}")
+        finally:
+            holder["event"].set()
+
+    def _deck_plan_action(self, action, holder):
+        """GUI-thread slot for the deck's blocking /plan round trip
+        (audit C25): a phone approve/kill lands on the Note 12 gate
+        through the very same _plan_gate_action the desktop buttons
+        call — the phone is a second door to the same room. Only
+        "approve"/"kill"/"comment" are ever passed on:
+        _plan_gate_action treats anything that is not edit/kill/
+        comment as approve, so the check here is load-bearing, not
+        decoration. A comment rides the holder (the deck's HTTP
+        layer put it there), never the desktop's comment box."""
+        if holder.get("expired"):
+            # Sweep R101: stale queued delivery — the phone was
+            # already told the bench didn't answer; a plan decision
+            # must never land late. See _deck_prompt_delivery.
+            holder["event"].set()
+            return
+        try:
+            action = str(action)
+            plan = self.plan_state
+            if not plan or plan.get("status") != "draft":
+                holder["result"] = (False,
+                    "That plan is no longer waiting for a decision.")
+            elif getattr(self, "_plan_revising", False):
+                # Item #66: mid-revision there is no parked
+                # decision for ANY phone action to release.
+                holder["result"] = (False,
+                    "The driver is revising the plan against a "
+                    "comment — the gate re-opens when the revision "
+                    "lands.")
+            elif action == "approve":
+                self._plan_gate_action("approve")
+                holder["result"] = (True, "Plan approved — working the steps.")
+            elif action == "kill":
+                self._plan_gate_action("kill")
+                holder["result"] = (True, "Plan killed — nothing was executed.")
+            elif action == "comment":
+                comment = str(holder.get("comment") or "").strip()
+                if not comment:
+                    holder["result"] = (False,
+                        "Type the change you want first — an empty "
+                        "comment can't revise the plan.")
+                else:
+                    self._plan_gate_action("comment", comment)
+                    holder["result"] = (True,
+                        "Comment sent — the driver is revising the plan.")
+            else:
+                holder["result"] = (False, "Unknown plan action.")
+        except Exception as exc:
+            holder["result"] = (False, f"Plan action failed: {exc}")
+        finally:
+            holder["event"].set()
+
+    def _deck_sync(self):
+        if not self.deck._server:
+            return
+        fields = {"agent_state": self.agent_state.text().replace("●", "").strip(),
+                  "model": short_model(self.model_combo.currentText()),
+                  "mode": self.mode_combo.currentText().lower(),
+                  # Item 10: the deck's Council chip reads the desktop
+                  # checkbox — the single source of truth — plus the
+                  # reviewer seat's resolved display name. Item #41:
+                  # the resolution rides seats.effective_seat_model
+                  # (file override included; its reviewer default is
+                  # parity-pinned to the council module's), so the
+                  # chip names the seat that will actually review.
+                  "council": self.council_check.isChecked(),
+                  "council_model": short_model(seats_mod.effective_seat_model(
+                      "reviewer", self.settings.get("reviewer_model", ""),
+                      self._seat_config,
+                      self.settings.get("governing_roster", ""))[0])}
+        snap = self._gauge_snap
+        if snap:
+            used = max(0.0, snap["total_gb"] - snap["avail_gb"])
+            fields["gauges"] = {
+                "ram_pct": int(100 * used / snap["total_gb"]) if snap["total_gb"] else 0,
+                "ram_text": f"{used:.1f}/{snap['total_gb']:.0f} GB",
+                "cpu_pct": min(100, int(100 * snap["load_1min"] / max(1, snap["threads"]))),
+                "cpu_text": f"load {snap['load_1min']:.2f} / {snap['threads']}"}
+        # Sweep R43: only the last six visible messages are ever
+        # sent — walk from the tail and stop at six instead of
+        # building a stripped copy of the entire history every
+        # sync (this runs every few seconds, all session long).
+        convo = []
+        for m in reversed(self.messages):
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip():
+                convo.append({"role": m["role"], "text": m["content"].strip()[:1500]})
+                if len(convo) >= 6:
+                    break
+        convo.reverse()
+        fields["conversation"] = convo
+        self.deck.set_state(**fields)
+        self._sync_deck_project()
+        self._deck_sync_plan()
+        self.deck.push_log(self._log_lines[-12:])
+
+    def _on_phone_stop(self):
+        self.log("📱 Stop sent from the phone.")
+        self.stop_generation()
+        self.deck.set_state(turn={"active": False, "started_at": 0, "last_activity": 0})
+
+    def _on_phone_mode(self, mode):
+        if mode in perm_mod.MODES:
+            self.mode_combo.setCurrentText(mode.capitalize())
+            self.log(f"📱 Mode switched from the phone: {mode}")
+
+    def _on_phone_council(self, on):
+        # Item 10: flip the desktop's per-turn Council checkbox — the
+        # phone holds no council state of its own. setChecked runs the
+        # checkbox's own toggled hook (settings save + log line), and
+        # _start_turn reads this same box for desktop and phone sends
+        # alike. Like a phone mode switch, a flip mid-turn lands on
+        # the NEXT turn: the running worker keeps the flag it was
+        # built with.
+        on = bool(on)
+        if on == self.council_check.isChecked():
+            return
+        self.council_check.setChecked(on)
+        self.log(f"📱 Council {'on' if on else 'off'} — switched from the phone")
+
+    # ---------- phone deck: project switching ----------
+    def _sync_deck_project(self):
+        current_name = next((e.get("name") for e in self.projects
+                             if e.get("path") == self.workspace), Path(self.workspace).name)
+        self.deck.set_state(
+            project={"name": current_name, "path": self.workspace},
+            projects=[{"name": e.get("name", Path(e.get("path", "")).name),
+                       "path": e.get("path", "")} for e in self.projects])
+
+    def _deck_project_switch(self, target, holder):
+        """GUI-thread slot for the deck's blocking /project round trip."""
+        if holder.get("expired"):
+            # Sweep R101: stale queued delivery — the phone was
+            # already told the bench didn't answer; the project must
+            # not switch out from under the bench now. See
+            # _deck_prompt_delivery.
+            holder["event"].set()
+            return
+        try:
+            holder["result"] = self._switch_project_from_deck(str(target))
+        except Exception as exc:
+            holder["result"] = (False, f"Switch failed: {exc}")
+        finally:
+            holder["event"].set()
+
+    def _switch_project_from_deck(self, target: str):
+        """Resolve + switch for both deck forms (POST /project and the
+        /project prompt command). The switch itself is set_project —
+        the exact method the GUI project list calls — with add_project's
+        registration bookkeeping for a folder that isn't known yet.
+        Mid-turn mirrors the GUI: set_project refuses while a turn runs;
+        here the refusal is reported instead of silent, because a phone
+        tap has no other way to be seen."""
+        path, err = resolve_project(target, self.projects)
+        if err:
+            self.log(f"📱 Project switch refused: {err}")
+            return False, err
+        if path == self.workspace:
+            self.log(f"📱 Project already active: {path}")
+            return True, f"Already the active project: {Path(path).name}"
+        if self.worker and self.worker.isRunning():
+            message = ("The Forge is mid-turn — the bench won't switch projects "
+                       "until the turn ends (same rule as the GUI).")
+            self.log("📱 Project switch held: mid-turn.")
+            return False, message
+        if not any(e.get("path") == path for e in self.projects):
+            self.projects.append({"name": Path(path).name, "path": path})
+        self.set_project(path)
+        self._sync_deck_project()
+        return True, f"Project active: {Path(path).name} — new conversation started there."
+
+    def _phone_project_command(self, arg: str):
+        """'/project' typed into the deck prompt box. Bare = status.
+        Returns the (ok, message) the deck reports to the phone."""
+        if not arg:
+            names = ", ".join(e.get("name", "?") for e in self.projects) or "none yet"
+            self.log(f"📱 Project: {Path(self.workspace).name} — {self.workspace} "
+                     f"· known projects: {names}")
+            return True, f"Project: {Path(self.workspace).name} — {self.workspace}"
+        return self._switch_project_from_deck(arg)
+
+    def fork_conversation(self):
+        if self.worker and self.worker.isRunning():
+            return
+        # Sweep R56: the fold guard every other conversation
+        # switch carries (new_chat / load / delete) — forking
+        # mid-fold persisted the fork and then load_conversation
+        # silently refused to open it.
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self.log("Fork ignored — a context fold is running.")
+            return
+        # Item #54: the persistent fork forks the MAIN thread — an
+        # open side chat is discarded first so the dialog's message
+        # list and the stored record it cuts are the same list.
+        if getattr(self, "_side_chat", None) is not None:
+            self.close_side_chat()
+        self.persist_conversation()
+        if not self.conversation_id:
+            QMessageBox.information(self, "Fork", "Nothing to fork yet — this conversation has no messages.")
+            return
+        dialog = ForkDialog(self, self.messages)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        idx = dialog.selected_index()
+        if idx is None:
+            return
+        new_id = self.store.fork(self.conversation_id, idx)
+        if new_id:
+            self.load_conversation(new_id)
+            self.log(f"Forked conversation {self.conversation_id} from message {idx + 1} — original untouched.")
+
+    # ---------- chat tabs (owner directive, 2026-11-08) ----------
+
+    def _conversation_title(self, cid, rows=None):
+        if cid is None:
+            return "New chat"
+        # Sweep R44: callers rebuilding the whole tab bar pass the
+        # recent-rows list they fetched ONCE — the per-tab default
+        # (a fresh store.recent(200) per tab) made every sync cost
+        # one database read per open tab.
+        for row in (rows if rows is not None else self.store.recent(200)):
+            if row.get("id") == cid:
+                title = row.get("title") or "Conversation"
+                return title if len(title) <= 26 else title[:25] + "…"
+        return "Conversation"
+
+    def _session_rows(self):
+        """G2: the open sessions as plain dicts, in tab order —
+        the SessionsWindow's whole data source, kept on the window
+        so it stays testable without any Qt. Model / project / last
+        activity come from the store row for saved conversations
+        (the same recent() rows the sidebar lists, updated_at shown
+        raw exactly as the history buttons show it). The unsaved
+        session — the single None id, present only while active —
+        shows what it WILL be saved under: the model combo's current
+        text and the current workspace, with the last turn's start
+        as its activity when a turn has run."""
+        ids = [i for i in getattr(self, "_chat_tab_ids", [])
+               if i is not None]
+        active = self.conversation_id
+        if active not in ids:
+            ids.append(active)
+        by_id = {}
+        try:
+            for row in self.store.recent(200):
+                by_id[row.get("id")] = row
+        except Exception:
+            by_id = {}
+        worker = getattr(self, "worker", None)
+        running = False
+        if worker is not None:
+            try:
+                running = bool(worker.isRunning())
+            except Exception:
+                running = False
+        plan = getattr(self, "plan_state", None)
+        gate_pending = (isinstance(plan, dict)
+                        and plan.get("status") == "draft")
+        rows = []
+        for cid in ids:
+            is_active = cid == active
+            saved = by_id.get(cid) if cid is not None else None
+            if saved is not None:
+                model = saved.get("model") or "—"
+                project_full = saved.get("project") or ""
+                activity = saved.get("updated_at") or "—"
+            elif cid is None:
+                combo = getattr(self, "model_combo", None)
+                model = (combo.currentText().strip()
+                         if combo is not None else "") or "—"
+                project_full = self.workspace or ""
+                started = getattr(self, "_turn_started", 0.0) or 0.0
+                activity = (time.strftime("%Y-%m-%d %H:%M:%S",
+                                          time.gmtime(started))
+                            if started else "—")
+            else:
+                model, project_full = self.store.meta(cid)
+                model = model or "—"
+                project_full = project_full or ""
+                activity = "—"
+            project = ((Path(project_full).name or project_full)
+                       if project_full else "—")
+            rows.append({
+                "id": cid, "title": self._conversation_title(cid),
+                "state": _session_state(is_active, running, gate_pending),
+                "model": model, "project": project,
+                "project_full": project_full, "activity": activity,
+                "active": is_active})
+        return rows
+
+    def _sync_chat_tabs(self):
+        """Rebuild the tab bar from the open set + the active
+        conversation. The active conversation is always tabbed; an
+        unsaved (id-less) conversation holds the one None tab, and
+        only while it is active — switching away from an unsaved
+        chat leaves it behind, exactly as loading always has."""
+        bar = getattr(self, "chat_tabs", None)
+        if bar is None:
+            return
+        cid = self.conversation_id
+        # Tab order is stable — switching never reshuffles the bar;
+        # a conversation joins the end only when it first opens.
+        ids = [i for i in getattr(self, "_chat_tab_ids", [])
+               if i is not None]
+        if cid not in ids:
+            ids.append(cid)
+        self._chat_tab_ids = ids
+        self._chat_tab_sync = True
+        try:
+            while bar.count():
+                bar.removeTab(0)
+            rows = self.store.recent(200)
+            for tab_id in ids:
+                bar.addTab(self._conversation_title(tab_id, rows))
+            bar.setCurrentIndex(ids.index(cid))
+        finally:
+            self._chat_tab_sync = False
+        # G2: an open sessions room follows the tab set live — the
+        # same sync that rebuilds the bar refreshes its rows.
+        sessions_win = getattr(self, "sessions_win", None)
+        if sessions_win is not None and sessions_win.isVisible():
+            sessions_win.refresh()
+
+    def _on_chat_tab_changed(self, index):
+        if getattr(self, "_chat_tab_sync", False) or index < 0:
+            return
+        ids = getattr(self, "_chat_tab_ids", [])
+        if not (0 <= index < len(ids)):
+            return
+        cid = ids[index]
+        if cid is None or cid == self.conversation_id:
+            return
+        self.load_conversation(cid)
+
+    def _close_chat_tab(self, index):
+        ids = getattr(self, "_chat_tab_ids", [])
+        if not (0 <= index < len(ids)):
+            return
+        cid = ids[index]
+        was_current = cid == self.conversation_id
+        ids.pop(index)
+        self._chat_tab_ids = ids
+        if not was_current:
+            self._sync_chat_tabs()
+            return
+        # Closing the active tab lands on a neighbor — or a fresh
+        # chat when it was the last one. The conversation itself is
+        # never deleted; it stays in history.
+        neighbor = None
+        if ids:
+            neighbor = ids[min(index, len(ids) - 1)]
+        if neighbor is None:
+            self.new_chat()
+        else:
+            self.load_conversation(neighbor)
+        self._sync_chat_tabs()
+
+    def _new_chat_tab(self):
+        self.new_chat()
+
+    def _reset_turn_scoped_state(self):
+        """Sweep R52: state that belongs to ONE conversation's
+        in-flight turn — pending attachments, the streaming
+        bookkeeping, the turn's mode/prompt markers. Switching
+        conversations resets it: an image attached in conversation
+        A used to ride silently into conversation B's first send,
+        and A's tail bubble could anchor B's first stream repaint.
+        The getattr guards matter: load_conversation also runs
+        during startup restore, before some of this exists."""
+        if getattr(self, "pending_attachments", None):
+            self.pending_attachments = []
+            self._sync_pending()
+        self.pending_upload_note = ""
+        self._stream_text = ""
+        self._stream_bubble = None
+        self._stream_anchor = None
+        self._stream_prefix_len = 0
+        self._turn_mode = None
+        self._turn_prompt = ""
+        self._pending_plan_request = None
+
+    def new_chat(self):
+        # Item #64: silent refusal, as always — but a detachable
+        # turn now moves to the background instead of blocking the
+        # fresh chat (see _leave_stage).
+        if not self._leave_stage():
+            return
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            return  # a fold is mid-flight against the current history
+        # Item #54: a fresh conversation discards an open side chat
+        # first (its close restores the main list, which the reset
+        # below then replaces as usual).
+        if getattr(self, "_side_chat", None) is not None:
+            self.close_side_chat()
+        self._reset_turn_scoped_state()
+        self.conversation_id = None
+        self.messages = [{"role": "system", "content": self.build_system_prompt()}]
+        # Note 12: a new conversation has no plan yet.
+        self.plan_state = None
+        self._plan_render()
+        self._deck_sync_plan()
+        self.render()
+        self._update_context_gauge()
+        self._sync_chat_tabs()
+        self.log("Started a new conversation.")
+        # H5: the notes/sees rooms follow the conversation.
+        self._refresh_note_windows()
+
+    # ---------- models / gauges gate ----------
+    def refresh_models(self):
+        """The synchronous refresh: fetch + apply in one call. Kept
+        as the single fetch/apply pairing — the async path below
+        runs the same fetch on a ModelsThread and lands in the same
+        two apply methods."""
+        try:
+            models = self.client.tags()
+        except OllamaError as exc:
+            self._apply_models_error(str(exc))
+            return
+        self._apply_models(models)
+
+    def _apply_models(self, models):
+        """refresh_models' population half: combo, connection lamp,
+        and log lines for a fetched model list."""
+        # Item #69: a still-available current selection survives the
+        # refresh — with cloud models in the merged catalog, a
+        # refresh must never silently swap the owner's chosen
+        # provider model back to the local driver.
+        # H4: keep the raw merged list beside the combo (which
+        # holds names only) — the models room reads sizes and
+        # digests from it for its fit badges and provenance.
+        self._models_data = list(models or [])
+        current = self.model_combo.currentText().strip()
+        self.model_combo.clear()
+        names = [m.get("name", "") for m in models]
+        for name in names:
+            self.model_combo.addItem(name)
+        if current and current in names:
+            self.model_combo.setCurrentText(current)
+        else:
+            target = "maternion/minicpm5-heretic:2b"  # the driver, if installed
+            idx = next((i for i, n in enumerate(names) if n == target), -1)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            elif names:
+                self.model_combo.setCurrentIndex(0)
+        self.connection.setStyleSheet("color:#ff8c3a;font-size:17px;")
+        self.connection.setToolTip("Ollama connected")
+        self.log(f"Ollama connected · {len(names)} model(s) available.")
+        if not names:
+            self.log("No local models found. Open the Models window to pull one with Ollama.")
+        # Audit B20: surface what Ollama actually holds in RAM right
+        # now — on an 8 GB box the resident set is the budget. Purely
+        # informational: a client without ps(), a failed fetch, or an
+        # empty resident list adds no line and never breaks refresh.
+        # Sweep R31: ps() is a network read — it used to run HERE,
+        # synchronously on the GUI thread inside every refresh. It
+        # now fetches on a daemon thread like tags() and the gauges,
+        # and _apply_resident logs the line when the answer lands.
+        ps = getattr(self.client, "ps", None)
+        if callable(ps):
+            def _fetch_resident(ps=ps):
+                try:
+                    resident = ps() or []
+                except Exception:
+                    resident = []
+                self.resident_ready.emit(resident)
+            threading.Thread(target=_fetch_resident, daemon=True).start()
+        # H4: the models room (if open) re-reads the list just kept.
+        self._refresh_models_window()
+
+    def _apply_resident(self, resident):
+        """The B20 resident-in-RAM log line, landed from the
+        background ps() fetch (sweep R31)."""
+        if resident:
+            parts = []
+            for entry in resident:
+                name = str(entry.get("name", ""))
+                size = entry.get("size")
+                if size:
+                    parts.append(f"{name} ({size / 1_000_000_000:.1f} GB)")
+                elif name:
+                    parts.append(name)
+            if parts:
+                self.log("Resident in RAM: " + ", ".join(parts))
+
+    def _apply_models_error(self, message):
+        """refresh_models' disconnected half: red lamp, the error in
+        the log, and the driver offered as the combo's lone entry."""
+        self.connection.setStyleSheet("color:#e5534b;font-size:17px;")
+        self.connection.setToolTip("Ollama disconnected")
+        self.log(message)
+        # H4: a failed fetch empties the kept list too — the models
+        # room must not keep badging models the combo no longer has.
+        self._models_data = []
+        self._refresh_models_window()
+        self.model_combo.clear()
+        self.model_combo.addItem("maternion/minicpm5-heretic:2b")
+
+    def refresh_models_async(self):
+        """Audit B16: the tags fetch on a ModelsThread, so neither
+        the window's first paint nor a manual refresh waits on
+        Ollama's 8 s timeout. A refresh already in flight makes this
+        a no-op — the in-flight one lands in the same apply methods."""
+        if self._models_thread is not None and self._models_thread.isRunning():
+            return
+        thread = ModelsThread(self.client)
+        thread.done.connect(self._apply_models)
+        thread.failed.connect(self._apply_models_error)
+        self._models_thread = thread
+        thread.start()
+
+    # ---------- attachments (Note 7) ----------
+    def toggle_dictation(self):
+        if self._recorder and self._recorder.recording:
+            wav = self._recorder.stop()
+            self.mic_btn.setText("🎙 Dictate")
+            self._recorder = None
+            if len(wav) < 5000:
+                self.log("Dictation too short — nothing transcribed.")
+                return
+            dest = APP_DIR / "dictation.wav"
+            dest.write_bytes(wav)
+            out_txt = dest.with_suffix(".txt")
+            self.log("🎙 Dictation captured — transcribing locally…")
+            self._start_transcription(dest, out_txt,
+                                      lambda msg: self._dictation_done(msg, out_txt))
+            return
+        mic_ok, mic_why = voice_mod.available()
+        if not mic_ok:
+            QMessageBox.information(self, "Voice input", "Unavailable: " + mic_why)
+            return
+        self._recorder = voice_mod.Recorder()
+        try:
+            self._recorder.start(str(self.settings.get("mic_device", "") or ""))
+        except Exception as exc:
+            self._recorder = None
+            QMessageBox.critical(self, "Microphone", str(exc))
+            return
+        self.mic_btn.setText("⏹ Stop & transcribe")
+        self.log("🎙 Recording… press Stop when you're done talking.")
+
+    def _dictation_done(self, msg, out_txt):
+        self.log(msg)
+        try:
+            text = Path(out_txt).read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            # Sweep R50: done means the transcription SUCCEEDED
+            # (failures ride the failed signal since sweep R90) —
+            # an unreadable transcript here is a real anomaly, not
+            # the ordinary no-speech case, and is logged as one.
+            text = ""
+            self.log(f"Dictation finished but its transcript could not be read: {exc}")
+        if text:
+            current = self.input.toPlainText()
+            self.input.setPlainText((current + " " + text).strip() if current else text)
+            self.input.setFocus()
+            self.log("🎙 Dictation is in the input box — edit it, then Send. Nothing was auto-sent.")
+
+    # ---------- Item #71: pending attachments ----------
+    def _sync_pending(self):
+        """Rebuild the send path's mirrors (pending_images /
+        pending_upload_note) from pending_attachments, and refresh
+        both attachment surfaces — the compose strip and the deck
+        state. Runs after every attach/remove; the send path
+        itself clears all three stores when a turn starts."""
+        self.pending_images = [a["data"] for a in self.pending_attachments
+                               if a["kind"] == "image"]
+        self.pending_upload_note = "\n".join(
+            a["note"] for a in self.pending_attachments
+            if a["kind"] == "file")
+        self._refresh_attach_strip()
+        self._push_deck_attachments()
+
+    def _append_pending_image(self, name, data_b64):
+        self.pending_attachments.append(
+            {"kind": "image", "name": name, "data": data_b64})
+        self._sync_pending()
+
+    def _append_pending_upload(self, name, note):
+        self.pending_attachments.append(
+            {"kind": "file", "name": name, "note": note})
+        self._sync_pending()
+
+    def _remove_pending(self, index):
+        """Remove ONE pending attachment by its strip index — an
+        owner action, identical from the desktop ✕ and the phone.
+        An out-of-range index is a quiet no-op: the deck's state
+        can lag a beat behind the bench, and a stale tap must not
+        blow up. Returns the removed entry, or None."""
+        if 0 <= index < len(self.pending_attachments):
+            gone = self.pending_attachments.pop(index)
+            self._sync_pending()
+            self.log(f"Attachment removed: {gone['name']}")
+            return gone
+        return None
+
+    def _refresh_attach_strip(self):
+        strip = getattr(self, "attach_strip", None)
+        if strip is None:
+            return
+        layout = self.attach_strip_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for index, entry in enumerate(self.pending_attachments):
+            layout.addWidget(self._attach_chip(index, entry))
+        layout.addStretch(1)
+        strip.setVisible(bool(self.pending_attachments))
+
+    def _attach_chip(self, index, entry):
+        chip = QFrame()
+        chip.setStyleSheet(
+            f"QFrame{{background:{TOKENS['surface_input']};"
+            f"border:1px solid {TOKENS['rim']};border-radius:8px;}}")
+        row = QHBoxLayout(chip)
+        row.setContentsMargins(6, 4, 4, 4); row.setSpacing(6)
+        if entry["kind"] == "image":
+            thumb = QLabel()
+            pix = QPixmap()
+            try:
+                pix.loadFromData(base64.b64decode(entry["data"]))
+            except Exception:
+                pix = QPixmap()
+            if not pix.isNull():
+                thumb.setPixmap(pix.scaled(
+                    40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            row.addWidget(thumb)
+        name = QLabel(entry["name"])
+        name.setObjectName("muted")
+        row.addWidget(name)
+        remove = QPushButton("✕")
+        remove.setFixedSize(20, 20)
+        remove.setToolTip(f"Remove {entry['name']}")
+        remove.clicked.connect(
+            lambda _checked=False, i=index: self._remove_pending(i))
+        row.addWidget(remove)
+        return chip
+
+    def _push_deck_attachments(self):
+        """The deck's strip reads /state: names, kinds, and — for
+        images — a downscaled thumbnail data URI. The thumbnail is
+        made HERE, capped at 96px, never the full base64 original:
+        the state poll runs every three seconds on the LAN and a
+        multi-megabyte original does not belong in it."""
+        deck = getattr(self, "deck", None)
+        if deck is None:
+            return
+        items = []
+        for entry in self.pending_attachments:
+            item = {"name": entry["name"], "kind": entry["kind"]}
+            if entry["kind"] == "image":
+                item["thumb"] = self._attachment_thumb(entry["data"])
+            items.append(item)
+        deck.set_state(attachments=items)
+
+    @staticmethod
+    def _attachment_thumb(data_b64):
+        """A ≤96px PNG data URI for one pending image, or "" when
+        the bytes will not decode (the chips then show the name)."""
+        from PySide6.QtCore import QBuffer, QIODevice
+        try:
+            pix = QPixmap()
+            if not pix.loadFromData(base64.b64decode(data_b64)):
+                return ""
+            if pix.width() > 96 or pix.height() > 96:
+                pix = pix.scaled(96, 96, Qt.KeepAspectRatio,
+                                 Qt.SmoothTransformation)
+            buf = QBuffer()
+            if not buf.open(QIODevice.WriteOnly):
+                return ""
+            if not pix.save(buf, "PNG"):
+                return ""
+            return "data:image/png;base64," + base64.b64encode(
+                bytes(buf.data())).decode("ascii")
+        except Exception:
+            return ""
+
+    def attach_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Attach a file", str(Path.home()), "All files (*)")
+        if not path:
+            return
+        src = Path(path)
+        ext = src.suffix.lower()
+        if ext in IMAGE_EXTS:
+            try:
+                data = base64.b64encode(src.read_bytes()).decode("ascii")
+                # Item #71: attach APPENDS — a second image joins
+                # the strip instead of silently replacing the first.
+                self._append_pending_image(src.name, data)
+                self.log("Image attached: " + str(src))
+            except Exception as exc:
+                QMessageBox.critical(self, "Image error", str(exc))
+            return
+        try:
+            dest = proj.add_upload(self.workspace, src)
+        except Exception as exc:
+            QMessageBox.critical(self, "Upload error", str(exc)); return
+        rel = f".forge/uploads/{dest.name}"
+        self._append_pending_upload(
+            dest.name,
+            f"[Owner attached a file: {dest.name} — saved at {rel} in this project.]")
+        self.log(f"Upload received → {rel} ({dest.stat().st_size} bytes) — shell receipt, not a claim.")
+        self.receipt_bar.setText(f"🧾  SHELL RECEIPT · upload → {rel} · {dest.stat().st_size} bytes · {datetime.now().strftime('%H:%M:%S')}")
+        self.eventlog.record("upload", name=dest.name, bytes=dest.stat().st_size)
+        if ext in AUDIO_EXTS:
+            out_txt = dest.with_suffix(dest.suffix + ".txt")
+            self._start_transcription(dest, out_txt,
+                                      lambda msg: (self.log(msg), self.eventlog.record("transcribe", detail=msg[:160])))
+            self.log(f"Audio attached — transcription queued ({dest.name}).")
+
+    def _ingest_attachment_bytes(self, name, data):
+        """Item #71: one uploaded file's raw bytes become a pending
+        attachment — the deck upload's road into exactly the state
+        a desktop attach lands in. Images join the pending images;
+        anything else takes the desktop road (a real file into the
+        project's uploads via proj.add_upload, its note riding the
+        next send). Returns (ok, message) for the phone to show."""
+        import tempfile
+        safe = Path(str(name or "")).name or "attachment"
+        if not data:
+            return False, "That file was empty — nothing was attached."
+        ext = Path(safe).suffix.lower()
+        if ext in IMAGE_EXTS:
+            self._append_pending_image(
+                safe, base64.b64encode(bytes(data)).decode("ascii"))
+            self.log(f"Image attached from the phone: {safe}")
+            return True, (f"Image attached: {safe} — it rides the "
+                          "next prompt you send.")
+        tmpdir = Path(tempfile.mkdtemp(prefix="forge-attach-"))
+        try:
+            staged = tmpdir / safe
+            staged.write_bytes(bytes(data))
+            dest = proj.add_upload(self.workspace, staged)
+        except Exception as exc:
+            return False, f"Attach failed: {exc}"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        rel = f".forge/uploads/{dest.name}"
+        self._append_pending_upload(
+            dest.name,
+            f"[Owner attached a file: {dest.name} — saved at {rel} in this project.]")
+        self.log(f"Upload received from the phone → {rel} "
+                 f"({len(data)} bytes) — shell receipt, not a claim.")
+        self.receipt_bar.setText(f"🧾  SHELL RECEIPT · upload → {rel} · {len(data)} bytes · {datetime.now().strftime('%H:%M:%S')}")
+        self.eventlog.record("upload", name=dest.name, bytes=len(data))
+        if ext in AUDIO_EXTS:
+            out_txt = dest.with_suffix(dest.suffix + ".txt")
+            self._start_transcription(dest, out_txt,
+                                      lambda msg: (self.log(msg), self.eventlog.record("transcribe", detail=msg[:160])))
+            self.log(f"Audio attached — transcription queued ({dest.name}).")
+        return True, f"Attached: {dest.name} → project uploads"
+
+    def _deck_attachment_remove(self, index, holder):
+        """GUI-thread slot for the deck's /attach-remove round trip:
+        the phone removes ONE pending attachment by strip index —
+        the same _remove_pending the desktop ✕ calls."""
+        if holder.get("expired"):
+            # Sweep R101: stale queued delivery — see
+            # _deck_prompt_delivery.
+            holder["event"].set()
+            return
+        try:
+            gone = self._remove_pending(int(index))
+            if gone is None:
+                holder["result"] = (False,
+                    "That attachment is already gone.")
+            else:
+                holder["result"] = (True, f"Removed {gone['name']}.")
+        except Exception as exc:
+            holder["result"] = (False, f"Remove failed: {exc}")
+        finally:
+            holder["event"].set()
+
+    def _deck_attachment_upload(self, name, data, holder):
+        """GUI-thread slot for the deck's /attach-upload round
+        trip: the phone's file lands through _ingest_attachment_bytes,
+        the same ingest the desktop attach ends in."""
+        if holder.get("expired"):
+            # Sweep R101: stale queued delivery — see
+            # _deck_prompt_delivery.
+            holder["event"].set()
+            return
+        try:
+            holder["result"] = self._ingest_attachment_bytes(
+                str(name), bytes(data))
+        except Exception as exc:
+            holder["result"] = (False, f"Attach failed: {exc}")
+        finally:
+            holder["event"].set()
+
+    # ---------- sending / worker ----------
+    def eventFilter(self, obj, event):
+        if obj is self.input and event.type() == QEvent.Type.KeyPress:
+            completer = getattr(self, "_mention_completer", None)
+            if completer is not None and completer.popup().isVisible() and \
+                    event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape,
+                                    Qt.Key_Tab, Qt.Key_Backtab,
+                                    Qt.Key_Up, Qt.Key_Down):
+                # The @mention popup owns these keys while it is up —
+                # Enter picks a file, it never sends the message.
+                return False
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (event.modifiers() & Qt.ShiftModifier):
+                self.send_message(); return True
+        return super().eventFilter(obj, event)
+
+    def _extra_tools(self):
+        tools = dict(self.plugin_registry)
+        tools["load_skill"] = (LOAD_SKILL_SCHEMA, make_load_skill_handler(
+            self.skills,
+            disabled={s.name for s in self.all_skills} - {s.name for s in self.skills}), False, "skills")
+        # Note 22: global creation — skills/plugins are housed in the
+        # app's own folders, never in the current project. Approval-gated
+        # like every write; success fires extension_created → rescan.
+        tools["create_skill"] = (create_mod.CREATE_SKILL_SCHEMA,
+                                 self._create_skill_tool, True, "Forge shell")
+        tools["create_plugin"] = (create_mod.CREATE_PLUGIN_SCHEMA,
+                                  self._create_plugin_tool, True, "Forge shell")
+        tools["update_skill"] = (create_mod.UPDATE_SKILL_SCHEMA,
+                                 self._update_skill_tool, True, "Forge shell")
+        tools["update_plugin"] = (create_mod.UPDATE_PLUGIN_SCHEMA,
+                                  self._update_plugin_tool, True, "Forge shell")
+        # The Debug capability: the agent drives the SAME session
+        # the Debug window shows (ForgeWindow._debug_session, beside
+        # the run machinery). Starting/stepping/continuing execute
+        # the owner's code, so they are approval-gated write-class
+        # like run_command; inspecting a frame and stopping a
+        # session change nothing, so they are read-class.
+        tools["debug_start"] = (debugger_mod.DEBUG_START_SCHEMA,
+                                lambda args, _ws=self.workspace:
+                                self._debug_tool_start(args, _ws),
+                                True, "debugger")
+        tools["debug_step"] = (debugger_mod.DEBUG_STEP_SCHEMA,
+                               self._debug_tool_step, True, "debugger")
+        tools["debug_continue"] = (debugger_mod.DEBUG_CONTINUE_SCHEMA,
+                                   self._debug_tool_continue, True, "debugger")
+        tools["debug_inspect"] = (debugger_mod.DEBUG_INSPECT_SCHEMA,
+                                  self._debug_tool_inspect, False, "debugger")
+        tools["debug_stop"] = (debugger_mod.DEBUG_STOP_SCHEMA,
+                               self._debug_tool_stop, False, "debugger")
+        tools["read_source"] = (proj.READ_SOURCE_SCHEMA,
+                                # Item #64: the workspace is bound
+                                # NOW, at tool-table build time (the
+                                # turn's own), not read off the
+                                # window when the call lands — a
+                                # background turn must keep reading
+                                # its own project's sources after the
+                                # owner switches the bench elsewhere.
+                                lambda args, _ws=self.workspace: proj.read_source(
+                                    _ws, str(args.get("name", "")),
+                                    offset=int(v) if (v := str(args.get("offset") or 0)).lstrip("-").isdigit() else 0),
+                                False, "project sources")
+        return tools
+
+    # ---------- @mentions (audit D43) ----------
+    def _setup_mention_completer(self):
+        """The @file completer for the input box: typing @ opens a
+        popup of workspace files; picking one leaves an @path token
+        in the text, and send_message attaches the file's content to
+        the outgoing message (forge/mentions.py does the math)."""
+        self._mention_model = QStringListModel([], self)
+        self._mention_completer = QCompleter(self._mention_model, self)
+        self._mention_completer.setWidget(self.input)
+        self._mention_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._mention_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._mention_completer.setWrapAround(False)
+        self._mention_completer.activated[str].connect(self._insert_mention)
+        self.input.textChanged.connect(self._update_mention_completer)
+        self.input.cursorPositionChanged.connect(self._update_mention_completer)
+
+    def _mention_files(self):
+        """The workspace file list behind the @ completer, cached
+        for a few seconds (sweep R33): _update_mention_completer
+        runs on EVERY keystroke and cursor move, and the uncached
+        walk behind it re-scanned the whole tree each time. The
+        workspace is part of the cache key, so a project switch is
+        always fresh; a file created mid-burst appears within the
+        TTL instead of instantly — the popup is a typing aid, not
+        a directory listing."""
+        now = time.monotonic()
+        cache = getattr(self, "_mention_files_cache", None)
+        if cache and cache[0] == self.workspace and now - cache[1] < 3.0:
+            return cache[2]
+        files = repomap.workspace_files(self.workspace)
+        self._mention_files_cache = (self.workspace, now, files)
+        return files
+
+    def _update_mention_completer(self):
+        """Recompute the popup from the text before the cursor: the
+        filtered candidate list is rebuilt from the workspace file
+        list (cached briefly — see _mention_files) on every update,
+        so a project switch is always fresh."""
+        completer = getattr(self, "_mention_completer", None)
+        if completer is None:
+            return
+        cursor = self.input.textCursor()
+        before = self.input.toPlainText()[:cursor.position()]
+        fragment = mentions_mod.mention_fragment(before)
+        if fragment is None:
+            completer.popup().hide()
+            return
+        needle = fragment.lower()
+        candidates = [f for f in self._mention_files()
+                      if needle in f.lower()]
+        if not candidates:
+            completer.popup().hide()
+            return
+        self._mention_model.setStringList(candidates)
+        completer.setCompletionPrefix("")
+        if self.input.hasFocus():
+            completer.complete(self.input.cursorRect())
+
+    def _insert_mention(self, relpath):
+        """Replace the @fragment at the cursor with the picked
+        file's full @path token (plus a trailing space), leaving
+        any text after the cursor untouched."""
+        cursor = self.input.textCursor()
+        pos = cursor.position()
+        before = self.input.toPlainText()[:pos]
+        fragment = mentions_mod.mention_fragment(before)
+        if fragment is None:
+            return
+        cursor.setPosition(pos - len(fragment) - 1, QTextCursor.KeepAnchor)
+        cursor.insertText("@" + relpath + " ")
+        self.input.setTextCursor(cursor)
+        self.input.setFocus()
+
+    def _model_accepts_images(self, model):
+        """Item #71: True when the model takes images, False when
+        it provably cannot, None when nobody knows. The proof is
+        Ollama's /api/show — its capabilities list carries
+        "vision" for vision models. Cloud provider models cannot
+        be introspected through it, so they are unknown; a failed
+        show (server down) and an old Ollama without the field
+        are likewise unknown. Unknown NEVER blocks a send — the
+        guard below acts only on a proven False. Only definitive
+        answers enter the cache: a wrong "no" cached for the
+        window's life would be worse than asking again."""
+        if providers_mod.is_provider_model(model):
+            return None
+        cache = getattr(self, "_vision_cache", None)
+        if cache is None:
+            cache = self._vision_cache = {}
+        if model in cache:
+            return cache[model]
+        try:
+            info = self.client.show(model)
+        except Exception:
+            return None
+        caps = info.get("capabilities") if isinstance(info, dict) else None
+        if not isinstance(caps, list):
+            return None
+        accepts = "vision" in caps
+        cache[model] = accepts
+        return accepts
+
+    def send_message(self):
+        self._send_refusal = None
+        text = self.input.toPlainText().strip()
+        if not text or (self.worker and self.worker.isRunning()):
+            # Sweep R34: EVERY refusal exit below records its words
+            # in _send_refusal, not just the multimodal guard — the
+            # phone path and the artifact-comment path both read it
+            # right after calling here, and without it they told
+            # their caller "received / started" about a turn that
+            # never ran.
+            if not text:
+                self._send_refusal = "Nothing to send — the prompt was empty."
+            return
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self._send_refusal = ("A context summary is running — "
+                                  "the turn starts when it settles.")
+            return  # a pre-send summary is running; the turn starts when it settles
+        # Item #54: Plan mode cannot run inside a side chat. A plan
+        # lives in the window's ONE plan slot and its on-disk sidecar
+        # (APP_DIR/plans/<main conversation id>.json) — a fork has no
+        # plan slot and no id of its own, so a forked Plan turn would
+        # draft into the main thread's plan record. Every other mode
+        # runs the normal turn unchanged.
+        if getattr(self, "_side_chat", None) is not None \
+                and self.mode_combo.currentText().lower() == "plan":
+            refusal = ("Plan mode is not available in a side chat "
+                       "— close the side chat to plan.")
+            self._send_refusal = refusal
+            self.log("Side chat: Plan mode stays with the main thread "
+                     "— close the side chat to plan.")
+            self.statusBar().showMessage(
+                "Plan mode is not available in a side chat — close it to plan.")
+            return
+        # Item #64: the parallel-turn cap (Settings → Seats &
+        # limits). Background turns count toward it: a send that
+        # would put more turns in flight than the cap is refused in
+        # words, before anything is appended — never silently
+        # queued behind work the owner may not know is running.
+        live_background = [s for s in self._live_streams()
+                           if not self._is_stage(s)]
+        if len(live_background) >= self._max_parallel_turns():
+            message = (f"Parallel turn limit reached "
+                       f"({self._max_parallel_turns()}) — a turn is "
+                       "still running in another conversation. Finish "
+                       "or stop one first (Mission Control).")
+            self._send_refusal = message
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return
+        expanded = macros_mod.expand(self.macros, text)
+        if expanded is not None:
+            self.log(f"Macro expanded: {text.split()[0]}")
+            text = expanded
+        # Audit D43: @file mentions attach their files' content to
+        # the outgoing message as visible blocks; a path-like mention
+        # that matched nothing is named in the log rather than
+        # silently riding along as if it had attached.
+        text, attached, unmatched = mentions_mod.expand_mentions(
+            text, self.workspace)
+        if attached:
+            self.log("Attached file(s) to this message: " + ", ".join(attached))
+        for token in unmatched:
+            if perm_mod.is_sensitive_path(token):
+                # H2: refused by the context-attach guard, not by a
+                # missing file — say which, plainly.
+                self.log(f"Mention @{token} names a sensitive file — "
+                         "its content was NOT attached.")
+            else:
+                self.log(f"Mention @{token} did not match a file — sent as plain text.")
+        model = self.model_combo.currentText().strip()
+        if not model:
+            self._send_refusal = ("No model is installed or selected "
+                                  "— nothing was sent.")
+            QMessageBox.warning(self, "No model", "Install or select an Ollama model first."); return
+        # Item #69: the registry scope/role guard for provider
+        # models. A provider model the registry disables, scopes to
+        # the other room, or bars from driving is refused HERE —
+        # logged and shown, nothing sent — in both directions:
+        # maintenance-only models stay out of project sessions, and
+        # project-only models stay out of the maintenance room.
+        if providers_mod.is_provider_model(model):
+            scope = "maintenance" if getattr(
+                self, "_self_maintenance_active", False) else "project"
+            if not providers_mod.model_allowed(
+                    self._provider_config(), model,
+                    scope=scope, role="driver"):
+                reason = (f"Model '{model}' is not allowed to drive a "
+                          f"{scope} session (registry scope/role in "
+                          "Customize → Providers) — nothing was sent.")
+                self._send_refusal = reason
+                self.log("Provider guard: " + reason)
+                QMessageBox.warning(self, "Provider model refused", reason)
+                return
+        # Item #71: the multimodal guard. A turn that would carry
+        # images — fresh ones pending in the strip, or any baked
+        # into an earlier message and re-sent with the history —
+        # to a model that CANNOT see them stops HERE, before
+        # anything is appended or a worker starts: plain words in
+        # the log and status bar, the prompt text and the pending
+        # attachments left exactly as they are for the owner to
+        # fix (remove the attachment, or pick a model that takes
+        # images). Before this guard, that shape reached Ollama
+        # and came back as a raw HTTP 400 — and because the image
+        # was already stored in the conversation, every later turn
+        # hit it too, including phone prompts that attached
+        # nothing. Both send entries pass through this function
+        # (the phone path funnels into send_message), so one guard
+        # covers both. In-flight turns are untouched: they already
+        # captured their messages.
+        if self.pending_images or \
+                any(m.get("images") for m in self.messages):
+            if self._model_accepts_images(model) is False:
+                refusal = (f"{model} can't see images — remove the "
+                           "attachment or pick a model that takes "
+                           "images.")
+                self.log(refusal)
+                self.statusBar().showMessage(refusal)
+                self._send_refusal = refusal
+                return
+        # Owner's ruling (2026-11-06): the governor measures, it never
+        # governs — the send path does not consult it.
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = self.build_system_prompt()
+        if self.pending_upload_note:
+            text = self.pending_upload_note + "\n" + text
+            self.pending_upload_note = ""
+        self.messages.append({"role": "user", "content": text})
+        # Item #54: the resume state is a persistent record of the
+        # MAIN thread (its restore loads this conversation and puts
+        # last_prompt back in the input box) — a side chat's prompt
+        # never lands in it. A side turn in flight records the main
+        # thread's own last prompt instead.
+        resume_prompt = text
+        if getattr(self, "_side_chat", None) is not None:
+            resume_prompt = next(
+                (m.get("content", "") for m in
+                 reversed(self._side_chat["messages"])
+                 if m.get("role") == "user"), "")
+        upd.write_resume_state(APP_DIR, {
+            "conversation_id": self.conversation_id, "workspace": self.workspace,
+            "mode": self.mode_combo.currentText().lower(), "was_running": True,
+            "last_prompt": resume_prompt, "reason": "turn in flight"})
+        images = self.pending_images[:]
+        if images:
+            self.messages[-1]["images"] = images
+        self.input.clear(); self.pending_images = []; self.pending_attachments = []; self.image_label.clear(); self.render()
+        self._refresh_attach_strip(); self._push_deck_attachments()
+        self.persist_conversation()
+        self.log(f"Request sent to {model}.")
+        self.agent_state.setText("●  THINKING"); self.agent_state.setStyleSheet("color:#e6c16c;font-weight:700;")
+        self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
+        self.send_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        options = {"temperature": self.settings.get("temperature", .7),
+                   "num_predict": self.settings.get("num_predict", 2048),
+                   "num_ctx": self.settings.get("num_ctx", 8192),
+                   # Audit B20: the session residency policy rides the
+                   # turn options; the worker passes it to Ollama as
+                   # each generation's keep_alive.
+                   "keep_alive": str(self.settings.get("keep_alive", "30m"))}
+        # Audit B22: num_thread rides only when the owner set it —
+        # 0 (the default) omits the key entirely so Ollama picks the
+        # thread count, exactly as generations behaved pre-knob. A
+        # bad hand-edited value also omits it rather than breaking
+        # the send. The A/B the knob exists for: same prompt at 2
+        # vs 4 threads, compared on the generation records' tok/s.
+        try:
+            num_thread = int(self.settings.get("num_thread", 0) or 0)
+        except (TypeError, ValueError):
+            num_thread = 0
+        if num_thread > 0:
+            options["num_thread"] = num_thread
+        # Min-p rides only when the owner set it — unset (None, the
+        # default) omits the key entirely so Ollama applies its own
+        # default, exactly as generations behaved before the knob.
+        # The sentinel is None rather than 0 because 0.0 is a real
+        # value: MiniCPM5's recommended min_p, the setting that
+        # stops its runaway repetition. A bad hand-edited value, or
+        # one outside 0..1, also omits the key rather than breaking
+        # the send. The cloud providers never see it: their payload
+        # builders copy only temperature/num_predict across.
+        try:
+            min_p = float(self.settings.get("min_p"))
+        except (TypeError, ValueError):
+            min_p = None
+        if min_p is not None and 0.0 <= min_p <= 1.0:
+            options["min_p"] = min_p
+        # Note 14 #3: at/above the fold threshold, the oldest turns
+        # fold into one summary BEFORE the worker starts. The fold
+        # never blocks the send: failure, refusal, or an impossible
+        # fold all fall through to the turn exactly as it was.
+        if self._maybe_fold(model, options, text):
+            return
+        self._start_turn(model, options, text)
+
+    # ---------- Item #41 (audit D42): seats file + mode bindings ----------
+    def _load_seat_file(self):
+        """Read the optional seats file once, at startup. Absence
+        is the normal state (settings rule, no bindings). A broken
+        file is logged once and ignored — it must never break
+        startup. Bindings in force are named in one log line so the
+        owner can see them live; edits to the file need a restart
+        to apply (README, "Seats file")."""
+        self._seat_config, self._seat_problem = \
+            seats_mod.load_seat_file(APP_DIR)
+        if self._seat_problem:
+            self.log("Seats: " + self._seat_problem)
+        bindings = seats_mod.mode_bindings(self._seat_config)
+        if bindings:
+            pairs = ", ".join(f"{mode} → {seat}"
+                              for mode, seat in sorted(bindings.items()))
+            self.log(f"Seat bindings from seats.json: {pairs}.")
+
+    def _log_seat_refusal(self, label, refused, resolved):
+        """A governing-seat refusal caught at a window read site,
+        logged once per (seat, refused) pair for the window's life:
+        _start_turn runs every turn, and a bad setting or file value
+        must not spam the log (the #31 hooks pattern)."""
+        key = (label, refused)
+        if not self._seen_once(self._seat_refusals_seen, key):
+            return
+        self.log(f"{label} seat: '{refused}' is not on the governing "
+                 f"roster — seat refused; {resolved} holds the seat "
+                 f"instead.")
+
+    def _bound_turn_model(self, model):
+        """Item #41 (audit D42): a seats.json mode binding can put
+        another seat's model in the driver's chair for this turn
+        (Roo-style per-mode seats). An unbound mode returns the
+        combo model untouched — byte-identical to the pre-binding
+        send. A bound seat whose candidate the governing guard
+        refuses, or whose resolved model is not installed, falls
+        back to the combo model, and the substitution is logged
+        by name."""
+        mode = self.mode_combo.currentText().lower()
+        seat = seats_mod.mode_seat(mode, self._seat_config)
+        if seat is None:
+            return model
+        settings_value = {
+            "driver": model,
+            "tester": self.settings.get("tester_model", ""),
+            "reviewer": self.settings.get("reviewer_model", "")}[seat]
+        resolved, refused = seats_mod.effective_seat_model(
+            seat, settings_value, self._seat_config,
+            self.settings.get("governing_roster", ""))
+        if refused is not None:
+            self.log(f"Seat binding {mode} → {seat}: '{refused}' is not "
+                     f"on the governing roster — {model} drives this "
+                     f"turn instead.")
+            return model
+        # Item #69: a provider model named by a seat binding skips
+        # the local "installed" check — its provider catalog is its
+        # existence proof — but the registry scope/role guard still
+        # applies to the substitution.
+        if providers_mod.is_provider_model(resolved):
+            scope = "maintenance" if getattr(
+                self, "_self_maintenance_active", False) else "project"
+            if not providers_mod.model_allowed(
+                    self._provider_config(), resolved,
+                    scope=scope, role="driver"):
+                self.log(f"Seat binding {mode} → {seat}: '{resolved}' "
+                         f"is not registry-allowed to drive a {scope} "
+                         f"session — {model} drives this turn instead.")
+                return model
+            if resolved != model:
+                self.log(f"Seat binding: the {seat} seat ({resolved}) "
+                         f"drives this {mode} turn.")
+            return resolved
+        installed = [self.model_combo.itemText(i)
+                     for i in range(self.model_combo.count())]
+        if not council_mod.model_installed(resolved, installed):
+            self.log(f"Seat binding {mode} → {seat}: '{resolved}' is not "
+                     f"installed — {model} drives this turn instead.")
+            return model
+        if resolved != model:
+            self.log(f"Seat binding: the {seat} seat ({resolved}) drives "
+                     f"this {mode} turn.")
+        return resolved
+
+    def _start_turn(self, model, options, text):
+        model = self._bound_turn_model(model)
+        self.plugin_ctx.current_model = model
+        roster = self.settings.get("governing_roster", "")
+        tester_model, tester_refused = seats_mod.effective_seat_model(
+            "tester", self.settings.get("tester_model", ""),
+            self._seat_config, roster)
+        if tester_refused is not None:
+            self._log_seat_refusal("Tester", tester_refused, tester_model)
+        # Item #69: the registry is a SECOND gate for provider
+        # seats. A cloud tester whose registry roles lack "tester"
+        # falls back to the seats.py roster default — neither gate
+        # alone promotes a cloud model into a governing seat.
+        _scope = "maintenance" if getattr(
+            self, "_self_maintenance_active", False) else "project"
+        if providers_mod.is_provider_model(tester_model) and \
+                not providers_mod.model_allowed(
+                    self._provider_config(), tester_model,
+                    scope=_scope, role="tester"):
+            self.log(f"Tester seat: provider model '{tester_model}' "
+                     "is not registry-allowed as tester — "
+                     f"{seats_mod.SEAT_DEFAULTS['tester']} holds the "
+                     "seat instead.")
+            tester_model = seats_mod.SEAT_DEFAULTS["tester"]
+        self.plugin_ctx.tester_model = tester_model
+        # Item #53: the owner's tester cycle cap (settings
+        # `tester_max_cycles`) rides the context through the same
+        # door — the tester plugin reads ctx.tester_max_cycles and
+        # falls back to its own cap when this is not a positive int.
+        try:
+            self.plugin_ctx.tester_max_cycles = int(
+                self.settings.get("tester_max_cycles", 0) or 0)
+        except (TypeError, ValueError):
+            self.plugin_ctx.tester_max_cycles = 0
+        reviewer_model, reviewer_refused = seats_mod.effective_seat_model(
+            "reviewer", self.settings.get("reviewer_model", ""),
+            self._seat_config, roster)
+        if reviewer_refused is not None:
+            self._log_seat_refusal("Reviewer", reviewer_refused,
+                                   reviewer_model)
+        # Item #69: the same second gate for the reviewer seat.
+        if providers_mod.is_provider_model(reviewer_model) and \
+                not providers_mod.model_allowed(
+                    self._provider_config(), reviewer_model,
+                    scope=_scope, role="reviewer"):
+            self.log(f"Reviewer seat: provider model '{reviewer_model}' "
+                     "is not registry-allowed as reviewer — "
+                     f"{seats_mod.SEAT_DEFAULTS['reviewer']} holds the "
+                     "seat instead.")
+            reviewer_model = seats_mod.SEAT_DEFAULTS["reviewer"]
+        self.plugin_ctx.governing_roster = self.settings.get("governing_roster", "")
+        self.plugin_ctx.workspace = self.workspace
+        turn_hooks, turn_verify = self._turn_config()
+        extra = self._extra_tools()
+        classes = {name: ("write" if entry[2] else "read") for name, entry in extra.items()}
+        turn_perms = {"rules": list(self.settings.get("permission_rules", [])),
+                      "mode": self.mode_combo.currentText().lower(),
+                      "classes": classes}
+        # Item #69: a maintenance turn is engineered differently —
+        # council OFF and SKRIBE grading OFF (the cloud engineer is
+        # never its own reviewer/grader; the candidate's test suite
+        # is the evidence), and contained runs ON regardless of the
+        # owner's project-session setting.
+        maintenance_active = bool(
+            getattr(self, "_self_maintenance_active", False))
+        self._turn_mode = turn_perms["mode"]
+        self._turn_prompt = text
+        # Item #64: this turn's own plugin-context snapshot. The
+        # window's live plugin_ctx keeps being updated exactly as
+        # it always has been (other readers use it), but plugin
+        # handlers running on THIS worker read the snapshot (see
+        # AgentWorker._dispatch), so parallel turns never read each
+        # other's workspace, tester seat, or cancel event.
+        turn_ctx = PluginContext(
+            workspace=self.workspace,
+            base_url=getattr(self.client, "base_url",
+                             self.plugin_ctx.base_url),
+            config=self.plugin_ctx.config,
+            log=self.plugin_ctx.log,
+            governing_roster=self.settings.get("governing_roster", ""),
+            current_model=model,
+            tester_model=tester_model,
+            tester_max_cycles=self.plugin_ctx.tester_max_cycles)
+        # S5 (audit S1-08): the MCP/Browse spawn trust store — the
+        # LIVE settings dict, so a trust the owner grants at this
+        # turn's gate lands in settings and save_settings persists
+        # it. A non-dict value in settings reads as an empty store.
+        mcp_trust_store = self.settings.get("trusted_mcp_servers")
+        if not isinstance(mcp_trust_store, dict):
+            mcp_trust_store = {}
+            self.settings["trusted_mcp_servers"] = mcp_trust_store
+        self.worker = AgentWorker(self.client, model, self.messages, options, self.workspace,
+                                  extra_tools=extra, eventlog=self.eventlog,
+                                  hooks=turn_hooks, verify_commands=turn_verify,
+                                  permissions=turn_perms,
+                                  skribe_writes=(self._skribe_enabled()
+                                                 and not maintenance_active),
+                                  council=(self.council_check.isChecked()
+                                           and not maintenance_active),
+                                  reviewer_model=reviewer_model,
+                                  governing_roster=self.settings.get("governing_roster", ""),
+                                  planning=(turn_perms.get("mode") == "plan"),
+                                  researching=(turn_perms.get("mode") == "research"),
+                                  auto_snapshot_edits=bool(self.settings.get(
+                                      "auto_snapshot_edits", True)),
+                                  checkpoint_mode=str(self.settings.get(
+                                      "shadow_checkpoints", "off") or "off"),
+                                  checkpoint_app_dir=APP_DIR,
+                                  disabled_tools=list(self.settings.get(
+                                      "disabled_tools", [])),
+                                  result_digest_chars=self.settings.get(
+                                      "tool_result_digest_chars"),
+                                  contained_run=(bool(self.settings.get(
+                                      "contained_run", False))
+                                      or maintenance_active),
+                                  contained_docker=bool(self.settings.get(
+                                      "contained_docker", False)),
+                                  contained_docker_image=str(self.settings.get(
+                                      "contained_docker_image", "python:3-slim")
+                                      or "python:3-slim"),
+                                  # Item #56: the Goldfish pass rides
+                                  # Plan turns only (the worker checks
+                                  # planning itself); off in maintenance
+                                  # like council/SKRIBE. Its budget is
+                                  # the #53 seat cycle cap.
+                                  goldfish=(self._goldfish_enabled()
+                                            and not maintenance_active),
+                                  goldfish_budget=self.settings.get(
+                                      "tester_max_cycles"),
+                                  plugin_ctx=turn_ctx,
+                                  skills_dir=self.app_skills_dir,
+                                  plugins_dir=self.app_plugins_dir,
+                                  mcp_trust=mcp_trust_store,
+                                  mcp_trust_save=self.save_settings)
+        self.plugin_ctx.cancel_event = getattr(self.worker, "_cancel_event", None)
+        turn_ctx.cancel_event = getattr(self.worker, "_cancel_event", None)
+        self._pending_plan_request = text
+        # Item #64: the turn registers as a workstream and its
+        # signals route through the stream dispatchers, which hand
+        # the STAGE stream to the classic slots below (on_token,
+        # on_finished, request_approval…) untouched and collect a
+        # background stream's progress into its record instead.
+        # The plan signals keep their direct slots: a Plan turn
+        # never leaves the stage (see _leave_stage).
+        stream = self._register_stream(self.worker, model, text)
+        worker = self.worker
+        worker.token.connect(lambda tok, s=stream: self._ws_token(s, tok))
+        worker.status.connect(lambda st, s=stream: self._ws_status(s, st))
+        worker.approval_needed.connect(
+            lambda n, a, d, df, s=stream: self._ws_gate(s, n, a, d, df))
+        worker.receipt.connect(lambda r, s=stream: self._ws_receipt(s, r))
+        worker.turn_changes.connect(
+            lambda c, s=stream: self._ws_changes(s, c))
+        worker.plan_goldfish.connect(self.on_plan_goldfish)
+        worker.plan_document.connect(self.on_plan_document)
+        worker.plan_ready.connect(self.on_plan_ready)
+        worker.plan_revised.connect(self.on_plan_revised)
+        worker.plan_active.connect(self.on_plan_active)
+        worker.plan_step_done.connect(self.on_plan_step_done)
+        worker.plan_turn_done.connect(self.on_plan_turn_done)
+        worker.finished_text.connect(
+            lambda t, m, s=stream: self._ws_finished(s, t, m))
+        worker.failed.connect(lambda e, s=stream: self._ws_failed(s, e))
+        self._stream_text = ""
+        self._turn_started = time.time()
+        stream["started_at"] = self._turn_started
+        stream["last_activity"] = self._turn_started
+        self._sync_deck_turn()
+        self._push_deck_streams()
+        self.worker.start()
+
+    # ---------- Item #64: workstreams (parallel turns) ----------
+    def _max_parallel_turns(self):
+        """The owner's parallel-turn cap (Settings → Seats &
+        limits, settings `max_parallel_turns`), resolved with the
+        #53 limit pattern: a missing/bad value is 1 — the classic
+        one-turn Forge."""
+        try:
+            value = int(self.settings.get("max_parallel_turns", 1) or 1)
+        except (TypeError, ValueError):
+            value = 1
+        return max(1, min(4, value))
+
+    def _register_stream(self, worker, model, prompt):
+        """Register a freshly built worker as a workstream and make
+        it the stage stream. Invariants it keeps: the previous stage
+        record is replaced (the stage was idle by the send guard, so
+        that record is settled or stale), and a settled record for
+        the same conversation is superseded by the new turn."""
+        previous = self._stage_stream()
+        if previous is not None:
+            self._streams.pop(previous["id"], None)
+        for stale in [s for s in self._streams.values()
+                      if s["conversation_id"] == self.conversation_id
+                      and s["settled"] is not None]:
+            self._streams.pop(stale["id"], None)
+        self._stream_seq += 1
+        stream = {
+            "id": self._stream_seq,
+            "worker": worker,
+            "conversation_id": self.conversation_id,
+            "title": self._conversation_title(self.conversation_id),
+            "workspace": self.workspace,
+            "project": Path(self.workspace).name or self.workspace,
+            "model": model,
+            "mode": getattr(self, "_turn_mode", None) or "",
+            "prompt": prompt,
+            "started_at": time.time(),
+            "last_activity": time.time(),
+            "last_push": 0.0,
+            "stream_text": "",
+            "status_text": "",
+            "gate": None,
+            "background": False,
+            "planning": (getattr(self, "_turn_mode", None) or "") == "plan",
+            "side": getattr(self, "_side_chat", None) is not None,
+            "maintenance": bool(
+                getattr(self, "_self_maintenance_active", False)),
+            "settled": None,
+        }
+        self._streams[stream["id"]] = stream
+        self._stage_stream_id = stream["id"]
+        return stream
+
+    def _stage_stream(self):
+        sid = getattr(self, "_stage_stream_id", None)
+        return self._streams.get(sid) if sid is not None else None
+
+    def _live_streams(self):
+        """Streams whose turn is genuinely in flight: not settled
+        and the worker still running. (A record whose worker died
+        without a settle signal — a test stand-in, a crashed
+        thread — must not hold a parallel slot or a deck light.)"""
+        return [s for s in self._streams.values()
+                if s["settled"] is None
+                and s["worker"] is not None and s["worker"].isRunning()]
+
+    def _stream_for_conversation(self, conversation_id):
+        live = settled = None
+        for s in self._streams.values():
+            if s["conversation_id"] != conversation_id:
+                continue
+            if s["settled"] is None:
+                live = s
+            else:
+                settled = s
+        return live if live is not None else settled
+
+    def _is_stage(self, stream):
+        return stream is not None \
+            and stream["id"] == getattr(self, "_stage_stream_id", None)
+
+    def _can_detach_stage(self):
+        """Whether the stage's running turn may move to the
+        background. The refusals are each pinned to a shared-state
+        fact: the cap at 1 keeps the classic Forge; a PLAN turn
+        owns the window's one plan slot, its gate and its sidecar
+        (APP_DIR/plans/<cid>.json) for its whole life; a
+        MAINTENANCE turn runs in the single-threaded #69 room,
+        whose activation swap is window-global; a SIDE-CHAT turn
+        belongs to a fork whose stash/close bookkeeping is the
+        stage's own (#54)."""
+        stream = self._stage_stream()
+        if stream is None:
+            return False
+        if stream["planning"] or stream["maintenance"] or stream["side"]:
+            return False
+        return self._max_parallel_turns() > 1
+
+    def _leave_stage(self, refuse_message=None):
+        """The conversation-switch gate. True when the stage may
+        swap: no turn running, or the running turn detaches into
+        the background. False — with the caller's traditional
+        refusal logged — when the turn may not detach."""
+        if not (self.worker and self.worker.isRunning()):
+            return True
+        if self._can_detach_stage():
+            self._detach_stage_stream()
+            return True
+        if refuse_message:
+            self.log(refuse_message)
+        return False
+
+    def _detach_stage_stream(self):
+        """Move the stage's running turn into the background. The
+        worker already owns everything its turn needs (messages
+        copy, options, workspace, plugin-context snapshot — all
+        captured at construction), so nothing about the turn itself
+        changes: its signals keep arriving at the stream
+        dispatchers, which now collect instead of render. Only the
+        bench chrome resets, for the conversation arriving next."""
+        stream = self._stage_stream()
+        if stream is None:
+            return
+        stream["stream_text"] = self._stream_text
+        stream["background"] = True
+        self._stage_stream_id = None
+        self.worker = None
+        self._stream_text = ""
+        self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self.agent_state.setText("●  IDLE")
+        self.agent_state.setStyleSheet(
+            f"color:{TOKENS['state_idle']};font-weight:700;")
+        self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
+        self.eventlog.record("stream_detached",
+                             conversation_id=stream["conversation_id"],
+                             model=stream["model"])
+        self.log(f"Turn in '{stream['title']}' keeps running in the "
+                 "background — Mission Control is watching it.")
+        self._sync_deck_turn()
+        self._push_deck_streams()
+        self._refresh_mission()
+
+    def _maybe_reattach_stream(self, conversation_id):
+        """After a conversation is staged: if a live stream belongs
+        to it, put its turn back on the bench — the worker is
+        self.worker again, the stage turn fields are the stream's,
+        and the display list (the persisted record the load just
+        staged — exactly what a never-detached turn shows) gains
+        the in-flight partial generation the collector kept. A
+        settled stream for the staged conversation is consumed:
+        the store already carries its result."""
+        stream = self._stream_for_conversation(conversation_id)
+        if stream is None:
+            return
+        if stream["settled"] is not None:
+            self._streams.pop(stream["id"], None)
+            self._push_deck_streams()
+            self._refresh_mission()
+            return
+        stream["background"] = False
+        self._stage_stream_id = stream["id"]
+        self.worker = stream["worker"]
+        self._turn_mode = stream["mode"]
+        self._turn_prompt = stream["prompt"]
+        self._turn_started = stream["started_at"]
+        partial = stream["stream_text"]
+        self._stream_text = partial
+        if partial:
+            self.messages.append({"role": "assistant", "content": partial})
+        self.render()
+        self.send_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        self.agent_state.setText("●  THINKING")
+        self.agent_state.setStyleSheet("color:#e6c16c;font-weight:700;")
+        self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
+        self.log(f"Resumed the running turn in '{stream['title']}'.")
+        self._sync_deck_turn()
+        self._push_deck_streams()
+        self._refresh_mission()
+
+    # ---------- Item #64: stream signal dispatch ----------
+    def _ws_token(self, stream, token):
+        stream["last_activity"] = time.time()
+        if self._is_stage(stream):
+            self.on_token(token)
+            stream["stream_text"] = self._stream_text
+            return
+        stream["stream_text"] += token
+        now = time.time()
+        if now - stream["last_push"] > 1.0:
+            stream["last_push"] = now
+            self._sync_deck_turn()
+
+    def _ws_status(self, stream, status):
+        stream["status_text"] = status
+        stream["last_activity"] = time.time()
+        if "Processing tool result" in status:
+            stream["stream_text"] = ""
+        if self._is_stage(stream):
+            self.on_status(status)
+            stream["stream_text"] = self._stream_text
+            return
+        self._refresh_mission()
+
+    def _ws_receipt(self, stream, text):
+        if self._is_stage(stream):
+            self.on_receipt(text)
+            return
+        stream.setdefault("receipts", []).append(text)
+        self.log("🧾 " + text)
+        self.deck.push_receipt(text)
+        self._refresh_mission()
+
+    def _ws_finished(self, stream, text, messages):
+        # Item C9: the timeline's mark for this turn (the stopped
+        # distinction is this same _cancel signal the background
+        # settle below uses) — observed before routing, whatever
+        # the route.
+        self._note_turn_settled(
+            stream,
+            "stopped" if getattr(stream.get("worker"), "_cancel", False)
+            else "finished")
+        if self._is_stage(stream):
+            self._streams.pop(stream["id"], None)
+            self._stage_stream_id = None
+            self.on_finished(text, messages)
+            self._push_deck_streams()
+            self._refresh_mission()
+            return
+        self._settle_background_stream(stream, text, messages, None)
+
+    def _ws_failed(self, stream, error):
+        # Item C9: the timeline's mark for this turn (see
+        # _ws_finished).
+        self._note_turn_settled(stream, "failed")
+        if self._is_stage(stream):
+            self._streams.pop(stream["id"], None)
+            self._stage_stream_id = None
+            self.on_failed(error)
+            self._push_deck_streams()
+            self._refresh_mission()
+            return
+        self._settle_background_stream(stream, None, None, error)
+
+    def _settle_background_stream(self, stream, text, messages, error):
+        """A background turn ended. Everything the stage settle
+        does to SHARED surfaces is deliberately NOT done here: no
+        plan settle, no resume-state clear, no phone-queue drain
+        into a busy stage, no bench chrome, and above all no modal
+        error dialog hijacking the owner's current conversation.
+        What IS done is the turn's own bookkeeping: its
+        conversation is persisted under its own id/model/project,
+        its work product is filed under its own mode and project,
+        and Mission Control keeps the outcome."""
+        worker = stream["worker"]
+        if error is not None:
+            outcome = "failed"
+        elif getattr(worker, "_cancel", False):
+            outcome = "stopped"
+        else:
+            outcome = "done"
+        stream["settled"] = (outcome, error or "")
+        stream["gate"] = None
+        # Item #71: a background turn that died on image input
+        # heals its own conversation in the store (see
+        # _quarantine_background_images) — the same self-heal the
+        # stage gets in on_failed, applied to the record this
+        # stream's turns actually re-read.
+        if error is not None and self._is_multimodal_rejection(error):
+            self._quarantine_background_images(stream)
+        # Item #66: a background artifact-comment turn that failed
+        # files nothing — consume its marker so it can never claim
+        # a later turn's filing. (A successful one is claimed in
+        # the filing block below.)
+        if error is not None:
+            self._claim_artifact_comment(
+                stream["prompt"], stream["conversation_id"])
+        if messages is not None:
+            try:
+                stream["conversation_id"] = self.store.save(
+                    stream["conversation_id"], messages,
+                    model=stream["model"] or None,
+                    project=stream["workspace"])
+            except Exception as exc:
+                self.log(f"Background turn in '{stream['title']}' "
+                         f"could not be saved: {exc}")
+        if error is None and (text or "").strip():
+            mode_win = getattr(self, "mode_windows", {}).get(stream["mode"])
+            if mode_win is not None:
+                mode_win.add_exchange(stream["prompt"], text)
+            # Item #66: a pending artifact comment claims this
+            # stream's filing, exactly as on the stage — the reply
+            # is the revision, filed under THIS stream's own
+            # workspace/conversation.
+            marker = self._claim_artifact_comment(
+                stream["prompt"], stream["conversation_id"])
+            prompt_title = (stream["prompt"].strip().splitlines()
+                            or ["Turn"])[0][:60]
+            if marker is not None:
+                self._file_artifact_revision(
+                    text, marker, workspace=stream["workspace"],
+                    conversation_id=stream["conversation_id"])
+            elif stream["mode"] in ("design", "architect", "review"):
+                self._record_artifact(
+                    stream["mode"], prompt_title, text,
+                    workspace=stream["workspace"],
+                    conversation_id=stream["conversation_id"])
+            elif stream["mode"] == "code":
+                self._record_artifact(
+                    "walkthrough", prompt_title, text,
+                    workspace=stream["workspace"],
+                    conversation_id=stream["conversation_id"])
+        self.refresh_history()
+        if outcome == "failed":
+            self.log(f"Background turn in '{stream['title']}' FAILED: {error}")
+        elif outcome == "stopped":
+            self.log(f"Background turn in '{stream['title']}' stopped.")
+        else:
+            self.log(f"Background turn in '{stream['title']}' finished — "
+                     "its conversation is updated.")
+        self.eventlog.record("stream_settled",
+                             conversation_id=stream["conversation_id"],
+                             outcome=outcome)
+        self._sync_deck_turn()
+        self._push_deck_streams()
+        self._refresh_mission()
+        # Freed capacity can release a held phone prompt — but only
+        # into an idle stage (the drain itself re-checks the cap).
+        if self._phone_queue \
+                and not (self.worker and self.worker.isRunning()):
+            self._drain_phone_queue()
+        # C3: a successfully settled background turn judges its
+        # own workspace's untested tab — its changes were fed by
+        # _ws_changes as the turn landed them.
+        if error is None:
+            self._cadence_evaluate(stream["workspace"])
+
+    # ---------- C3: auto-test cadence ----------
+    def _ws_changes(self, stream, changes):
+        """C3 feed: a turn's change tally (the worker's
+        turn_changes signal, routed per stream like the receipts)
+        joins its workspace's untested tab. Maintenance turns are
+        excluded — their writes land in the maintenance work copy,
+        whose evidence is the candidate suite, not the tester
+        seat. Counting only: this can never block or alter a turn,
+        and the firing decision belongs to the settle."""
+        if getattr(self, "_self_maintenance_active", False):
+            return
+        if not changes:
+            return
+        acc = self._test_debt.setdefault(
+            stream["workspace"], cadence_mod.ChangeAccumulator())
+        acc.record(changes)
+
+    def _cadence_thresholds(self):
+        """The owner's auto-test thresholds (Settings → Seats &
+        limits, settings `test_cadence_files` / `test_cadence_lines`),
+        resolved with the #53 limit pattern: a missing/bad value
+        falls back to the cadence module's constants."""
+        def _value(key, default, lo, hi):
+            try:
+                value = int(self.settings.get(key, default) or default)
+            except (TypeError, ValueError):
+                value = default
+            return max(lo, min(hi, value))
+        return (_value("test_cadence_files",
+                       cadence_mod.FILES_THRESHOLD, 1, 100),
+                _value("test_cadence_lines",
+                       cadence_mod.LINES_THRESHOLD, 10, 10000))
+
+    def _cadence_evaluate(self, workspace):
+        """The settle judgment (C3): has this workspace's untested
+        tab earned a tester run? Fires on the owner's thresholds,
+        or at the smaller boundary floor when a plan step finished
+        during the turn. An ordinary below-threshold settle is
+        SILENT — small work must feel exactly as it did before C3;
+        only a boundary settle that still doesn't fire leaves a
+        record, so the log can show the tab was judged."""
+        acc = self._test_debt.get(workspace)
+        boundary = workspace in self._cadence_boundary
+        self._cadence_boundary.discard(workspace)
+        if acc is None or not acc.has_debt():
+            return
+        files_cap, lines_cap = self._cadence_thresholds()
+        if acc.due(files_cap, lines_cap, boundary=boundary):
+            self._cadence_fire(workspace, manual=False, boundary=boundary)
+        elif boundary:
+            files, lines = acc.since_run_counts()
+            owed_files, owed_lines = acc.debt_counts()
+            self.eventlog.record(
+                "test_cadence_skipped", workspace=workspace,
+                files=files, lines=lines,
+                owed_files=owed_files, owed_lines=owed_lines,
+                reason="below the plan-step boundary floor "
+                       f"({cadence_mod.BOUNDARY_FILES_THRESHOLD} files / "
+                       f"{cadence_mod.BOUNDARY_LINES_THRESHOLD} lines)")
+
+    def _cadence_fire(self, workspace, manual=False, boundary=False):
+        """Start one tester-seat run over the workspace's untested
+        tab, through the EXISTING tester path: the run_tester
+        plugin handler from the live tool registry, with a task
+        the shell writes from the tab itself. The cadence is the
+        owner's standing instruction (his thresholds, in his
+        settings), the way project verify commands already run
+        ungated after writes — no dialog. Returns True when a run
+        started."""
+        acc = self._test_debt.setdefault(
+            workspace, cadence_mod.ChangeAccumulator())
+        files, lines = acc.since_run_counts()
+        owed_files, owed_lines = acc.debt_counts()
+        if self._cadence_running_for is not None:
+            self.eventlog.record(
+                "test_cadence_skipped", workspace=workspace,
+                files=files, lines=lines, manual=manual,
+                reason="a tester run is already going")
+            if manual:
+                self.log("Test now: a tester run is already going — "
+                         "its report lands here when it finishes.")
+                self.statusBar().showMessage(
+                    "A tester run is already going")
+            return False
+        entry = self._extra_tools().get("run_tester")
+        if entry is None:
+            self.eventlog.record(
+                "test_cadence_skipped", workspace=workspace,
+                files=files, lines=lines, manual=manual,
+                reason="tester seat unavailable (Tester plugin off)")
+            if manual:
+                self.log("Test now: the tester seat is not available — "
+                         "enable the Tester plugin in Customize.")
+                self.statusBar().showMessage("Tester seat unavailable")
+            return False
+        paths = acc.since_run_paths()
+        if owed_files:
+            shown = ", ".join(paths[:12])
+            if len(paths) > 12:
+                shown += f", and {len(paths) - 12} more"
+            task = (f"Test the untested changes in this project: "
+                    f"{owed_files} file(s), about {owed_lines} changed "
+                    f"line(s) on the untested tab ({shown}). Run the "
+                    f"project's own checks and exercise the changed "
+                    f"files; report a verdict with evidence.")
+        else:
+            task = ("The owner asked for a test run with nothing on "
+                    "the untested tab: check the project's current "
+                    "state — run its own checks and report a verdict "
+                    "with evidence.")
+        # The run covers everything outstanding as of NOW; changes
+        # landing during the run count toward the next one. The
+        # debt itself clears only on a pass (see _cadence_run_done).
+        acc.note_run()
+        self.eventlog.record(
+            "test_cadence_fired", workspace=workspace,
+            files=files, lines=lines,
+            owed_files=owed_files, owed_lines=owed_lines,
+            manual=manual, boundary=boundary)
+        if manual:
+            self.log(f"Test now: tester seat running over "
+                     f"{owed_files} untested file(s) "
+                     f"(~{owed_lines} lines).")
+        else:
+            self.log(f"Auto-test: {files} file(s) / ~{lines} line(s) "
+                     f"changed since the tester last ran — tester "
+                     f"seat running.")
+        self.statusBar().showMessage("Tester seat running…")
+        self._launch_cadence_run(workspace, entry[1], task)
+        return True
+
+    def _launch_cadence_run(self, workspace, handler, task):
+        """Run the tester handler off the GUI thread (a tester run
+        takes minutes on this CPU) and route its report back to
+        _cadence_run_done. One run at a time, across workspaces —
+        a cadence run is a seat run, and seat runs are
+        one-at-a-time on this PC."""
+        thread = TesterRunThread(handler, task)
+        self._cadence_thread = thread
+        self._cadence_running_for = workspace
+
+        def _settle(t=thread):
+            # The fold's R61 law: only THIS run's settle may clear
+            # the slot — a late settle must not null a newer run.
+            if self._cadence_thread is t:
+                self._cadence_thread = None
+            self._cadence_running_for = None
+
+        def _done(report):
+            _settle()
+            self._cadence_run_done(workspace, report)
+
+        def _failed(why):
+            _settle()
+            self._cadence_run_done(workspace, f"Tester error: {why}")
+
+        thread.done.connect(_done)
+        thread.failed.connect(_failed)
+        thread.start()
+
+    def _cadence_run_done(self, workspace, report):
+        """A cadence tester run reported. PASS clears the
+        workspace's whole tab. Anything else — FAIL, an error, a
+        stopped or verdict-less run — leaves the tab standing and
+        says so in the log: the changes stay owed until a passing
+        run (auto or the owner's 'Test now') clears them."""
+        acc = self._test_debt.get(workspace)
+        verdict = cadence_mod.verdict_of(report)
+        if verdict == "pass":
+            if acc is not None:
+                acc.note_pass()
+            self.eventlog.record("test_cadence_passed",
+                                 workspace=workspace)
+            self.log("Tester seat: PASS — every change on the tab "
+                     "is tested; the tab is clear.")
+            self.statusBar().showMessage("Tester seat: PASS")
+            return
+        files, lines = acc.debt_counts() if acc is not None else (0, 0)
+        self.eventlog.record(
+            "test_cadence_owed", workspace=workspace, verdict=verdict,
+            files=files, lines=lines, report=str(report)[:4000])
+        label = "FAIL" if verdict == "fail" else "no verdict"
+        self.log(f"Tester seat: {label} — {files} file(s) / "
+                 f"~{lines} line(s) stay on the untested tab until "
+                 f"a passing run.")
+        self.statusBar().showMessage(
+            "Tester seat: not passing — changes stay on the tab")
+
+    def test_now(self):
+        """C3 manual trigger (command palette): run the tester
+        seat over the current workspace's untested tab right now,
+        whatever the thresholds say. A passing run clears the tab
+        through the same completion path as an automatic one."""
+        self._cadence_fire(self.workspace, manual=True)
+
+    # ---------- Item #64: the gate queue ----------
+    def _ws_gate(self, stream, name, args, description, diff=None):
+        """A worker's approval ask, routed. The asking worker parks
+        on its own approval event (F8 — no clock, and cancel()
+        releases the wait as a denial), so a queued ask costs its
+        turn nothing but time. One gate is presented at a time —
+        desktop dialog and deck pending exactly as in the classic
+        path — and a gate asked while one is on screen waits here
+        in arrival order."""
+        entry = (stream, name, args, description, diff)
+        if self._gate_presenting:
+            self._gate_queue.append(entry)
+            if stream is not None:
+                stream["gate"] = {"tool": name, "queued": True}
+            self.log(f"Approval needed in '{stream['title']}' ({name}) "
+                     "— queued behind the gate on screen.")
+            self._push_deck_streams()
+            self._refresh_mission()
+            return
+        self._present_gate(entry)
+
+    def _present_gate(self, entry):
+        stream, name, args, description, diff = entry
+        self._gate_presenting = True
+        self._gate_owner_worker = stream["worker"] if stream else None
+        if stream is not None:
+            stream["gate"] = {"tool": name, "queued": False}
+        try:
+            if stream is not None and not self._is_stage(stream):
+                # A background gate names its conversation, on the
+                # dialog and the phone card alike (the description
+                # feeds both) — the owner always knows whose ask
+                # this is. A stage gate is unlabelled, as before.
+                description = (f"[Background · {stream['title']}] "
+                               + (description or ""))
+            self.request_approval(name, args, description, diff)
+        finally:
+            self._gate_presenting = False
+            self._gate_owner_worker = None
+            if stream is not None:
+                stream["gate"] = None
+        self._pump_gate_queue()
+
+    def _pump_gate_queue(self):
+        while self._gate_queue and not self._gate_presenting:
+            entry = self._gate_queue.pop(0)
+            stream = entry[0]
+            worker = stream["worker"] if stream else None
+            # An ask whose wait already ended is dropped, never
+            # presented: the owner stopped that turn (cancel()
+            # released the wait as a denial) and the turn moved on.
+            # A live ask's worker is still running with its decision
+            # event created and unset — the exact shape the worker
+            # leaves behind at approval_needed.emit.
+            event = getattr(worker, "_decision_event", None)
+            if worker is None or not worker.isRunning() \
+                    or event is None or event.is_set():
+                if stream is not None:
+                    stream["gate"] = None
+                    self.log(f"Queued approval in '{stream['title']}' "
+                             "dropped — that turn already moved on.")
+                continue
+            self._present_gate(entry)
+
+    # ---------- Item #64: deck truth + mission control ----------
+    def _sync_deck_turn(self):
+        """The deck's turn card tells the truth about ALL streams:
+        active while any turn runs, started at the earliest live
+        turn's start, last activity the latest. For the classic
+        one-turn case this computes exactly what the direct pushes
+        used to write."""
+        live = self._live_streams()
+        if live:
+            self.deck.set_state(turn={
+                "active": True,
+                "started_at": min(s["started_at"] for s in live),
+                "last_activity": max(s["last_activity"] for s in live)})
+        else:
+            self.deck.set_state(turn={"active": False, "started_at": 0,
+                                      "last_activity": 0})
+
+    def _stream_state_text(self, stream):
+        settled = stream["settled"]
+        if settled is not None:
+            return {"done": "Done", "failed": "Failed",
+                    "stopped": "Stopped"}[settled[0]]
+        gate = stream["gate"]
+        if gate:
+            if gate["queued"]:
+                return f"Gate queued — {gate['tool']}"
+            return f"Parked at gate — {gate['tool']}"
+        status = (stream["status_text"] or "").strip()
+        return f"Running — {status}" if status else "Running"
+
+    def _push_deck_streams(self):
+        """The workstream summary rides the deck state (additive
+        key — the deck page renders its own cards; /state carries
+        the truth for anything reading it)."""
+        rows = [{"title": s["title"], "project": s["project"],
+                 "model": s["model"], "state": self._stream_state_text(s),
+                 "stage": self._is_stage(s)}
+                for s in sorted(self._streams.values(),
+                                key=lambda x: x["id"])]
+        self.deck.set_state(streams=rows)
+
+    def _refresh_mission(self):
+        win = getattr(self, "mission_win", None)
+        if win is not None and win.isVisible():
+            win.refresh()
+
+    def mission_rows(self):
+        """Mission Control's data: one row per registered stream,
+        oldest first. Pure reads — the window rebuilds from this on
+        every refresh."""
+        rows = []
+        for s in sorted(self._streams.values(), key=lambda x: x["id"]):
+            state = self._stream_state_text(s)
+            if self._is_stage(s):
+                where = "on the bench"
+            elif s["settled"] is None:
+                where = "background"
+            else:
+                where = "settled"
+            line = (f"{s['title']}  ·  {s['project']}  ·  {s['model']}"
+                    f"  ·  {state}  ·  {where}")
+            if s["maintenance"]:
+                line += "  ·  maintenance (read-only)"
+            rows.append({"id": s["id"], "line": line, "state": state,
+                         "live": s in self._live_streams(),
+                         "maintenance": s["maintenance"],
+                         "conversation_id": s["conversation_id"],
+                         "title": s["title"]})
+        return rows
+
+    def jump_to_stream(self, stream_id):
+        """Mission Control's Go to: stage the row's conversation —
+        a live background turn reattaches on load; a settled one
+        simply opens with its result in place."""
+        stream = self._streams.get(stream_id)
+        if stream is None or stream["maintenance"]:
+            return
+        cid = stream["conversation_id"]
+        if cid is None or cid == self.conversation_id:
+            return
+        self.load_conversation(cid)
+
+    def stop_stream(self, stream_id):
+        """Mission Control's Stop: cancel exactly this stream's
+        worker — its approval/plans waits release as denials/kills
+        by the worker's own cancel(), and no other turn feels it."""
+        stream = self._streams.get(stream_id)
+        if stream is None or stream["settled"] is not None:
+            return
+        worker = stream["worker"]
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            self.log(f"Stop requested for the turn in '{stream['title']}'.")
+        self._refresh_mission()
+
+    def dismiss_stream(self, stream_id):
+        stream = self._streams.get(stream_id)
+        if stream is not None and stream["settled"] is not None:
+            self._streams.pop(stream_id, None)
+            self._push_deck_streams()
+            self._refresh_mission()
+
+    def open_mission_control(self):
+        """Mission control: single instance, refreshed on open, in
+        the same shape as the other rooms."""
+        win = getattr(self, "mission_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_provider_chat(self):
+        """Provider chat: single instance, refreshed on open, in
+        the same shape as the other rooms."""
+        win = getattr(self, "provider_chat_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_templates_window(self):
+        """Item C4: the templates shelf — single instance,
+        refreshed on open, in the same shape as the other rooms."""
+        win = getattr(self, "templates_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_testing_window(self):
+        """Item C8: the testing room — single instance, refreshed
+        on open, in the same shape as the other rooms."""
+        win = getattr(self, "testing_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def template_entries(self):
+        """Item C4: the shelf's current contents — a fresh scan of
+        the app templates folder; a malformed template is skipped
+        with a log line (forge/templates.py), never a crash."""
+        return templates_mod.discover_templates(
+            self.app_templates_dir, on_skip=self.log)
+
+    def create_project_from_template(self, entry, parent_dir, name):
+        """Item C4: create + open a project from a template entry.
+        The copy and the .forge setup are forge/templates.py's
+        instantiate (ordinary project setup); adoption is the same
+        bookkeeping add_project does — list entry, set_project,
+        settings. An existing destination folder is refused in
+        words, mirroring create_dev_clone. Returns the project
+        path, or None when refused."""
+        dest = Path(parent_dir) / name
+        try:
+            templates_mod.instantiate_template(entry, dest)
+        except FileExistsError:
+            QMessageBox.information(
+                self, "New project from template",
+                f"A folder already exists:\n{dest}")
+            return None
+        if not any(e.get("path") == str(dest) for e in self.projects):
+            self.projects.append(
+                {"name": Path(dest).name, "path": str(dest)})
+        self.set_project(str(dest))
+        self.save_settings()
+        self.log(f"Project created from template "
+                 f"'{entry['name']}': {dest}")
+        return str(dest)
+
+    # ---------- Item C9: turn timeline + soft budget ----------
+
+    def open_timeline(self):
+        """Turn timeline: single instance, refreshed on open, in
+        the same shape as the other rooms."""
+        win = getattr(self, "timeline_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_design_canvas(self):
+        """Item C5: the design canvas — single instance,
+        refreshed on open, in the same shape as the other
+        rooms."""
+        win = getattr(self, "design_canvas_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _soft_token_budget(self):
+        """The per-conversation soft token budget (Settings →
+        Seats & limits, settings `soft_token_budget`), resolved
+        with the #53 pattern: a missing/bad value is the timeline
+        module's default. Unlike the parallel-turn cap there is
+        no architectural range to clamp to — the owner's number
+        is the budget; only a non-positive value falls back."""
+        try:
+            value = int(self.settings.get(
+                "soft_token_budget",
+                timeline_mod.DEFAULT_SOFT_TOKEN_BUDGET)
+                or timeline_mod.DEFAULT_SOFT_TOKEN_BUDGET)
+        except (TypeError, ValueError):
+            value = timeline_mod.DEFAULT_SOFT_TOKEN_BUDGET
+        if value <= 0:
+            value = timeline_mod.DEFAULT_SOFT_TOKEN_BUDGET
+        return value
+
+    def _note_turn_settled(self, stream, outcome):
+        """Item C9's one observation point, called by the two
+        settle dispatchers (_ws_finished / _ws_failed) for EVERY
+        stream before they route it: append this turn's mark —
+        prompt, model, mode, outcome — to its conversation's list,
+        then run the soft-budget check for that conversation.
+        Side chats are skipped (the fork is ephemeral by #54's
+        definition and runs under the main conversation's id, so
+        its turns are not the main thread's record). Pure
+        bookkeeping: it reads the stream record and settings only,
+        and can neither block nor alter the settle it rides."""
+        cid = stream.get("conversation_id")
+        if cid is None or stream.get("side"):
+            return
+        self._turn_marks.setdefault(cid, []).append({
+            "prompt": stream.get("prompt") or "",
+            "model": stream.get("model"),
+            "mode": stream.get("mode") or "",
+            "outcome": outcome})
+        self._check_soft_budget(cid)
+        win = getattr(self, "timeline_win", None)
+        if win is not None and win.isVisible() \
+                and cid == self.conversation_id:
+            win.refresh()
+
+    def timeline_data(self, conversation_id):
+        """The Turn timeline's data for one conversation: the
+        event log's turn records paired with this session's marks
+        (forge/timeline.py does the pairing — numbers come from
+        the records alone), the rollups over exactly those
+        entries, and the soft-budget state."""
+        marks = self._turn_marks.get(conversation_id, [])
+        records = timeline_mod.read_records(self.eventlog.directory)
+        entries = timeline_mod.conversation_entries(records, marks)
+        totals = timeline_mod.rollups(entries)
+        budget = self._soft_token_budget()
+        return {"title": self._conversation_title(conversation_id),
+                "entries": entries, "rollups": totals,
+                "budget": budget,
+                "over": totals["total_tokens"] >= budget}
+
+    def _check_soft_budget(self, conversation_id):
+        """The soft budget alert: when the conversation on the
+        bench has crossed its soft token budget, say so ONCE —
+        one plain bench line, no dialog, nothing blocked. The
+        announcement is remembered per (conversation, budget
+        value): raising the budget in Settings re-arms it (the
+        next crossing, of the new value, announces again), and a
+        new conversation starts unannounced by construction. A
+        background conversation's crossing is announced when the
+        owner stages it (load_conversation runs this too)."""
+        if conversation_id is None \
+                or conversation_id != self.conversation_id:
+            return
+        budget = self._soft_token_budget()
+        if self._soft_budget_announced.get(conversation_id) == budget:
+            return
+        totals = self.timeline_data(conversation_id)["rollups"]
+        if totals["total_tokens"] < budget:
+            return
+        self._soft_budget_announced[conversation_id] = budget
+        line = (f"This conversation has used ≈{totals['total_tokens']:,}"
+                f" tokens (soft budget {budget:,})")
+        self.log(line)
+        self.statusBar().showMessage(line, 8000)
+
+    # ---------- Note 14 #3: context gauge + auto-summary ----------
+    def _context_schemas(self):
+        """The tool schemas a request carries, for the estimate: the
+        builtins plus every extension tool. (Restricted modes send a
+        subset, so there the estimate reads a little high — it is an
+        estimate, and it is labeled one.)"""
+        return list(TOOL_SCHEMAS) + [entry[0] for entry in self._extra_tools().values()]
+
+    def _update_context_gauge(self):
+        if not hasattr(self, "ctx_bar"):
+            return
+        # Dynamic context windows (2026-11-10): the gauge measures
+        # against the SELECTED model's resolved window — the same
+        # number the worker budgets the next turn against — not the
+        # bare setting. Resolution rides the client's caches, so
+        # the 3s refresh pays a dict lookup after the first call.
+        model = ""
+        try:
+            model = self.model_combo.currentText().strip()
+        except Exception:
+            model = ""
+        num_ctx = self._resolve_budget(model) if model else int(
+            self.settings.get("num_ctx", 8192) or 8192)
+        schemas = self._context_schemas()
+        # Sweep R62: one breakdown walk instead of two passes over
+        # the history (the total used to be computed by its own
+        # walk, then breakdown walked it again for the tooltip).
+        # The algebra is the context module's own: its total IS
+        # system + history + tools.
+        parts = context_mod.breakdown(self.messages, schemas)
+        est = parts["system"] + parts["history"] + parts["tools"]
+        frac = est / num_ctx if num_ctx > 0 else 0.0
+        self.ctx_bar.setValue(max(0, min(100, round(frac * 100))))
+        self.ctx_bar.setObjectName(
+            "crit" if frac >= context_mod.CRIT_FRACTION else
+            "hot" if frac >= context_mod.WARN_FRACTION else "")
+        self.ctx_bar.style().unpolish(self.ctx_bar)
+        self.ctx_bar.style().polish(self.ctx_bar)
+        self.ctx_text.setText(f"~{est:,} / {num_ctx:,} tokens")
+        tip = (f"Estimated context use — system prompt ~{parts['system']:,} · "
+               f"conversation ~{parts['history']:,} · tool schemas ~{parts['tools']:,} tokens. "
+               "Counted locally from characters; estimates, never exact. "
+               "Right-click to summarize the older messages now.")
+        self.ctx_bar.setToolTip(tip)
+        self.ctx_text.setToolTip(tip)
+
+    def _context_gauge_menu(self, pos):
+        menu = QMenu(self)
+        act = menu.addAction("Summarize older messages now")
+        sees = menu.addAction("What the AI sees…")
+        busy = (self.worker is not None and self.worker.isRunning()) or \
+               (self._fold_thread is not None and self._fold_thread.isRunning())
+        act.setEnabled(not busy)
+        picked = menu.exec(self.ctx_bar.mapToGlobal(pos))
+        if picked == act:
+            self._summarize_now()
+        elif picked == sees:
+            self.open_sees_window()
+
+    def _resolve_budget(self, model, setting=None) -> int:
+        """Dynamic context windows (2026-11-10): the effective
+        context budget for one model via forge.providers — a
+        provider model at its stated window, a local at
+        min(trained max, the num_ctx setting), anything unknown
+        at the setting. The window-side twin of the worker's
+        resolver call; both go through the one function."""
+        if setting is None:
+            setting = int(self.settings.get("num_ctx", 8192) or 8192)
+        return providers_mod.resolve_context_budget(
+            model, config=getattr(self.client, "config", None),
+            client=self.client, fallback=setting)
+
+    def _summarize_now(self):
+        """The manual fold (the gauge's right-click): the same fold
+        the send path runs, minus the turn afterwards."""
+        if (self.worker is not None and self.worker.isRunning()) or \
+                (self._fold_thread is not None and self._fold_thread.isRunning()):
+            return
+        model = self.model_combo.currentText().strip()
+        if not model:
+            self.log("No model selected — nothing to summarize with.")
+            return
+        num_ctx = self._resolve_budget(model)
+        plan = context_mod.plan_fold(self.messages, num_ctx,
+                                     self._context_schemas(), force=True)
+        if plan is None:
+            self.log("Nothing old enough to summarize — the newest exchanges always stay verbatim.")
+            return
+        options = {"temperature": self.settings.get("temperature", .7),
+                   "num_predict": self.settings.get("num_predict", 2048),
+                   "num_ctx": num_ctx}
+        self.send_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        self._launch_fold(model, options, plan, then_start=False,
+                          num_ctx=num_ctx)
+
+    def _maybe_fold(self, model, options, text) -> bool:
+        """True when a pre-send fold has been launched (the turn then
+        starts from the fold's completion, folded or not)."""
+        if not self.settings.get("auto_summarize", True):
+            return False
+        # The fold is judged against the DRIVER's resolved window
+        # (dynamic context windows, 2026-11-10), not the bare
+        # setting — the turn options themselves are NOT mutated:
+        # the setting stays the request option the send carries.
+        num_ctx = self._resolve_budget(
+            model, int(options.get("num_ctx", 8192) or 8192))
+        plan = context_mod.plan_fold(self.messages, num_ctx,
+                                     self._context_schemas())
+        if plan is None:
+            return False
+        self._launch_fold(model, options, plan, then_start=True, text=text,
+                          num_ctx=num_ctx)
+        return True
+
+    def _launch_fold(self, model, options, plan, then_start: bool, text: str = "",
+                     num_ctx=None):
+        # The caller's plan was made against a specific budget (the
+        # resolved window); the summary request is sized against
+        # that same number, never re-derived from the raw options.
+        num_ctx = int(num_ctx or options.get("num_ctx", 8192) or 8192)
+        style = self.settings.get("fold_style", "prose")
+        thread = SummarizeThread(
+            self.client, model,
+            context_mod.summary_messages(plan["span"], num_ctx, style=style),
+            {"temperature": 0.3, "num_predict": 1024, "num_ctx": num_ctx})
+        self._fold_thread = thread
+        self.eventlog.record("context_fold_started", folded=len(plan["span"]),
+                             estimate_before=plan["estimate_before"],
+                             num_ctx=num_ctx, manual=not then_start,
+                             style=style)
+        self.log(f"Context is ~{plan['estimate_before']:,} of {num_ctx:,} tokens — "
+                 f"summarizing the oldest {len(plan['span'])} messages first…")
+        self.statusBar().showMessage("Summarizing the earlier conversation to fit the context window…")
+
+        def _settle():
+            # Sweep R61: only THIS fold's settle may clear the slot
+            # — a late settle from an older fold must not null a
+            # newer fold's reference mid-flight.
+            if self._fold_thread is thread:
+                self._fold_thread = None
+            self.stop_btn.setEnabled(False)
+
+        def _done(summary_text):
+            _settle()
+            folded, count = context_mod.apply_fold(self.messages, plan, summary_text,
+                                                   style=style)
+            if folded is not None:
+                # H5: the fold stops being the place memory goes
+                # to die. The fold itself is entered in the
+                # conversation's notes file, and the file's whole
+                # content rides into the folded history behind the
+                # summary — so decisions and done-steps the summary
+                # compressed away are still in front of the model,
+                # from the user's own editable file on disk.
+                if self.conversation_id is None:
+                    self.persist_conversation()
+                if self.conversation_id is not None:
+                    notes_mod.append_entry(
+                        APP_DIR, self.conversation_id,
+                        "Context was summarized — older turns "
+                        "folded. Notes kept on disk.")
+                    folded = context_mod.with_session_notes(
+                        folded, notes_mod.read_notes(
+                            APP_DIR, self.conversation_id))
+                self.messages = folded
+                self.eventlog.record(
+                    "context_folded", folded=count,
+                    estimate_before=plan["estimate_before"],
+                    estimate_after=context_mod.total_estimate(folded, self._context_schemas()))
+                self.log(f"Earlier conversation summarized — ~{count} messages folded into one summary.")
+                self.persist_conversation()
+                self.render()
+                self._update_context_gauge()
+            else:
+                self.log("The summary would not have shrunk the conversation — left exactly as it was.")
+            if then_start:
+                self._start_turn(model, options, text)
+            else:
+                self.send_btn.setEnabled(True)
+
+        def _failed(why):
+            _settle()
+            self.eventlog.record("context_fold_failed", error=str(why)[:200])
+            self.log(f"Could not summarize the earlier conversation ({why}) — "
+                     + ("sending as-is." if then_start else "nothing changed."))
+            if then_start:
+                self._start_turn(model, options, text)
+            else:
+                self.send_btn.setEnabled(True)
+
+        def _cancelled():
+            _settle()
+            self.eventlog.record("context_fold_cancelled", manual=not then_start)
+            if then_start:
+                # Stop during a pre-send summary stops the SEND (the
+                # owner's intent), not just the summary: the request
+                # stays in the conversation, unsent, and the bench
+                # settles back to idle.
+                upd.clear_resume_state(APP_DIR)
+                self.log("Stop pressed — summarizing cancelled, nothing was sent.")
+                self.send_btn.setEnabled(True)
+                self.agent_state.setText("●  IDLE")
+                self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
+                self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
+            else:
+                self.log("Summarizing cancelled — nothing changed.")
+                self.send_btn.setEnabled(True)
+                # Sweep R61: the manual fold never set the agent
+                # state/ember the pre-send branch resets, but it DID
+                # set the status bar's "Summarizing…" message — a
+                # cancelled manual fold used to leave that claim up
+                # for the rest of the session.
+                self.statusBar().clearMessage()
+
+        thread.done.connect(_done)
+        thread.failed.connect(_failed)
+        thread.cancelled.connect(_cancelled)
+        thread.start()
+
+    def on_token(self, token):
+        self._stream_text += token
+        self.ember.token_tick()
+        now = time.time()
+        if now - self._deck_last_push > 1.0:
+            self._deck_last_push = now
+            self.deck.set_state(turn={"active": True, "started_at": self._turn_started,
+                                      "last_activity": now})
+        if self.messages and self.messages[-1].get("role") == "assistant":
+            self.messages[-1]["content"] = self._stream_text
+        else:
+            self.messages.append({"role": "assistant", "content": self._stream_text})
+        # Throttled repaints: re-rendering the whole chat per token was part
+        # of v2 feeling slower than v1. 120 ms coalescing keeps it smooth.
+        if not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def on_status(self, status):
+        if "Processing tool result" in status:
+            self._stream_text = ""
+        self.statusBar().showMessage(status)
+        self.log(status)
+        if "approval" in status.lower():
+            self.agent_state.setText("●  PAUSED — AWAITING APPROVAL")
+            self.agent_state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
+            self.ember.set_mode("paused"); self.ember_label.setText("PAUSED")
+
+    def on_receipt(self, text):
+        self.receipt_bar.setText("🧾  SHELL RECEIPT · " + text)
+        self.log("🧾 " + text)
+        self.deck.push_receipt(text)
+        self.ember.flare()
+
+    def request_approval(self, name, args, description, diff=None):
+        # Item #64: the gate's owner is the worker that ASKED — the
+        # gate pump sets _gate_owner_worker before presenting. With
+        # no pump in play (the classic path, and every direct call)
+        # this is exactly the stage worker, or a test's stand-in.
+        gate_worker = getattr(self, "_gate_owner_worker", None) \
+            or self.worker
+        # C1: while a Watch-seat proposal is presented, the asker
+        # stand-in IS the gate worker; its recorded answer is how
+        # the monitor's apply step knows the verdict (the normal
+        # return of resolve_approval is otherwise fire-and-forget).
+        _is_watch_asker = isinstance(gate_worker, _WatchGateAsker)
+        model = gate_worker.model if gate_worker else "?"
+        target = describe_tool_short(name, args if isinstance(args, dict) else {})
+        # Note 14 #4 (diff-first): for a file write, the owner judges
+        # the CHANGE, not the whole file. Audit B16: the diff ARRIVES
+        # with the request — the worker computed it on its own thread
+        # at ask time, from the file's on-disk content at that moment,
+        # so this slot never reads files or runs difflib on the GUI
+        # thread. (A call a remembered rule allows or denies is
+        # settled in the worker and never reaches this gate, so no
+        # diff is built for it either.) The desktop dialog leads with
+        # the full diff and its body shrinks to the one-line action
+        # summary; the phone card carries the compact diff in the
+        # same description field it already had.
+        # S6 (audit S1-33): the soft long-turn prompt rides this
+        # same gate, but it is not a tool call — it must never grow
+        # a remembered allow-rule, so its dialog hides Remember.
+        show_remember = name != LONG_TURN_TOOL
+        if diff is not None:
+            dialog = ApprovalDialog(self, model, name, target,
+                                    (description or "").split("\n", 1)[0],
+                                    show_remember=show_remember,
+                                    diff=diff, workspace=self.workspace)
+            deck_description = diff.compact_text()
+        else:
+            dialog = ApprovalDialog(self, model, name, target, description,
+                                    show_remember=show_remember,
+                                    workspace=self.workspace)
+            deck_description = description
+        # H2: the phone card carries the same risk line the desktop
+        # dialog shows — one shared classifier, the same words. The
+        # pending dict gains a key; its existing keys are untouched.
+        risk_text, _risk_kind = perm_mod.classify_risk(name, target, self.workspace)
+        self.deck.set_state(pending={"tool": name, "target": target,
+                                     "description": (deck_description or "")[:1500],
+                                     "risk": risk_text})
+
+        def _phone(ok):
+            if dialog.isVisible():
+                self.log("📱 Approval answered from the phone.")
+                if ok:
+                    dialog._approve()
+                else:
+                    dialog.reject()
+
+        self.deck.approval_answered.connect(_phone)
+        _stop_as_deny = lambda: _phone(False)  # noqa: E731 — phone Stop releases the dialog as a denial
+        self.deck.stop_requested.connect(_stop_as_deny)
+        try:
+            accepted = dialog.exec() == QDialog.Accepted and dialog.approved
+        finally:
+            try:
+                self.deck.approval_answered.disconnect(_phone)
+                self.deck.stop_requested.disconnect(_stop_as_deny)
+            except Exception:
+                pass
+            self.deck.set_state(pending=None)
+        if accepted and dialog.remember:
+            rules = list(self.settings.get("permission_rules", []))
+            # S3 (audit S1-03): the remembered rule keys on the FULL
+            # target, not the 90-char display target above — a rule
+            # built from the truncated prefix would auto-allow any
+            # later call sharing it. The dialog, deck card and log
+            # lines keep the short target; only the rule changes.
+            rule_target = describe_tool_full(
+                name, args if isinstance(args, dict) else {})
+            if name == "run_command":
+                # H2 scoped remembering: a command rule is the exact
+                # command (pattern escaped, so it can only ever
+                # match literally) in THIS project only — see
+                # permissions._command_allow_ok for the other half.
+                rule = {"scope": self.workspace, "tool": name,
+                        "pattern": perm_mod.fnmatch_escape(rule_target),
+                        "action": "allow", "exact": True}
+            else:
+                rule = {"scope": "global", "tool": name, "pattern": rule_target or "*", "action": "allow"}
+            if rule not in rules:
+                rules.append(rule)
+                self.settings["permission_rules"] = rules
+                self.save_settings()
+            self.log(f"Rule remembered: always allow {name} · {target}")
+        self.log(("Approved " if accepted else "Denied ") + name)
+        if _is_watch_asker:
+            self._watch_gate_answer = bool(accepted)
+        if gate_worker:
+            gate_worker.resolve_approval(accepted)
+        # The state label + ember describe the STAGE turn; a
+        # background gate resolving must not relabel the bench for
+        # a turn that isn't on it. The classic path (no separate
+        # owner, or the owner IS the stage worker) keeps the chrome.
+        if getattr(self, "_gate_owner_worker", None) is None \
+                or gate_worker is self.worker:
+            self.agent_state.setText("●  THINKING" if accepted else "●  DENIED")
+            if accepted:
+                self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
+
+    # ---------- maintenance commands (Note 25: the Forge uses its own hands) ----------
+    def _maintenance_approved(self, display: str, reason: str) -> bool:
+        """The dialog boundary for a shell maintenance command. Mirrors
+        request_approval's deck wiring exactly — same dialog, same
+        phone bridge, same Stop-releases-as-denial — but deliberately
+        NOT its end-matter: no worker is waiting on this, and a
+        maintenance command must never become a remembered allow-rule,
+        so there is no resolve_approval and no remember button."""
+        dialog = ApprovalDialog(self, "CODE FORGE shell", "maintenance command",
+                                display, reason, show_remember=False)
+        self.deck.set_state(pending={"tool": "maintenance", "target": display,
+                                     "description": (reason or "")[:1500]})
+
+        def _phone(ok):
+            if dialog.isVisible():
+                self.log("📱 Approval answered from the phone.")
+                if ok:
+                    dialog._approve()
+                else:
+                    dialog.reject()
+
+        self.deck.approval_answered.connect(_phone)
+        _stop_as_deny = lambda: _phone(False)  # noqa: E731 — phone Stop = denial, as with tool approvals
+        self.deck.stop_requested.connect(_stop_as_deny)
+        try:
+            accepted = dialog.exec() == QDialog.Accepted and dialog.approved
+        finally:
+            try:
+                self.deck.approval_answered.disconnect(_phone)
+                self.deck.stop_requested.disconnect(_stop_as_deny)
+            except Exception:
+                pass
+            self.deck.set_state(pending=None)
+        self.log(("Approved " if accepted else "Declined ") + "maintenance command")
+        return accepted
+
+    def run_maintenance(self, argv, reason: str, cwd=None, on_done=None) -> bool:
+        """Propose a maintenance command to the owner; on approval, run
+        it in the Forge's own terminal path and stream output to the
+        log. The command the owner sees is built FROM argv
+        (maint_mod.format_command) — what he approves is what runs.
+        on_done(ok, detail) fires with detail in {"ok", "declined",
+        "failed"} once the outcome is known. Returns True only when the
+        command was approved and started."""
+        argv = [str(a) for a in argv]
+        display = maint_mod.format_command(argv)
+        # Sweep R37: one maintenance run at a time — the slot used
+        # to be overwritten unconditionally, orphaning a running
+        # thread (and its child process) beyond anyone's reach.
+        if self._maintenance_thread is not None \
+                and self._maintenance_thread.isRunning():
+            self.log(f"🛠 A maintenance command is still running — "
+                     f"not started: {display}")
+            if on_done:
+                on_done(False, "failed")
+            return False
+        self.log(f"🛠 The Forge needs to run a maintenance command: {display}")
+        if not self._maintenance_approved(display, reason):
+            self.on_receipt(f"maintenance declined · {display}")
+            if on_done:
+                on_done(False, "declined")
+            return False
+        thread = MaintenanceRunThread(argv, cwd or ROOT_DIR)
+        thread.line.connect(self.log)
+        thread.finished_ok.connect(
+            lambda ok, tail: self._maintenance_finished(ok, tail, display, on_done))
+        self._maintenance_thread = thread
+        self.log(f"🛠 Running: {display}")
+        thread.start()
+        return True
+
+    def _maintenance_finished(self, ok, tail, display, on_done):
+        if ok:
+            self.log("🛠 Maintenance command finished.")
+            self.on_receipt(f"maintenance done · {display}")
+        else:
+            self.log(f"🛠 Maintenance command FAILED ({tail}).")
+            self.on_receipt(f"maintenance FAILED · {display}")
+        if on_done:
+            on_done(bool(ok), "ok" if ok else "failed")
+
+    # ---------- transcription with self-healing (Note 25) ----------
+    def _start_transcription(self, audio_path, out_path, done_handler, allow_heal=True):
+        # Sweep R37: same one-at-a-time law as maintenance — the
+        # transcriber slot was overwritten unconditionally, and
+        # closeEvent never waited for the orphan.
+        if getattr(self, "_transcriber", None) is not None \
+                and self._transcriber.isRunning():
+            self.log("🎙 A transcription is still running — this "
+                     f"clip was not started. Audio kept: {audio_path}")
+            return
+        thread = TranscribeThread(
+            audio_path, out_path,
+            keep_model=bool(self.settings.get("dictation_keep_model", True)))
+        thread.done.connect(done_handler)
+        # Sweep R90: failures land in the log via their own signal —
+        # the done handler (which reads the transcript file) is
+        # never called for a transcription that did not happen.
+        thread.failed.connect(self.log)
+        thread.note.connect(self.log)
+        if allow_heal:
+            thread.missing_dep.connect(
+                lambda name, ap=audio_path, op=out_path, h=done_handler:
+                    self._offer_dep_install(name, ap, op, h))
+        else:
+            thread.missing_dep.connect(
+                lambda name, ap=audio_path:
+                    self.log(maint_mod.VOICE_STILL_MISSING + f" Audio kept: {ap}"))
+        self._transcriber = thread
+        thread.start()
+
+    def _offer_dep_install(self, import_name, audio_path, out_path, done_handler):
+        """The Forge hit a missing optional dep while transcribing.
+        Instead of homework, it proposes the install as a maintenance
+        command; on success it retries the transcription itself."""
+        entry = maint_mod.get_dep(import_name)
+        if entry is None:
+            self.log(f"Transcription is unavailable — a needed piece is missing. Audio kept: {audio_path}")
+            return
+        self.log(f"🎙 {entry.feature} needs its package before it can run — "
+                 "the Forge can install it itself, with your OK.")
+        argv = maint_mod.install_command(maint_mod.venv_python(ROOT_DIR), import_name)
+
+        def _after(ok, detail):
+            if ok:
+                self.log("🎙 Package installed — transcribing your audio now.")
+                self._start_transcription(audio_path, out_path, done_handler, allow_heal=False)
+            elif detail == "declined":
+                self.log(maint_mod.VOICE_DECLINED + f" Audio kept: {audio_path}")
+            else:
+                self.log(maint_mod.VOICE_INSTALL_FAILED + f" Audio kept: {audio_path}")
+
+        self.run_maintenance(argv, entry.reason, on_done=_after)
+
+    def on_finished(self, _text, messages):
+        self.messages = messages
+        # Item #54: a side chat's finished turn is NOT filed — the
+        # mode rooms' transcripts and the artifact store are
+        # persistent surfaces of the main thread's work, and the
+        # fork is ephemeral by definition. (The turn itself ran the
+        # full machinery; only the filing is the main thread's.)
+        side = getattr(self, "_side_chat", None) is not None
+        # File the exchange in the mode's own window (2026-11-08):
+        # a Design / Architect / Review / Ask turn's result lands in
+        # that mode's room as well as the chat. Plan's room is the
+        # gate itself; Code's room is this bench.
+        mode_win = getattr(self, "mode_windows", {}).get(
+            getattr(self, "_turn_mode", None) or "")
+        if not side and mode_win is not None and (_text or "").strip():
+            mode_win.add_exchange(getattr(self, "_turn_prompt", ""), _text)
+        # Artifacts (2026-11-08): a document mode's finished turn is
+        # an artifact of its kind; a finished Code turn is a
+        # walkthrough — the post-flight account of what was done.
+        turn_mode = getattr(self, "_turn_mode", None) or ""
+        # Item #66: a pending artifact comment claims this turn's
+        # filing — the reply is the revision of the commented
+        # artifact, filed as a new artifact of the same kind with
+        # the comment on its record, INSTEAD of the mode filing
+        # below. The claim matches on this turn's own prompt, so
+        # an unrelated turn settling first leaves the marker be.
+        marker = self._claim_artifact_comment(
+            getattr(self, "_turn_prompt", ""), self.conversation_id)
+        if not side and (_text or "").strip():
+            prompt_title = (getattr(self, "_turn_prompt", "")
+                            .strip().splitlines() or ["Turn"])[0][:60]
+            if marker is not None:
+                self._file_artifact_revision(_text, marker)
+            elif turn_mode in ("design", "architect", "review"):
+                self._record_artifact(turn_mode, prompt_title, _text)
+            elif turn_mode == "code":
+                self._record_artifact("walkthrough", prompt_title, _text)
+        self._turn_mode = None
+        self._turn_prompt = ""
+        self._plan_settle_draft()
+        self._sync_deck_turn()
+        upd.clear_resume_state(APP_DIR)
+        self._drain_phone_queue()
+        self._render_timer.stop()
+        # Sweep R53: the turn is settled — its streaming bookkeeping
+        # is spent. Left standing, a stale anchor/bubble pair could
+        # be mistaken for the NEXT turn's tail before its first
+        # full render re-anchors.
+        self._stream_text = ""
+        self._stream_bubble = None
+        self._stream_anchor = None
+        self._stream_prefix_len = 0
+        self.persist_conversation(); self.render()
+        self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self.agent_state.setText("●  IDLE"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
+        self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
+        self.statusBar().showMessage("Response complete")
+        self.log("Turn completed.")
+        self.worker = None
+        # Item #69: the maintenance room mirrors the finished
+        # exchange and re-reads the candidate's changes.
+        if getattr(self, "_self_maintenance_active", False) and \
+                getattr(self, "maintenance_win", None) is not None:
+            self.maintenance_win.refresh_transcript()
+            self.maintenance_win.refresh_changes()
+        self._update_context_gauge()
+        self.refresh_gauges()
+        # C3: the settle judges the workspace's untested tab.
+        # Side chats and maintenance turns are excluded — a side
+        # chat's work is ephemeral by definition, and a maintenance
+        # turn's writes land in its work copy under the candidate
+        # suite's evidence, not the tester seat's.
+        if not side and not getattr(self, "_self_maintenance_active", False):
+            self._cadence_evaluate(self.workspace)
+
+    # ---------- Item #71: multimodal self-heal ----------
+    @staticmethod
+    def _is_multimodal_rejection(error):
+        """The one failure shape the quarantine heals: a model
+        refusing image input it cannot take. Matched
+        conservatively on Ollama's wording ("Multimodal data
+        provided, but model does not support multimodal
+        requests") — the word "multimodal" AND a not-supported
+        phrase must both appear. A bare failure, a network error,
+        or any other refusal quarantines nothing."""
+        low = str(error or "").lower()
+        return "multimodal" in low and (
+            "does not support" in low or "not support" in low
+            or "unsupported" in low)
+
+    @staticmethod
+    def _strip_message_images(messages):
+        """Remove the "images" key from every message carrying
+        one. The message TEXT always stays — only the poison
+        goes. Returns how many messages were healed. The scope
+        is the whole conversation, deliberately: the trap is
+        that ANY image stored in the history is re-sent on every
+        later turn, so healing only the failed turn's own message
+        would leave an older image in place to fail the next turn
+        the same way."""
+        healed = 0
+        for m in messages:
+            if m.get("images"):
+                del m["images"]
+                healed += 1
+        return healed
+
+    def _quarantine_background_images(self, stream):
+        """A background turn died on image input. Its failure
+        signal carries no messages, so its conversation is healed
+        where it lives — the store record written at send time:
+        loaded, stripped, saved back under the same id, model,
+        and project."""
+        cid = stream.get("conversation_id")
+        if cid is None:
+            return
+        try:
+            stored = self.store.load(cid)
+        except Exception:
+            stored = None
+        if not stored:
+            return
+        healed = self._strip_message_images(stored)
+        if not healed:
+            return
+        try:
+            self.store.save(cid, stored,
+                            model=stream["model"] or None,
+                            project=stream["workspace"])
+        except Exception as exc:
+            self.log(f"Could not heal '{stream['title']}' after "
+                     f"the image refusal: {exc}")
+            return
+        self.log(f"Removed the stored image(s) from {healed} "
+                 f"message(s) in '{stream['title']}' — the model "
+                 "refused them, and leaving them stored would fail "
+                 "every later turn in that conversation the same "
+                 "way. The message text is untouched.")
+
+    def on_failed(self, error):
+        failed_worker = self.worker
+        # Item #66: a failed artifact-comment turn files nothing —
+        # consume its marker here so it can never claim a later
+        # turn's filing.
+        self._claim_artifact_comment(
+            getattr(self, "_turn_prompt", ""), self.conversation_id)
+        # Item #71: a multimodal rejection self-heals before
+        # anything else — the stored images that poisoned this
+        # turn are quarantined from the live conversation (text
+        # untouched) and the healed record persisted, so the
+        # conversation can never stay poisoned. Any other failure
+        # quarantines nothing. In a side chat, persist_conversation
+        # stands down as always: the fork's in-memory copy heals,
+        # and the main thread's next send meets the guard instead.
+        if self._is_multimodal_rejection(error):
+            healed = self._strip_message_images(self.messages)
+            if healed:
+                self.persist_conversation()
+                self.log(
+                    f"Removed the stored image(s) from {healed} "
+                    "message(s) in this conversation — the model "
+                    "refused them, and leaving them stored would "
+                    "fail every later turn the same way. The "
+                    "message text is untouched; re-attach "
+                    "deliberately with a model that takes images.")
+        mode_win = getattr(self, "mode_windows", {}).get(
+            getattr(self, "_turn_mode", None) or "")
+        # Item #54: a side chat's failed turn leaves no note in the
+        # mode rooms either (see on_finished) — the error still
+        # surfaces in the log and dialog below, as for any turn.
+        if mode_win is not None \
+                and getattr(self, "_side_chat", None) is None:
+            mode_win.add_note(f"(That turn failed: {error})")
+        self._turn_mode = None
+        self._turn_prompt = ""
+        self._plan_settle_draft()
+        self._sync_deck_turn()
+        upd.clear_resume_state(APP_DIR)
+        self._render_timer.stop()
+        # Sweep R53: same settle reset as on_finished.
+        self._stream_text = ""
+        self._stream_bubble = None
+        self._stream_anchor = None
+        self._stream_prefix_len = 0
+        self.log("ERROR: " + error)
+        # Sweep R23: the worker slot is cleared BEFORE the modal
+        # dialog, not after it. The modal runs a nested event loop,
+        # and work delivered through it (a phone prompt arriving via
+        # the deck) could start a NEW worker — the old post-modal
+        # `self.worker = None` then orphaned that live worker: its
+        # output streamed into a window that no longer pointed at
+        # it. The identity guard means only THIS failed worker is
+        # cleared; anything newer survives.
+        if self.worker is failed_worker:
+            self.worker = None
+        QMessageBox.critical(self, "Agent error", error)
+        self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self.agent_state.setText("●  ERROR"); self.agent_state.setStyleSheet("color:#e28b83;font-weight:700;")
+        self.ember.set_mode("cooling"); self.ember_label.setText("ERROR")
+        # Item #69: a failed maintenance turn still lands in the
+        # room (the note above) and its partial changes re-read.
+        if getattr(self, "_self_maintenance_active", False) and \
+                getattr(self, "maintenance_win", None) is not None:
+            self.maintenance_win.refresh_transcript()
+            self.maintenance_win.refresh_changes()
+        self._update_context_gauge()
+        # A failed turn ends the wait too: held phone prompts drain
+        # here, after the error dialog above has been dismissed.
+        self._drain_phone_queue()
+
+    def stop_generation(self):
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self._fold_thread.cancel()
+            self.stop_btn.setEnabled(False)
+            return
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.log("Stop requested.")
+            self.stop_btn.setEnabled(False)
+
+    def open_settings(self):
+        dialog = SettingsDialog(self, self.settings)
+        if dialog.exec() == QDialog.Accepted:
+            new_values = dialog.values()
+            self.settings.update(new_values)
+            self.save_settings()
+            # S5 (audit S1-21): an Ollama URL that points off this
+            # PC earns ONE warning — shown after the save, never
+            # blocking it: every prompt and file content goes to
+            # that host. The loopback default warns never.
+            url_warning = ollama_url_warning(
+                new_values.get("ollama_url", ""))
+            if url_warning:
+                QMessageBox.warning(self, "Ollama URL", url_warning)
+            # G5: a density change applies to the running app now,
+            # through the same save path as every other setting.
+            self.apply_density()
+            # The dialog's council default must reach the LIVE
+            # checkbox now, not at the next restart. setChecked fires
+            # the checkbox's own toggled handler (re-saving the same
+            # value) only when the state actually changed — idempotent.
+            if hasattr(self, "council_check"):
+                self.council_check.setChecked(bool(self.settings.get("council", False)))
+            # Item #69: the URL may have changed — rebuild the
+            # provider facade on it, with the saved connector config.
+            self._rebuild_provider_client()
+            self.log("Agent settings saved.")
+            self.refresh_models_async()
+            if self.messages and self.messages[0].get("role") == "system":
+                self.messages[0]["content"] = self.build_system_prompt()
+            self._update_context_gauge()
+
+    def closeEvent(self, event):
+        # Sweep R39: the periodic timers stop FIRST — a tick firing
+        # into a half-closed window (a gauge fetch landing, a watch
+        # scan starting a turn) is how close-time crashes happen.
+        for timer in (self._render_timer, self._gauge_timer,
+                      self._sched_timer, self._watch_timer):
+            timer.stop()
+        # Resizable panels: the splitter's debounce timer may hold
+        # the owner's last drag unsaved — write the layout out now,
+        # while every widget it reads still exists.
+        if hasattr(self, "_docks"):
+            self._save_layout()
+        # The deck server stops with the app — it used to outlive
+        # the window on its socket thread.
+        deck = getattr(self, "deck", None)
+        if deck is not None:
+            try:
+                deck.stop()
+            except Exception:
+                pass
+        # Sweep R37/R91: the maintenance and transcription threads
+        # join the shutdown list — the maintenance child process is
+        # terminated first (its stop()), or an owner-approved
+        # install would outlive the app that approved it.
+        if getattr(self, "_maintenance_thread", None) is not None \
+                and self._maintenance_thread.isRunning():
+            self._maintenance_thread.stop()
+            self._maintenance_thread.wait(1500)
+        if getattr(self, "_transcriber", None) is not None \
+                and self._transcriber.isRunning():
+            self._transcriber.wait(1500)
+        if self._fold_thread is not None and self._fold_thread.isRunning():
+            self._fold_thread.cancel()
+            self._fold_thread.wait(1500)
+        if self._models_thread is not None and self._models_thread.isRunning():
+            self._models_thread.wait(1500)
+        if self._copy_thread is not None and self._copy_thread.isRunning():
+            self._copy_thread.wait(1500)
+        if self.run_is_running():
+            self._run_thread.stop()
+            self._run_thread.wait(1500)
+        if self.debug_session_live():
+            # A debug session's subprocess dies with the app, like a
+            # run does — never leak a paused program past shutdown.
+            self.debug_stop_session()
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait(1500)
+            if self.worker.isRunning():
+                # Sweep R39: the wait's outcome was never checked —
+                # say plainly that a turn is outliving the window
+                # instead of letting the thread vanish silently.
+                self.log("Shutdown: a turn is still running after "
+                         "the wait — it ends with the process.")
+        # Item #64: background turns die with the app too — cancel
+        # every other live stream's worker, not just the stage's.
+        # (wait is a QThread method; a test stand-in without one is
+        # simply cancelled and left.)
+        for stream in list(getattr(self, "_streams", {}).values()):
+            w = stream["worker"]
+            if w is not None and w is not self.worker and w.isRunning():
+                w.cancel()
+                wait = getattr(w, "wait", None)
+                if callable(wait):
+                    wait(1500)
+        # The run window is a separate top-level: close it with the
+        # app (its own closeEvent stops any live run — already dead
+        # above, so this is just the room going dark with the bench).
+        if getattr(self, "run_win", None) is not None:
+            self.run_win.close()
+        # Item #69: the maintenance room goes dark with the bench
+        # (its closeEvent leaves maintenance mode cleanly).
+        if getattr(self, "maintenance_win", None) is not None:
+            self.maintenance_win.close()
+        self.save_settings()
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Code Forge v2")
+    app.setStyleSheet(STYLE)
+    window = ForgeWindow()
+    window.show()
+    # Owner request, 2026-11-10: the welcome / donate screen is
+    # there at startup, on top of the ready bench — closing it
+    # is starting to run.
+    window.show_welcome()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
