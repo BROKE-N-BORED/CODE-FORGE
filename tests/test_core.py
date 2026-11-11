@@ -38322,11 +38322,19 @@ class DynamicContextWindowTests(unittest.TestCase):
         self.assertEqual(
             facade.catalog_context_window("groq:openai/gpt-oss-120b"),
             131072)
+        # Rate-limit fix (2026-11-11): gpt-oss-120b carries a
+        # verified 8,000 tokens-per-minute free envelope, so the
+        # resolved budget is capped to 8000 - 2048 (default output)
+        # - 500 (margin) = 5452 whichever source stated the window.
+        # The ordering pinned below is unchanged — the registry
+        # statement still outranks the catalog cache as the RESOLVED
+        # window (64000 < 131072); the envelope caps both alike.
+        # tests/test_providers_ratelimit.py pins the envelope math.
         self.assertEqual(
             p.resolve_context_budget("groq:openai/gpt-oss-120b",
                                      config=config, client=facade,
                                      fallback=8192),
-            131072)
+            5452)
         # A registry-stated window outranks the catalog cache: it
         # is the owner's persisted statement about the model.
         config2 = {"groq_api_key": "k", "model_registry": [
@@ -38335,7 +38343,7 @@ class DynamicContextWindowTests(unittest.TestCase):
             p.resolve_context_budget("groq:openai/gpt-oss-120b",
                                      config=config2, client=facade,
                                      fallback=8192),
-            64000)
+            5452)
         # The facade's one context_length seam routes locals to
         # the local client's own resolution.
         facade.local.context_length = lambda model: 4096

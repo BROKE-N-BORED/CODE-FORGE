@@ -213,6 +213,59 @@ def sanitize_model_registry(entries) -> list[dict]:
 sanitize_registry = sanitize_model_registry
 
 
+# Free-tier per-minute token envelopes (the providers' own published
+# free-tier limits, verified 2026-11-10): every allowlisted Groq
+# model caps at 8,000 tokens per minute, and the cap counts the
+# prompt and the requested output together — one agent-scale request
+# sized against the model's 131k catalog window is refused whole
+# with HTTP 429 before it runs (the owner's live find, 2026-11-11).
+# Only models with a VERIFIED envelope are listed. Gemini publishes
+# no free per-minute figure and none is recorded for EXAONE, so
+# their budgets resolve exactly as before — no invented numbers.
+PROVIDER_TPM_LIMITS = {
+    "groq": {
+        "openai/gpt-oss-120b": 8000,
+        "openai/gpt-oss-20b": 8000,
+        "qwen/qwen3.8-27b": 8000,
+    },
+}
+_TPM_SAFETY_MARGIN = 500
+_TPM_MIN_BUDGET = 2048
+_DEFAULT_OUTPUT_TOKENS = 2048
+
+
+def _configured_output_tokens(config) -> int:
+    """The output size (num_predict) the resolution config states,
+    or the app default when it states none. The facade's connector
+    config normally states none — the owner's output setting sits in
+    the app settings at the same 2048 default — so a config that
+    explicitly carries the value is honored and the default rules
+    otherwise. Never raises: budgeting must not break a turn."""
+    value = None
+    if isinstance(config, dict):
+        value = config.get("num_predict")
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_OUTPUT_TOKENS
+    return number if number > 0 else _DEFAULT_OUTPUT_TOKENS
+
+
+def _tpm_capped_budget(provider, bare, resolved, config) -> int:
+    """Cap one resolved budget to the model's recorded free
+    per-minute token envelope, where one exists: the budget plus
+    the configured output plus a safety margin must fit inside the
+    envelope, floored so a turn can still run. Models with no
+    recorded envelope resolve exactly as before."""
+    table = PROVIDER_TPM_LIMITS.get(provider) or {}
+    cap = table.get(bare)
+    if not isinstance(cap, int) or cap <= 0:
+        return resolved
+    headroom = cap - _configured_output_tokens(config) \
+        - _TPM_SAFETY_MARGIN
+    return max(_TPM_MIN_BUDGET, min(resolved, headroom))
+
+
 def resolve_context_budget(model, config=None, client=None,
                            fallback=8192) -> int:
     """The effective context budget (tokens) for ONE model — the
@@ -233,6 +286,12 @@ def resolve_context_budget(model, config=None, client=None,
       the owner's RAM/KV cap, not just a preference.
     - Anything unknown: the fallback (the owner's setting) exactly
       as before. Never a guess, never bigger than a source stated.
+    - One ceiling over the provider branch: a model with a recorded
+      free per-minute token envelope (PROVIDER_TPM_LIMITS) is capped
+      so budget + configured output + a safety margin fits inside
+      the envelope — the stated window says what the model CAN hold,
+      the envelope says what the free tier lets through per minute,
+      and a request sized past the envelope is refused whole.
     Never raises: budgeting must not be able to break a turn."""
     try:
         setting = int(fallback)
@@ -242,6 +301,7 @@ def resolve_context_budget(model, config=None, client=None,
         setting = 8192
     provider, _bare = split_model_id(model)
     if provider in PROVIDERS:
+        resolved = None
         entry = None
         try:
             entry = registry_entry_for(config, model)
@@ -250,16 +310,19 @@ def resolve_context_budget(model, config=None, client=None,
         if entry is not None:
             window = _clean_context_window(entry.get("context_window"))
             if window is not None:
-                return window
-        catalog = getattr(client, "catalog_context_window", None)
-        if callable(catalog):
-            try:
-                window = _clean_context_window(catalog(model))
-            except Exception:
-                window = None
-            if window is not None:
-                return window
-        return setting
+                resolved = window
+        if resolved is None:
+            catalog = getattr(client, "catalog_context_window", None)
+            if callable(catalog):
+                try:
+                    window = _clean_context_window(catalog(model))
+                except Exception:
+                    window = None
+                if window is not None:
+                    resolved = window
+        if resolved is None:
+            resolved = setting
+        return _tpm_capped_budget(provider, _bare, resolved, config)
     length = getattr(client, "context_length", None)
     if callable(length):
         try:
@@ -381,6 +444,30 @@ def _max_tokens_cap_from_error(text):
     return cap if cap > 0 else None
 
 
+def _rate_limit_message(label, text):
+    """The plain-language line for a provider HTTP 429 — a free-tier
+    rate limit — or None when the text is not one. Detection follows
+    the cap parser's law: plain string surgery on the text the
+    clients already produce ("<Label> returned HTTP 429: ..."), plus
+    the markers that survive key-scrubbing of the body itself
+    (Gemini's RESOURCE_EXHAUSTED status). Which limit was hit —
+    per-minute or per-day — is read from the provider's own words,
+    never assumed: Groq names "tokens per day (TPD)" when the daily
+    envelope is the one exhausted."""
+    raw = str(text or "")
+    low = raw.lower()
+    if "http 429" not in low and "resource_exhausted" not in low \
+            and not ("429" in raw and "rate" in low):
+        return None
+    day = any(marker in low for marker in
+              ("per day", "per_day", "perday", "daily", "tpd", "rpd"))
+    span = "per-day" if day else "per-minute"
+    return (f"{label} rate limit reached — the free {span} limit "
+            f"for this model was hit. Code Forge has shrunk the "
+            f"size of its requests to fit under that limit; the "
+            f"provider's full error is kept in the session log.")
+
+
 class _ProviderHTTP:
     """Shared HTTP/SSE plumbing for the hosted clients.
 
@@ -428,6 +515,21 @@ class _ProviderHTTP:
             headers["Content-Type"] = "application/json"
         return headers
 
+    def _http_error(self, status, detail):
+        """The OllamaError for one HTTP refusal. A 429 is a free-tier
+        rate limit: the owner gets the one plain line from
+        _rate_limit_message and the raw provider text rides on
+        OllamaError.raw, where the worker files it in the session
+        log unchanged (the Note-26 pattern from the local client).
+        Every other status keeps the raw text as the message,
+        exactly as before. ``detail`` arrives key-scrubbed."""
+        text = f"{self.label} returned HTTP {status}: {detail}"
+        if status == 429:
+            plain = _rate_limit_message(self.label, text)
+            if plain is not None:
+                return OllamaError(plain, raw=text)
+        return OllamaError(text)
+
     def _open(self, request):
         try:
             response = self._urlopen(request, timeout=self.timeout)
@@ -446,8 +548,7 @@ class _ProviderHTTP:
                 detail = response.read().decode("utf-8", "replace")
             except Exception:
                 detail = ""
-            raise OllamaError(
-                f"{self.label} returned HTTP {status}: {self._scrub(detail)}")
+            raise self._http_error(status, self._scrub(detail))
         return response
 
     def _raise_http(self, exc):
@@ -456,9 +557,7 @@ class _ProviderHTTP:
         except Exception:
             detail = ""
         status = getattr(exc, "code", None) or getattr(exc, "status", "?")
-        raise OllamaError(
-            f"{self.label} returned HTTP {status}: {self._scrub(detail)}"
-        ) from exc
+        raise self._http_error(status, self._scrub(detail)) from exc
 
     def _json(self, request):
         response = self._open(request)
@@ -1232,7 +1331,15 @@ class ProviderClient:
 
     def _scrub_provider_error(self, provider, text):
         key = provider_api_key(self.config, provider)
-        return str(text).replace(key, "[redacted]") if key else str(text)
+        scrubbed = str(text).replace(key, "[redacted]") if key \
+            else str(text)
+        # A 429 surfaces as the one plain rate-limit line here too
+        # (the chat path carries the raw text on OllamaError.raw;
+        # this string surface has no raw channel, so it gets the
+        # same words the chat path shows).
+        plain = _rate_limit_message(
+            PROVIDER_LABELS.get(provider, "Provider"), scrubbed)
+        return plain if plain is not None else scrubbed
 
     def chat_stream(self, model, messages, options, tools,
                     images=None, keep_alive="30m", cancel_event=None):
