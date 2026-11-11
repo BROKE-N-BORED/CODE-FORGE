@@ -4,25 +4,13 @@
 
 [![Donate via Cash App](https://img.shields.io/badge/Donate-Cash_App-00D632?style=for-the-badge&logo=cashapp&logoColor=white)](https://cash.app/$XPRNC8)
 
-Code Forge is a desktop coding agent that runs entirely on your own hardware, using local models served by [Ollama](https://ollama.com). No cloud, no subscription, no account, no kill switch. It plans before it builds, asks your permission before it changes anything, writes and tests real code in a real project folder, and grades its own work before it calls anything done.
+Code Forge is a desktop coding agent for Linux. It runs local models served by [Ollama](https://ollama.com) on your own machine. It drafts a plan and waits for your approval before it writes or changes files, and it runs tests on what it builds.
 
-It is built for the machines people actually have: **8 GB of RAM and a CPU are enough.** No GPU required.
-
----
-
-## Why Code Forge
-
-Most coding agents upload your code to someone else's computer, charge you every month, and start changing files the second you hit enter. Code Forge takes the opposite position on all three:
-
-- **Local.** Models run on your machine through Ollama. Your repositories, documents, and ideas stay on your disk.
-- **No subscription.** No seats, no usage meter. Download it and it is yours.
-- **Permission before action.** Code Forge shows you a plan and waits. Nothing is written, run, or changed until you approve it — and you can cage it to a single project folder.
-- **Abliterated models.** Code Forge works with abliterated (uncensored) local models out of the box, and its judging seats — the reviewer, the tester, the grader — are reserved for them. A stock cloud model will never silently grade your work here.
-- **Low-spec hardware.** The agent is designed for low-spec Linux machines: 8 GB RAM, CPU-only, spinning disks included.
+Local use requires no account and no subscription. Optional cloud providers are off unless you add your own API keys.
 
 ## Features
 
-### Eight modes, one agent
+### Eight modes
 
 | Mode | What it does |
 | --- | --- |
@@ -33,46 +21,46 @@ Most coding agents upload your code to someone else's computer, charge you every
 | **Review** | Reads code and returns graded findings. Changes nothing. |
 | **Ask** | Questions answered. No tools, no file changes. |
 | **Write** | A document workshop: read, write, copy, edit, and manage files of any type in a dedicated editor window. Documents are delivered as complete files. |
-| **Research** | Deep research, recreated local-first: you approve the research plan, it works in the background across the web and your files, and delivers a cited report as a real document. |
+| **Research** | Deep research, local-first: you approve the research plan, it works in the background across the web and your files, and delivers a cited report as a document. |
 
 ### The approval system
 
-- **Plan gate.** Plans park until you approve them. A parked approval has no timer — you are never rushed into a decision.
+- **Plan gate.** Plans park until you approve them. A parked approval has no timer.
 - **Diff-first approvals.** File changes are shown as diffs or full content before they are written.
-- **Goldfish review.** An optional fresh-eyes pass reads every plan with a clean context and flags blockers before you ever see the gate.
+- **Goldfish review.** An optional fresh-eyes pass reads every plan with a clean context and flags blockers before the gate.
 - **SKRIBE grading.** Finished work is graded against a rubric before it is presented as done.
 
-### Seats, not just a model
+### Seats
 
 Code Forge separates the jobs a single model usually fakes:
 
-- **Driver** — the model doing the work. Your pick, always.
+- **Driver** — the model doing the work. You pick it.
 - **Reviewer** — a second model that checks the driver's output, with veto power.
 - **Tester** — a seat that runs and exercises what was built.
 - **Council** — an optional reviewer pass with one revision round.
 
-Governing seats (reviewer, tester, grader) are reserved for abliterated models from the roster you control. The driver seat is unguarded: whoever you pick, drives.
+Governing seats (reviewer, tester, grader) use abliterated models from the roster you control. The driver seat is your pick.
 
-### It extends itself — with your permission
+### Self-extension
 
-- **Create and update skills.** Code Forge can author new skills for itself and revise existing ones — every creation and update passes your approval gate.
-- **Create and update plugins.** New tools arrive as plugins. A plugin whose code fails validation is refused and the existing plugin stays byte-identical. New plugins start **disabled** until you enable them.
+- **Skills.** Code Forge can create and update its own skills. Every creation and update passes your approval gate.
+- **Plugins.** New tools arrive as plugins. A plugin whose code fails validation is refused and the existing plugin is left unchanged. New plugins start **disabled** until you enable them.
 - **Forge maintenance.** The agent can work on its own codebase — on a *work copy*, never the live app. You review the diff, run its test suite, and install the update yourself, with rollback.
-- **Self-update.** Staged updates verify, back up, swap, and relaunch. A failed verification aborts without touching your working install.
+- **Self-update.** Staged updates verify, back up, swap, and relaunch. A failed verification aborts without changing your working install.
 
-### Work the way you work
+### Other features
 
 - **Mission Control.** Run several projects and turns in parallel, each with its own status and stop control.
-- **Phone deck.** A companion web app for your phone: five screens (Chat, Plan, Bench, Docs, Project). Approve plans from the couch, watch a build run, stop a turn, and download finished documents to your phone.
-- **Contained mode.** Confine the agent to the project folder — every file tool and command is checked against the cage. Optionally run commands in Docker with only the project folder mounted. (Honest note: without Docker this is a tool-layer guardrail, not an OS sandbox. Code Forge says so in its own settings.)
-- **Snapshots and checkpoints.** Git snapshots before edits, one-click restore, and crash resume — kill the app mid-turn and it picks up where you left off.
-- **Artifacts.** Plans, designs, reviews, and walkthroughs are captured as documents you keep.
+- **Phone deck.** A companion web app for your phone: five screens (Chat, Plan, Bench, Docs, Project). Approve plans, watch a build run, stop a turn, and download finished documents to your phone.
+- **Contained mode.** Confines the agent to the project folder — every file tool and command is checked against the project path. Commands can optionally run in Docker with only the project folder mounted. Without Docker this is a tool-layer guardrail, not an OS sandbox.
+- **Snapshots and checkpoints.** Git snapshots before edits, one-click restore, and crash resume — kill the app mid-turn and it picks up where it left off.
+- **Artifacts.** Plans, designs, reviews, and walkthroughs are saved as documents you keep.
 - **Voice dictation.** Local transcription, on your machine.
 - **Scheduler, recipes, command palette, UI builder.** Timed runs that park approvals safely, saved prompt recipes, a Ctrl+K palette, and a drag-and-drop window designer that exports runnable PySide6.
 
 ### Optional cloud providers
 
-Local is the default and the point. If *you* want cloud speed for a specific job, Code Forge can also talk to **Groq**, **Gemini**, and **EXAONE** through its Providers tab — your keys, stored in an encrypted vault on your machine, assigned per-model roles and scopes through the model registry. Picking a cloud model is the consent; nothing phones home behind your back.
+Local models are the default. Code Forge can also talk to **Groq**, **Gemini**, and **EXAONE** through its Providers tab, using API keys you enter. Keys are stored in an encrypted vault on your machine.
 
 ## Requirements
 
@@ -112,8 +100,8 @@ Launch it:
 1. Pick a **project folder**.
 2. Pick a **driver model** from the dropdown — Forge reads your pulled models live from Ollama.
 3. Start in **Plan mode**: describe what you want in plain words.
-4. Read the plan at the gate. Edit it if you like. Hit **Approve**.
-5. Watch it build. Every file change, test run, and grade lands where you can see it.
+4. Read the plan at the gate, edit it if you want, and approve it.
+5. File changes, test runs, and grades are shown in the app as it builds.
 
 ## The phone deck
 
@@ -125,9 +113,9 @@ Each project carries a `.forge/` folder: instructions, plans, design documents, 
 
 ## Honest limits
 
-- Local models are small models. Code Forge is built around that truth — planning, review seats, grading, and repair loops exist because a 2B model with a good harness out-works a 2B model left alone. It will still sometimes be wrong; the approval gates are where you catch it.
+- Local models are small models, and small models make mistakes. The approval gates exist so you can catch them; planning, review seats, and grading are part of the app for the same reason.
 - Contained mode without Docker is a guardrail at the tool layer, not an operating-system sandbox.
-- Performance numbers in this README are deliberately absent: Forge publishes measured results from its built-in Bench, on real hardware, rather than marketing figures.
+- This README lists no performance numbers. Forge has a built-in Bench that measures results on your own hardware.
 
 ## Support Code Forge
 
