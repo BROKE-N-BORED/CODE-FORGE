@@ -217,6 +217,7 @@ from . import repomap as repomap_mod
 from . import snapshots as snapshots_mod
 from . import checkpoints as checkpoints_mod
 from . import providers as providers_mod
+from . import lightmachine as light_mod
 
 # Note 20: how many times a failed SKRIBE grade may bounce a turn back
 # for revision before unverified files are reported up instead. One
@@ -1046,7 +1047,8 @@ class AgentWorker(QThread):
                  researching: bool = False,
                  research_options: dict | None = None,
                  mcp_trust: dict | None = None,
-                 mcp_trust_save=None):
+                 mcp_trust_save=None,
+                 light_machine: bool = False):
         super().__init__()
         self.client, self.model = client, model
         self.messages = [dict(m) for m in messages]
@@ -1069,6 +1071,14 @@ class AgentWorker(QThread):
         # no gate — handlers behave exactly as before.
         self.mcp_trust = mcp_trust
         self.mcp_trust_save = mcp_trust_save
+        # Light Machine profile (2026-11-11): the window hands the
+        # owner's `light_machine` setting over at construction, the
+        # same door as contained_run — read from this attribute at
+        # every generation, so a worker built with it OFF behaves
+        # exactly as before on every path. See forge/lightmachine.py
+        # for the rules (seat keep_alive 0, single residency, the
+        # local ctx cap via _resolve_budget).
+        self.light_machine = bool(light_machine)
         # S1-25b: the app's global skills/plugins folders (the
         # window resolves them — settings-derived — and hands them
         # over at turn start) so an update_skill/update_plugin
@@ -1567,6 +1577,47 @@ class AgentWorker(QThread):
             kwargs["cancel_event"] = self._cancel_event
         return kwargs
 
+    # -- Light Machine profile (2026-11-11) -------------------------
+    # Every helper below is a strict no-op while the profile is OFF:
+    # no ps() call, no unload, the pinned keep_alive values pass
+    # through untouched — OFF is the shipped behavior byte-for-byte.
+
+    def _light_on(self) -> bool:
+        """The profile's state for THIS worker, read at use time:
+        the constructor flag the window passes from the owner's
+        `light_machine` setting, or the same key riding the turn
+        options (the send path's door) — either one turns it on.
+        Absent on both (every pre-profile construction) is OFF, and
+        OFF is today's behavior exactly."""
+        return bool(getattr(self, "light_machine", False)) or bool(
+            self.options.get("light_machine", False))
+
+    def _prepare_residency(self, model) -> None:
+        """Single residency: before a local generation, unload any
+        different local model Ollama holds resident, so at most one
+        local model is ever in RAM. The driver's next turn paying a
+        cold reload after a seat ran is the profile's accepted
+        trade. Each swap is logged once, in plain words — on the
+        event log and as a status line. Never touches provider
+        models, never raises: a residency failure must not eat the
+        generation it precedes."""
+        if not self._light_on():
+            return
+
+        def _note(msg):
+            self._log("light_machine_unload", note=msg)
+            self.status.emit(msg + ".")
+
+        light_mod.ensure_single_residency(
+            self.client, model, True, log=_note)
+
+    def _seat_keep_alive(self, model, default):
+        """A seat generation's keep_alive under the profile: 0 (the
+        seat's model unloads the moment it finishes) when ON and the
+        seat is local; the pinned default otherwise."""
+        return light_mod.seat_keep_alive(model, default,
+                                         self._light_on())
+
     def _generate(self, schemas, num_predict=None, phase="main",
                   cycle=None) -> tuple[str, list]:
         """One streamed generation against the given tool schemas.
@@ -1618,10 +1669,18 @@ class AgentWorker(QThread):
         chunks, tool_calls = [], []
         stream_filter = _ToolMarkupStreamFilter()
         done_event: dict = {}
+        # Light Machine: the SKRIBE grading generation is a SEAT
+        # generation riding the driver seam — while the profile is
+        # ON it carries keep_alive 0 like every other seat; every
+        # other phase is a driver generation and keeps the session
+        # policy. Residency is prepared for both (rule 2).
+        _keep_alive = self.options.get("keep_alive", "30m")
+        if phase == "grading":
+            _keep_alive = self._seat_keep_alive(self.model, _keep_alive)
+        self._prepare_residency(self.model)
         for event in self.client.chat_stream(
                 self.model, self.messages, options, schemas,
-                **self._stream_cancel_kwargs(
-                    self.options.get("keep_alive", "30m"))):
+                **self._stream_cancel_kwargs(_keep_alive)):
             if self._cancel:
                 break
             if not isinstance(event, dict):
@@ -2547,7 +2606,8 @@ class AgentWorker(QThread):
         setting = self.options.get("num_ctx", 8192) or 8192
         config = getattr(self.client, "config", None)
         return providers_mod.resolve_context_budget(
-            model, config=config, client=self.client, fallback=setting)
+            model, config=config, client=self.client, fallback=setting,
+            light_machine=self._light_on())
 
     def _driver_budget(self) -> int:
         """The budget for THIS turn's driver, resolved once per
@@ -2589,6 +2649,7 @@ class AgentWorker(QThread):
                    "num_ctx": self.options.get("num_ctx", 8192)}
         chunks = []
         try:
+            self._prepare_residency(self.model)
             for event in self.client.chat_stream(
                     self.model, request, options, [],
                     **self._stream_cancel_kwargs(
@@ -2661,10 +2722,12 @@ class AgentWorker(QThread):
             options = {"temperature": 0.3, "num_predict": 1024,
                        "num_ctx": self._resolve_budget(reviewer)}
             self.status.emit("Goldfish review — fresh eyes on the plan…")
+            self._prepare_residency(reviewer)
             chunks = []
             for event in self.client.chat_stream(
                     reviewer, messages, options, [],
-                    **self._stream_cancel_kwargs("5m")):
+                    **self._stream_cancel_kwargs(
+                        self._seat_keep_alive(reviewer, "5m"))):
                 if self._cancel:
                     self._log("goldfish_skipped", reviewer=reviewer,
                               reason="turn cancelled")
@@ -3690,9 +3753,13 @@ class AgentWorker(QThread):
             # keep_alive so it does not squat in the owner's RAM
             # after its one critique, unlike the session driver,
             # whose residency rides the owner's keep_alive setting.
+            # Light Machine: single residency first, and the guest
+            # lease becomes an immediate unload (see _seat_keep_alive).
+            self._prepare_residency(reviewer)
             for event in self.client.chat_stream(
                     reviewer, messages, options, [],
-                    **self._stream_cancel_kwargs("5m")):
+                    **self._stream_cancel_kwargs(
+                        self._seat_keep_alive(reviewer, "5m"))):
                 if self._cancel:
                     self._log("council_skipped", reviewer=reviewer, reason="turn cancelled")
                     return None

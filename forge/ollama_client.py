@@ -336,6 +336,24 @@ class OllamaClient:
             return []
         return [m for m in data.get("models", []) if isinstance(m, dict)]
 
+    def unload_model(self, model: str) -> bool:
+        """Unload one resident model (Light Machine profile): an
+        empty /api/generate request carrying keep_alive 0 — Ollama's
+        own unload idiom, the same per-request field chat_stream
+        sends. Returns True when the request was accepted; any
+        failure (server down, bad body) returns False — residency
+        management must never break a generation."""
+        data = json.dumps({"model": model, "keep_alive": 0}).encode()
+        req = urllib.request.Request(
+            self.base_url + "/api/generate", data=data,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=8) as response:
+                response.read()
+            return True
+        except Exception:
+            return False
+
     def show(self, model: str):
         data = json.dumps({"model": model}).encode()
         req = urllib.request.Request(self.base_url + "/api/show", data=data, headers={"Content-Type": "application/json"})

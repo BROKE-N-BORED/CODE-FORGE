@@ -267,7 +267,7 @@ def _tpm_capped_budget(provider, bare, resolved, config) -> int:
 
 
 def resolve_context_budget(model, config=None, client=None,
-                           fallback=8192) -> int:
+                           fallback=8192, light_machine=False) -> int:
     """The effective context budget (tokens) for ONE model — the
     dynamic context-window resolution (2026-11-10). Until now every
     budget in Forge keyed off the owner's single num_ctx setting, so
@@ -324,14 +324,23 @@ def resolve_context_budget(model, config=None, client=None,
             resolved = setting
         return _tpm_capped_budget(provider, _bare, resolved, config)
     length = getattr(client, "context_length", None)
+    resolved_local = setting
     if callable(length):
         try:
             model_max = _clean_context_window(length(model))
         except Exception:
             model_max = None
         if model_max is not None:
-            return min(model_max, setting)
-    return setting
+            resolved_local = min(model_max, setting)
+    # Light Machine profile (2026-11-11): locals only — an extra
+    # min() on this path, applied AFTER the resolution above so the
+    # OFF result is identical. The provider branch returned earlier
+    # and never reaches here, so Groq's TPM cap math and the
+    # Gemini/EXAONE budgets are untouched.
+    if light_machine:
+        from . import lightmachine as _lm
+        return _lm.cap_local_budget(model, resolved_local, True)
+    return resolved_local
 
 
 def registry_entries(config) -> list[dict]:
@@ -1196,6 +1205,15 @@ class ProviderClient:
 
     def ps(self):
         return self.local.ps()
+
+    def unload_model(self, model):
+        """Light Machine residency: only a LOCAL model can be
+        unloaded — a provider model id is refused here so residency
+        rules can never reach a hosted provider."""
+        provider, _bare = split_model_id(model)
+        if provider in PROVIDERS:
+            return False
+        return self.local.unload_model(model)
 
     def show(self, model):
         provider, _bare = split_model_id(model)

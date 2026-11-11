@@ -91,18 +91,45 @@ def pick_vision_model():
     return None
 
 
+def _light_machine_on():
+    """The Light Machine profile's bridge into this standalone
+    package: the app syncs the owner's `light_machine` setting to
+    FORGE_LIGHT_MACHINE (the FORGE_VISION_MODEL / FORGE_OLLAMA_URL
+    env pattern this module already uses), read fresh per call so
+    a toggle flip reaches the next description."""
+    return os.environ.get("FORGE_LIGHT_MACHINE", "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
 def describe_image_bytes(image_bytes, prompt=_DESCRIBE_PROMPT):
     """Describe image bytes via the local vision seat; "" if none."""
     model = pick_vision_model()
     if not model:
         return ""
     try:
-        data = _ollama_json("/api/generate", {
+        payload = {
             "model": model,
             "prompt": prompt,
             "images": [base64.b64encode(image_bytes).decode()],
             "stream": False,
-        }, timeout=180)
+        }
+        if _light_machine_on():
+            # Light Machine: the vision seat is a seat — unload any
+            # different resident model first, and carry keep_alive 0
+            # so this model unloads the moment it has described.
+            try:
+                resident = _ollama_json("/api/ps", timeout=5)
+                for entry in (resident or {}).get("models", []):
+                    name = entry.get("name", "") \
+                        if isinstance(entry, dict) else ""
+                    if name and name != model:
+                        _ollama_json("/api/generate", {
+                            "model": name, "keep_alive": 0},
+                            timeout=8)
+            except Exception:
+                pass
+            payload["keep_alive"] = 0
+        data = _ollama_json("/api/generate", payload, timeout=180)
         return (data.get("response") or "").strip()
     except Exception:
         return ""

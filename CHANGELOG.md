@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-11 — Light Machine profile
+- New Settings -> Behavior toggle "Light machine: one model in memory at a time" (default off; read at use time; off = previous behavior).
+- When on: local helper generations (reviewer, tester, SKRIBE grading, vision seat, knowledge distiller) unload their model when they finish; before a local model runs, a different resident local model is unloaded first, with a log line naming the swap; the knowledge distiller waits for the machine to be idle (up to about 10 minutes, then skips quietly); parallel jobs are capped to 1; local context budgets are capped at 4096. Provider models are never unloaded or capped; the Groq per-minute budget math is unchanged.
+- New "Unload all models" button in the Models window: one click unloads every resident local model and shows a receipt line. Works with the toggle on or off.
+- Verified with fake clients (no real Ollama): 233 tests on the merged tree, plus 61 for the unload-all addendum; the Settings toggle was probe-checked headlessly.
+
 ## 2026-11-11 — Export & Convert
 - Export chat: the open conversation (hamburger menu) or a saved one (right-click in history) exports to PDF, Markdown, or HTML, with images embedded at the turn they belong to; the open chat exports with its images — saved chats are stored text-only by design today, and the export dialog says so when a chat has no images
 - Markdown exports copy images into a matching _assets folder and link them

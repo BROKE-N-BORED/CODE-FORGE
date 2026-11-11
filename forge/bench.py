@@ -435,7 +435,8 @@ def _stop_reason(cancel_event, deadline) -> str | None:
 
 def _run_one_task(task: dict, model: str, client, cancel_event,
                   workspace_root, disabled=frozenset(),
-                  max_cycles=MAX_CYCLES) -> tuple[dict, bool]:
+                  max_cycles=MAX_CYCLES,
+                  light_machine=False) -> tuple[dict, bool]:
     """Work one task in a fresh temp folder and score it. Returns
     (record, cancelled) — cancelled is True only when the owner's
     Stop ended the task, which ends the whole run."""
@@ -468,6 +469,24 @@ def _run_one_task(task: dict, model: str, client, cancel_event,
     # captured here and restored in the finally, or every bench run
     # left the main chat with a leftover timeout as low as 1 second.
     original_timeout = getattr(client, "timeout", None)
+    # Light Machine profile (2026-11-11): the bench is a seat —
+    # single residency before the task, keep_alive 0 on its
+    # generations while ON (passed only to a client whose stream
+    # accepts the kwarg; fixed-signature doubles keep the legacy
+    # call). OFF: neither happens, byte-for-byte as shipped.
+    stream_kwargs = {}
+    if light_machine:
+        from forge import lightmachine as light_mod
+        light_mod.ensure_single_residency(client, model, True)
+        import inspect as _inspect
+        try:
+            _params = _inspect.signature(client.chat_stream).parameters
+            if "keep_alive" in _params or any(
+                    p.kind is _inspect.Parameter.VAR_KEYWORD
+                    for p in _params.values()):
+                stream_kwargs["keep_alive"] = 0
+        except (TypeError, ValueError, AttributeError):
+            pass
     try:
         while True:
             reason = _stop_reason(cancel_event, deadline)
@@ -484,7 +503,7 @@ def _run_one_task(task: dict, model: str, client, cancel_event,
                 client.timeout = max(1, int(deadline - time.time()))
             chunks, tool_calls = [], []
             for event in client.chat_stream(model, messages, _OPTIONS,
-                                            belt):
+                                            belt, **stream_kwargs):
                 message = event.get("message", {})
                 if message.get("content"):
                     chunks.append(message["content"])
@@ -596,7 +615,7 @@ def _prune_bench_workspaces(workspace_root) -> None:
 
 def run_bench(model: str, client, task_ids=None, cancel_event=None,
               on_task=None, workspace_root=None, disabled_tools=None,
-              max_cycles=None) -> dict:
+              max_cycles=None, light_machine=False) -> dict:
     """Run the bench (all fifteen tasks, or the task_ids subset)
     against model via client (an OllamaClient-shaped object) and
     return the report dict. on_task(record), when given, fires as
@@ -633,7 +652,8 @@ def run_bench(model: str, client, task_ids=None, cancel_event=None,
                 record, stopped = _run_one_task(task, model, client,
                                                 cancel_event, workspace_root,
                                                 disabled,
-                                                max_cycles=cycles_cap)
+                                                max_cycles=cycles_cap,
+                                                light_machine=light_machine)
             except Exception as exc:
                 record = {"id": task["id"], "title": task["title"],
                           "passed": False, "seconds": 0.0, "cycles": 0,

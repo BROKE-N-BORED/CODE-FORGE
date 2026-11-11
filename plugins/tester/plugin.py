@@ -28,6 +28,7 @@ import time
 from forge.ollama_client import OllamaClient
 from forge.tools import TOOL_SCHEMAS, Containment, execute_tool
 from forge import seats as seats_mod
+from forge import lightmachine as light_mod
 
 
 def _execute_contained(name, targs, workspace, cancel_event, containment):
@@ -87,7 +88,18 @@ def run_tester(args, ctx):
         cycles_cap = 0
     if cycles_cap <= 0:
         cycles_cap = MAX_CYCLES
+    # Light Machine profile (2026-11-11): the owner's toggle rides
+    # the context (ctx.light_machine, refreshed by the shell each
+    # turn). ON: single residency before the run, and every tester
+    # generation carries keep_alive 0 so the seat's model unloads
+    # the moment the run finishes. OFF: no ps/unload calls and the
+    # stream call below is byte-for-byte the shipped one.
+    light_on = bool(getattr(ctx, "light_machine", False))
     client = OllamaClient(ctx.base_url, timeout=1800)
+    if light_on:
+        light_mod.ensure_single_residency(
+            client, model, True,
+            log=lambda msg: ctx.log(msg) if ctx.log else None)
     try:
         installed = [m.get("name", "") for m in client.tags()]
     except Exception:
@@ -137,7 +149,22 @@ def run_tester(args, ctx):
         # The request itself may not outlive the run's remaining budget.
         client.timeout = max(1, int(remaining()))
         chunks, tool_calls = [], []
-        for event in client.chat_stream(model, messages, options, TESTER_TOOLS):
+        # The keep_alive kwarg rides only under the profile (and
+        # only for a client whose stream accepts it — the seam's
+        # fixed-signature doubles keep the legacy call).
+        stream_kwargs = {}
+        if light_on:
+            try:
+                _params = inspect.signature(
+                    client.chat_stream).parameters
+                if "keep_alive" in _params or any(
+                        p.kind is inspect.Parameter.VAR_KEYWORD
+                        for p in _params.values()):
+                    stream_kwargs["keep_alive"] = 0
+            except (TypeError, ValueError, AttributeError):
+                pass
+        for event in client.chat_stream(model, messages, options, TESTER_TOOLS,
+                                        **stream_kwargs):
             reason = stopped()
             if reason:
                 break

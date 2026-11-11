@@ -415,16 +415,38 @@ class ParallelManager:
     Mission Control window reads rows() and calls the verbs."""
 
     def __init__(self, client_factory, snapshot_fn=None,
-                 concurrency=2, runner=None):
+                 concurrency=2, runner=None, light_machine_fn=None):
         self._client_factory = client_factory
         self._snapshot_fn = snapshot_fn
         self._runner = runner or run_job_turn
         self.concurrency = max(1, int(concurrency or 2))
+        # Light Machine profile (2026-11-11): a callable read at
+        # use time (pump / job start) — flipping the owner's toggle
+        # mid-session caps the NEXT pump, no restart, and the
+        # configured `concurrency` above is never rewritten.
+        self._light_machine_fn = light_machine_fn
         self._lock = threading.Lock()
         self._threads: dict[str, threading.Thread] = {}
         self._cancels: dict[str, threading.Event] = {}
         self._jobs: dict[str, dict] = {}
         self._snap_cache = (0.0, None)
+
+    def _light_on(self) -> bool:
+        fn = getattr(self, "_light_machine_fn", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
+    @property
+    def effective_concurrency(self) -> int:
+        """The cap pump() actually enforces: the configured value,
+        capped to 1 while the Light Machine profile is ON."""
+        from forge import lightmachine as light_mod
+        return light_mod.effective_concurrency(
+            self.concurrency, self._light_on())
 
     # -- registry / persistence -----------------------------------
 
@@ -499,16 +521,17 @@ class ParallelManager:
         """Start queued jobs up to the cap, unless the governor
         says the machine is loaded — then the queue holds and the
         jobs say so."""
+        cap = self.effective_concurrency
         with self._lock:
             running = sum(1 for j in self._jobs.values()
                           if j["state"] == "running")
             queued = [j for j in self._jobs.values()
                       if j["state"] == "queued"]
-        if not queued or running >= self.concurrency:
+        if not queued or running >= cap:
             return
         loaded = machine_loaded(self._snapshot())
         for job in queued:
-            if running >= self.concurrency:
+            if running >= cap:
                 break
             if loaded:
                 if job.get("note") != "Queued — the machine is " \
@@ -544,6 +567,17 @@ class ParallelManager:
 
         try:
             client = self._client_factory(job["model"])
+            if self._light_on():
+                # Single residency for the job's model too — a job
+                # is a generation like any other. Fail-soft by the
+                # helper's own contract; no log surface lives here,
+                # so swaps ride the worker seats' logging instead.
+                try:
+                    from forge import lightmachine as light_mod
+                    light_mod.ensure_single_residency(
+                        client, job["model"], True)
+                except Exception:
+                    pass
             text = self._runner(client, job["model"], job["task"],
                                 root, job["kind"], cancel,
                                 step_cb=step)

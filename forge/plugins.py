@@ -77,6 +77,11 @@ class PluginContext:
     # plugin reads them to route behind the browse seam.
     research_web_engine: str = ""
     forge_browser_engine: str = "auto"
+    # Light Machine profile (2026-11-11): the owner's `light_machine`
+    # setting, refreshed by the shell each turn the same way
+    # tester_max_cycles is; seat plugins (the tester) read it to
+    # run their generations with keep_alive 0 + single residency.
+    light_machine: bool = False
     governing_roster: str = ""  # owner's roster extension (bite #3)
     config: dict = field(default_factory=dict)
     log: object = None  # callable(str) or None

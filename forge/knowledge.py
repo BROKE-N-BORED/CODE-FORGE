@@ -424,9 +424,31 @@ READ_KNOWLEDGE_SCHEMA = {
 
 # ---------- distillation ----------
 
-def _collect_reply(client, model, messages) -> str:
+def _collect_reply(client, model, messages, light_machine=False,
+                   log=None) -> str:
+    # Light Machine profile: the distiller is a seat generation —
+    # single residency first, and keep_alive 0 while ON so the fast
+    # seat's model unloads the moment it finishes. OFF passes no
+    # keep_alive kwarg at all, exactly as shipped (the seam's test
+    # doubles include fixed-signature clients). The keep_alive is
+    # passed only when the client's stream accepts it.
+    kwargs = {}
+    if light_machine:
+        from . import lightmachine as light_mod
+        light_mod.ensure_single_residency(client, model, True,
+                                          log=log)
+        import inspect as _inspect
+        try:
+            params = _inspect.signature(client.chat_stream).parameters
+            accepts = "keep_alive" in params or any(
+                p.kind is _inspect.Parameter.VAR_KEYWORD
+                for p in params.values())
+        except (TypeError, ValueError, AttributeError):
+            accepts = False
+        if accepts:
+            kwargs["keep_alive"] = 0
     chunks = []
-    for event in client.chat_stream(model, messages, {}, None):
+    for event in client.chat_stream(model, messages, {}, None, **kwargs):
         if not isinstance(event, dict):
             continue
         content = (event.get("message") or {}).get("content", "")
@@ -465,7 +487,7 @@ def _parse_distillation(text: str):
 
 
 def distill(client, model, root: str | Path, prompt: str, reply: str,
-            log=None):
+            log=None, light_machine=False):
     """Draft one knowledge entry from a finished turn, via the fast
     seat. Returns the draft's path, or None (nothing worth keeping,
     or anything at all went wrong).
@@ -483,7 +505,8 @@ def distill(client, model, root: str | Path, prompt: str, reply: str,
              "THE OWNER ASKED:\n" + (prompt or "")[:2000]
              + "\n\nTHE AGENT ANSWERED / DID:\n" + (reply or "")[:6000]},
         ]
-        text = _collect_reply(client, model, messages)
+        text = _collect_reply(client, model, messages,
+                              light_machine=light_machine, log=log)
         parsed = _parse_distillation(text)
         if parsed is None:
             return None
@@ -500,3 +523,49 @@ def distill(client, model, root: str | Path, prompt: str, reply: str,
             except Exception:
                 pass
         return None
+
+
+def distill_when_idle(client, model, root: str | Path, prompt: str,
+                      reply: str, log=None, snapshot_fn=None,
+                      sleep_fn=None, now_fn=None,
+                      max_wait=None, poll=None):
+    """Light Machine rule 3: distill only while the machine is NOT
+    busy. The governor snapshot is checked before the fast seat is
+    called; while it reads busy (forge/lightmachine.machine_busy —
+    the parallel queue's own readings: cpu_busy, or under a
+    gigabyte of RAM free) the attempt waits `poll` seconds and
+    checks again, bounded by `max_wait` (~10 minutes): past the
+    bound the entry simply doesn't distill this turn — one log
+    line, no exception, no draft. Runs on the caller's background
+    thread, so waiting never blocks a turn. The clock and sleep
+    are injectable so tests drive the whole loop with fakes.
+    Returns distill()'s result, or None when dropped."""
+    import time as _time
+    from . import lightmachine as light_mod
+    sleep = sleep_fn or _time.sleep
+    now = now_fn or _time.monotonic
+    wait = light_mod.DISTILL_MAX_WAIT_SECONDS if max_wait is None \
+        else float(max_wait)
+    step = light_mod.DISTILL_POLL_SECONDS if poll is None \
+        else float(poll)
+    started = now()
+    while True:
+        snapshot = None
+        if snapshot_fn is not None:
+            try:
+                snapshot = snapshot_fn()
+            except Exception:
+                snapshot = None
+        if not light_mod.machine_busy(snapshot):
+            break
+        if now() - started >= wait:
+            if log is not None:
+                try:
+                    log("Light machine: knowledge distillation "
+                        "skipped — the machine stayed busy.")
+                except Exception:
+                    pass
+            return None
+        sleep(step)
+    return distill(client, model, root, prompt, reply, log=log,
+                   light_machine=True)

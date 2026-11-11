@@ -74,6 +74,7 @@ from . import uibuilder as uib_mod
 from . import palette as palette_mod
 from . import layout as layout_mod
 from . import parallel as parallel_mod
+from . import lightmachine as light_mod
 from . import council as council_mod
 from . import seats as seats_mod
 from . import monitor as monitor_mod
@@ -2587,6 +2588,26 @@ class SettingsDialog(QDialog):
                                 "typing on pages ride the Browse connector under either choice, and the "
                                 "project's site allowlist (.forge/browse.json) fences navigation "
                                 "under both."))
+        # Light Machine profile (2026-11-11): one toggle enforcing
+        # one-local-model-at-a-time on small machines (forge/
+        # lightmachine.py). Default OFF — today's behavior exactly.
+        self.light_machine = QCheckBox(
+            "Light machine: one model in memory at a time")
+        self.light_machine.setChecked(
+            bool(settings.get("light_machine", False)))
+        form.addRow("Light machine", self.light_machine)
+        form.addRow("", caption(
+            "For small machines: one model in memory at a time. "
+            "Helper models (reviewer, tester, and the other seats) "
+            "unload as soon as they finish, and a different loaded "
+            "model is unloaded before another one runs — so models "
+            "never stack up in RAM. The trade: the main model may "
+            "need a fresh load from disk after a helper has run. "
+            "Local models also get a smaller context (4096), "
+            "parallel jobs run one at a time, and knowledge filing "
+            "waits while the machine is busy. Cloud models "
+            "(Groq / Gemini / EXAONE) are not affected. Off = "
+            "exactly as before."))
         self.forge_browser_engine = QComboBox()
         self.forge_browser_engine.addItem("Auto", "auto")
         self.forge_browser_engine.addItem("Chromium", "chromium")
@@ -2655,6 +2676,7 @@ class SettingsDialog(QDialog):
                     self.research_web_engine.currentData() or "browse"),
                 "forge_browser_engine": str(
                     self.forge_browser_engine.currentData() or "auto"),
+                "light_machine": self.light_machine.isChecked(),
                 "density": str(self.density.currentData() or "comfortable")}
 
 
@@ -2814,13 +2836,21 @@ class SummarizeThread(QThread):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, client, model: str, messages: list, options: dict):
+    def __init__(self, client, model: str, messages: list, options: dict,
+                 light_machine: bool = False, seat: bool = False):
         super().__init__()
         self.client = client
         self.model = model
         self.messages = messages
         self.options = options
         self._cancel = threading.Event()
+        # Light Machine profile (2026-11-11): only a SEAT use of
+        # this thread (the Watch seat's fix proposal) is a seat
+        # generation — residency + keep_alive 0 while ON. The fold
+        # uses ride the session (driver) model and keep the legacy
+        # call exactly, profile or not.
+        self._light_machine = bool(light_machine)
+        self._light_seat = bool(seat)
 
     def cancel(self):
         self._cancel.set()
@@ -2837,6 +2867,19 @@ class SummarizeThread(QThread):
             stream_kwargs = {}
             if client_accepts_cancel(self.client):
                 stream_kwargs["cancel_event"] = self._cancel
+            if self._light_machine and self._light_seat:
+                light_mod.ensure_single_residency(
+                    self.client, self.model, True)
+                try:
+                    import inspect as _inspect
+                    _params = _inspect.signature(
+                        self.client.chat_stream).parameters
+                    if "keep_alive" in _params or any(
+                            p.kind is _inspect.Parameter.VAR_KEYWORD
+                            for p in _params.values()):
+                        stream_kwargs["keep_alive"] = 0
+                except (TypeError, ValueError, AttributeError):
+                    pass
             for event in self.client.chat_stream(self.model, self.messages,
                                                  self.options, [],
                                                  **stream_kwargs):
@@ -2954,7 +2997,7 @@ class BenchThread(QThread):
     failed = Signal(str)
 
     def __init__(self, model: str, client, disabled_tools=None,
-                 bench_max_cycles=None):
+                 bench_max_cycles=None, light_machine=False):
         super().__init__()
         self.model = model
         self.client = client
@@ -2965,6 +3008,9 @@ class BenchThread(QThread):
         # same way (settings `bench_max_cycles`); None keeps the
         # bench module's own default.
         self.bench_max_cycles = bench_max_cycles
+        # Light Machine profile: the dialog hands the live toggle
+        # through the same way; False keeps the shipped bench.
+        self.light_machine = bool(light_machine)
         self.cancel_event = threading.Event()
 
     def stop(self):
@@ -2977,7 +3023,8 @@ class BenchThread(QThread):
                 cancel_event=self.cancel_event,
                 on_task=self.task_done.emit,
                 disabled_tools=self.disabled_tools,
-                max_cycles=self.bench_max_cycles)
+                max_cycles=self.bench_max_cycles,
+                light_machine=self.light_machine)
             self.bench_done.emit(report)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -4235,7 +4282,8 @@ class BenchDialog(QDialog):
     itself."""
 
     def __init__(self, parent, models, client, log=None, current=None,
-                 disabled_tools=None, bench_max_cycles=None):
+                 disabled_tools=None, bench_max_cycles=None,
+                 light_machine=False):
         super().__init__(parent)
         self.client = client
         self._log = log
@@ -4244,6 +4292,7 @@ class BenchDialog(QDialog):
         # `bench_max_cycles`), handed to the run thread untouched;
         # None keeps the bench module's default.
         self.bench_max_cycles = bench_max_cycles
+        self.light_machine = bool(light_machine)
         self._thread = None
         self._row_by_id = {}
         self.setWindowTitle("Forge Bench — fifteen fixed, scored tasks")
@@ -4318,7 +4367,8 @@ class BenchDialog(QDialog):
         self.stop_btn.setEnabled(True)
         self._thread = BenchThread(model, self.client,
                                    disabled_tools=self.disabled_tools,
-                                   bench_max_cycles=self.bench_max_cycles)
+                                   bench_max_cycles=self.bench_max_cycles,
+                                   light_machine=self.light_machine)
         self._thread.task_done.connect(self._on_task_done)
         self._thread.bench_done.connect(self._on_bench_done)
         self._thread.failed.connect(self._on_bench_failed)
@@ -9856,6 +9906,28 @@ class ModelsWindow(QWidget):
         self.machine_line.setWordWrap(True)
         lay.addWidget(self.machine_line)
 
+        # The manual residency reset (owner's tuning list,
+        # 2026-11-11): unload every model Ollama holds in RAM,
+        # right now — the hand brake beside the Light Machine
+        # profile's automatic rules, working whether that profile
+        # is on or off. The receipt shows here and in the log.
+        unload_row = QHBoxLayout(); unload_row.setSpacing(6)
+        self.unload_all_btn = QPushButton("Unload all models")
+        self.unload_all_btn.setToolTip(
+            "Unload every model Ollama currently holds in RAM — "
+            "frees the memory immediately. Works whether the "
+            "Light Machine profile is on or off. Cloud models "
+            "are not Ollama models and are never touched.")
+        self.unload_all_btn.clicked.connect(
+            self._unload_all_from_owner)
+        unload_row.addWidget(self.unload_all_btn)
+        unload_row.addStretch(1)
+        lay.addLayout(unload_row)
+        self.unload_note = QLabel("")
+        self.unload_note.setObjectName("muted")
+        self.unload_note.setWordWrap(True)
+        lay.addWidget(self.unload_note)
+
         self.local_section = self._section_label("LOCAL MODELS")
         lay.addWidget(self.local_section)
         self.local_list = QListWidget()
@@ -9928,6 +10000,20 @@ class ModelsWindow(QWidget):
             fetch()
         else:
             self.refresh()
+
+    def _unload_all_from_owner(self):
+        """The Unload-all button: the owner's verb does the work
+        and returns the receipt line, which shows under the
+        button; the room then refreshes so its rows describe the
+        post-unload state."""
+        owner = self._owner
+        fn = getattr(owner, "unload_all_models", None) \
+            if owner is not None else None
+        if callable(fn):
+            line = fn()
+            if line:
+                self.unload_note.setText(line)
+        self.refresh()
 
     def refresh(self):
         owner = self._owner
@@ -13101,6 +13187,12 @@ class ForgeWindow(QMainWindow):
         self.setWindowTitle(f"CODE FORGE v{APP_VERSION} — Linux Forge Agent")
         self.resize(1360, 880); self.setMinimumSize(880, 560)
         self.settings = self.load_settings()
+        # Light Machine: sync the vision seat's env bridge with the
+        # loaded setting (save_settings keeps it in sync after).
+        if bool(self.settings.get("light_machine", False)):
+            os.environ["FORGE_LIGHT_MACHINE"] = "1"
+        else:
+            os.environ.pop("FORGE_LIGHT_MACHINE", None)
         # G5: the saved density drives the global stylesheet from
         # the very first paint (Comfortable == STYLE itself).
         self.apply_density()
@@ -14153,9 +14245,23 @@ class ForgeWindow(QMainWindow):
             # the owner's switch, and the send path reads it per
             # turn, so a change takes effect on the next turn.
             settings.setdefault("shadow_checkpoints", "off")
+            # Light Machine profile (2026-11-11): default OFF,
+            # seeded so the key is visible in settings.json; every
+            # consumer reads it at use time, so a hand edit or the
+            # Settings → Behavior toggle takes effect on the next
+            # generation with no restart.
+            settings.setdefault("light_machine", False)
         return settings
 
     def save_settings(self):
+        # Light Machine: the standalone browser package's vision
+        # seat reads the profile from the environment (its own
+        # FORGE_* pattern), so keep the bridge in sync on every
+        # save — a toggle flip reaches the next description.
+        if bool(self.settings.get("light_machine", False)):
+            os.environ["FORGE_LIGHT_MACHINE"] = "1"
+        else:
+            os.environ.pop("FORGE_LIGHT_MACHINE", None)
         self.settings["workspace"] = self.workspace
         self.settings["projects"] = self.projects
         # Atomic write (temp file in the same folder + replace): a
@@ -15184,6 +15290,29 @@ class ForgeWindow(QMainWindow):
         if win is not None and win.isVisible():
             win.refresh()
 
+    def unload_all_models(self):
+        """The manual residency reset (owner's tuning list,
+        2026-11-11): one click in the Models window unloads every
+        local model Ollama currently holds in RAM, whether the
+        Light Machine profile is on or off. Provider models are
+        not Ollama models and are never touched. Fails soft — the
+        answer is always one plain line, logged here and returned
+        for the window to show."""
+        outcome, names = light_mod.unload_all_models(self.client)
+        if outcome == "unloaded":
+            line = (f"Unloaded {len(names)} model"
+                    f"{'s' if len(names) != 1 else ''} — RAM freed.")
+        elif outcome == "none":
+            line = "No models were loaded."
+        elif outcome == "failed":
+            line = ("Unload all models: Ollama didn't release "
+                    "any of the loaded models.")
+        else:
+            line = ("Unload all models: couldn't reach Ollama — "
+                    "nothing was unloaded.")
+        self.log(line)
+        return line
+
     def _refresh_note_windows(self):
         """H5: the notes and sees rooms follow the current
         conversation — refreshed (only while visible) on every
@@ -15350,10 +15479,21 @@ class ForgeWindow(QMainWindow):
                             self._provider_config(), model,
                             scope="project", role="tester"):
                     model = seats_mod.SEAT_DEFAULTS["tester"]
-                knowledge_mod.distill(
-                    self.client, model, ws, prompt, text,
-                    log=lambda msg: self.eventlog.record(
-                        "knowledge", note=msg))
+                _log = lambda msg: self.eventlog.record(  # noqa: E731
+                    "knowledge", note=msg)
+                if bool(self.settings.get("light_machine", False)):
+                    # Light Machine rule 3: the distiller waits out
+                    # a busy machine (governor snapshot, the
+                    # parallel queue's own readings), bounded —
+                    # past ~10 minutes the entry simply doesn't
+                    # distill this turn (one event-log line).
+                    knowledge_mod.distill_when_idle(
+                        self.client, model, ws, prompt, text,
+                        log=_log,
+                        snapshot_fn=lambda: governor.snapshot())
+                else:
+                    knowledge_mod.distill(
+                        self.client, model, ws, prompt, text, log=_log)
             except Exception:
                 pass
 
@@ -15875,7 +16015,10 @@ class ForgeWindow(QMainWindow):
         # The watch seat budgets at ITS OWN model's window.
         options = {"temperature": 0.2,
                    "num_ctx": self._resolve_budget(model)}
-        thread = SummarizeThread(self.client, model, messages, options)
+        thread = SummarizeThread(
+            self.client, model, messages, options,
+            light_machine=bool(self.settings.get("light_machine", False)),
+            seat=True)
         thread.done.connect(
             lambda text: self._on_monitor_fix_ready(text, alert, listing))
         thread.failed.connect(
@@ -16093,7 +16236,9 @@ class ForgeWindow(QMainWindow):
                     disabled_tools=list(self.settings.get(
                         "disabled_tools", [])),
                     bench_max_cycles=self.settings.get(
-                        "bench_max_cycles")).exec()
+                        "bench_max_cycles"),
+                    light_machine=bool(self.settings.get(
+                        "light_machine", False))).exec()
 
     # ---------- Audit D41: recipes ----------
     def open_recipes(self):
@@ -18955,6 +19100,12 @@ class ForgeWindow(QMainWindow):
                    # turn options; the worker passes it to Ollama as
                    # each generation's keep_alive.
                    "keep_alive": str(self.settings.get("keep_alive", "30m"))}
+        # Light Machine profile (2026-11-11): the toggle rides the
+        # turn options ONLY when ON — the worker reads it at every
+        # generation (forge/lightmachine.py), and an OFF turn's
+        # options stay byte-for-byte the shipped ones.
+        if bool(self.settings.get("light_machine", False)):
+            options["light_machine"] = True
         # Audit B22: num_thread rides only when the owner set it —
         # 0 (the default) omits the key entirely so Ollama picks the
         # thread count, exactly as generations behaved pre-knob. A
@@ -19134,6 +19285,10 @@ class ForgeWindow(QMainWindow):
             self.settings.get("research_web_engine", "") or "")
         self.plugin_ctx.forge_browser_engine = str(
             self.settings.get("forge_browser_engine", "auto") or "auto")
+        # Light Machine: the toggle rides the plugin context the
+        # same way (seat plugins read ctx.light_machine at use).
+        self.plugin_ctx.light_machine = bool(
+            self.settings.get("light_machine", False))
         self.plugin_ctx.workspace = self.workspace
         turn_hooks, turn_verify = self._turn_config()
         extra = self._extra_tools()
@@ -19167,7 +19322,8 @@ class ForgeWindow(QMainWindow):
             tester_model=tester_model,
             tester_max_cycles=self.plugin_ctx.tester_max_cycles,
             research_web_engine=self.plugin_ctx.research_web_engine,
-            forge_browser_engine=self.plugin_ctx.forge_browser_engine)
+            forge_browser_engine=self.plugin_ctx.forge_browser_engine,
+            light_machine=self.plugin_ctx.light_machine)
         # S5 (audit S1-08): the MCP/Browse spawn trust store — the
         # LIVE settings dict, so a trust the owner grants at this
         # turn's gate lands in settings and save_settings persists
@@ -19223,7 +19379,9 @@ class ForgeWindow(QMainWindow):
                                   skills_dir=self.app_skills_dir,
                                   plugins_dir=self.app_plugins_dir,
                                   mcp_trust=mcp_trust_store,
-                                  mcp_trust_save=self.save_settings)
+                                  mcp_trust_save=self.save_settings,
+                                  light_machine=bool(self.settings.get(
+                                      "light_machine", False)))
         self.plugin_ctx.cancel_event = getattr(self.worker, "_cancel_event", None)
         turn_ctx.cancel_event = getattr(self.worker, "_cancel_event", None)
         self._pending_plan_request = text
@@ -19975,7 +20133,12 @@ class ForgeWindow(QMainWindow):
                 client_factory=lambda model: self.client,
                 snapshot_fn=lambda: governor.snapshot(),
                 concurrency=int(self.settings.get(
-                    "parallel_jobs_concurrency", 2) or 2))
+                    "parallel_jobs_concurrency", 2) or 2),
+                # Light Machine: read at use time from the live
+                # settings, so a toggle flip caps the next pump —
+                # the configured concurrency above is never rewritten.
+                light_machine_fn=lambda: bool(
+                    self.settings.get("light_machine", False)))
             self._parallel_mgr = mgr
             self._parallel_attached = set()
         return mgr
@@ -20304,7 +20467,9 @@ class ForgeWindow(QMainWindow):
             setting = int(self.settings.get("num_ctx", 8192) or 8192)
         return providers_mod.resolve_context_budget(
             model, config=getattr(self.client, "config", None),
-            client=self.client, fallback=setting)
+            client=self.client, fallback=setting,
+            light_machine=bool(self.settings.get(
+                "light_machine", False)))
 
     def _summarize_now(self):
         """The manual fold (the gauge's right-click): the same fold
