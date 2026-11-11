@@ -714,6 +714,31 @@ def short_model(tag: str) -> str:
     return tag.split("/")[-1] if tag else tag
 
 
+def models_readout(snap):
+    """The header MODELS readout from one gauge snapshot:
+    (text, tooltip). Text is "—" while Ollama isn't answering,
+    "none loaded" when RAM holds no local model, else
+    "N · X.X GB" (just "N loaded" if no size was reported).
+    The tooltip names every resident model with its weight in
+    the B20 log line's format — name (X.X GB). Only Ollama
+    residency is read, so provider models can never appear:
+    they don't live in this PC's RAM."""
+    if not snap.get("ollama_running"):
+        return "—", "Ollama isn't answering — this readout recovers on its own."
+    loaded = snap.get("ollama_loaded") or []
+    if not loaded:
+        return "none loaded", "No local models are loaded in RAM right now."
+    sizes = snap.get("ollama_loaded_sizes") or {}
+    total = sum(sizes.get(name, 0) or 0 for name in loaded)
+    lines = []
+    for name in loaded:
+        size = sizes.get(name, 0) or 0
+        lines.append(f"{name} ({size / 1_000_000_000:.1f} GB)" if size else name)
+    if total:
+        return f"{len(loaded)} · {total / 1_000_000_000:.1f} GB", "\n".join(lines)
+    return f"{len(loaded)} loaded", "\n".join(lines)
+
+
 DIFF_SIDE_MIN_WIDTH = 880   # G3: side-by-side at/above this diff-area width
 
 
@@ -14427,6 +14452,19 @@ class ForgeWindow(QMainWindow):
         cpu_row.addWidget(self.cpu_bar)
         self.cpu_text = QLabel("—"); self.cpu_text.setObjectName("muted"); cpu_row.addWidget(self.cpu_text)
         gauge_box.addLayout(cpu_row)
+        models_row = QHBoxLayout()
+        models_lab = QLabel("MODELS"); models_lab.setObjectName("stamp"); models_row.addWidget(models_lab)
+        # Loaded-models readout (owner's order, 2026-11-11): which
+        # LOCAL models sit in RAM right now and what they weigh —
+        # the B20 resident set, promoted from the activity log into
+        # the header. It rides the same 3 s gauge pass as RAM/CPU
+        # above (no timer of its own) and follows the privacy
+        # badge's idiom: a static label, detail in the tooltip.
+        # Provider models can never appear here — the data is
+        # Ollama's /api/ps, and cloud models don't live in this
+        # PC's RAM at all.
+        self.models_text = QLabel("—"); self.models_text.setObjectName("muted"); models_row.addWidget(self.models_text)
+        gauge_box.addLayout(models_row)
         hl.addLayout(gauge_box)
         hl.addStretch()
         loaded_box = QVBoxLayout()
@@ -16450,6 +16488,9 @@ class ForgeWindow(QMainWindow):
         self.cpu_text.setText(f"load {snap['load_1min']:.2f} / {snap['threads']} threads")
         loaded = ", ".join(short_model(m) for m in snap["ollama_loaded"]) if snap["ollama_loaded"] else "none"
         self.loaded_label.setText(loaded)
+        mtext, mtip = models_readout(snap)
+        self.models_text.setText(mtext)
+        self.models_text.setToolTip(mtip)
 
     # ---------- projects ----------
     def refresh_projects(self):

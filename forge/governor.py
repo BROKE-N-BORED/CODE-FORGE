@@ -81,21 +81,29 @@ def load_1min() -> float:
         return 0.0
 
 
-def ollama_loaded(base_url: str = "http://127.0.0.1:11434", timeout: float = 2.0) -> tuple[bool, list[str]]:
-    """(reachable, [loaded model tags]) from Ollama's own /api/ps report."""
+def _ps_models(base_url: str, timeout: float):
+    """(reachable, [model dicts]) from Ollama's own /api/ps report —
+    the raw rows (name / size bytes / expires_at), unfiltered."""
     try:
         with urllib.request.urlopen(base_url.rstrip("/") + "/api/ps", timeout=timeout) as r:
             data = json.load(r)
-        return True, [m.get("name", "?") for m in data.get("models", [])]
+        return True, [m for m in data.get("models", []) if isinstance(m, dict)]
     except Exception:
         return False, []
+
+
+def ollama_loaded(base_url: str = "http://127.0.0.1:11434", timeout: float = 2.0) -> tuple[bool, list[str]]:
+    """(reachable, [loaded model tags]) from Ollama's own /api/ps report."""
+    reachable, models = _ps_models(base_url, timeout)
+    return reachable, [m.get("name", "?") for m in models]
 
 
 def snapshot(base_url: str = "http://127.0.0.1:11434", timeout: float = 2.0) -> dict:
     """One measurement of the whole bench: RAM, CPU, Ollama slot."""
     threads = os.cpu_count() or 4
     load = load_1min()
-    reachable, loaded = ollama_loaded(base_url, timeout=timeout)
+    reachable, loaded_models = _ps_models(base_url, timeout=timeout)
+    loaded = [m.get("name", "?") for m in loaded_models]
     return {
         "avail_gb": round(mem_available_gb(), 2),
         "total_gb": round(mem_total_gb(), 2),
@@ -104,6 +112,13 @@ def snapshot(base_url: str = "http://127.0.0.1:11434", timeout: float = 2.0) -> 
         "cpu_busy": load > threads,
         "ollama_running": reachable,
         "ollama_loaded": loaded,
+        # Header loaded-models readout (2026-11-11): each resident
+        # model's weight in bytes, from the same /api/ps rows. The
+        # name list above stays the contract older readers use;
+        # sizes ride alongside. Ollama-only by construction — a
+        # provider model never appears here (it isn't in this RAM).
+        "ollama_loaded_sizes": {
+            m.get("name", "?"): (m.get("size") or 0) for m in loaded_models},
     }
 
 

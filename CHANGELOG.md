@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-11 — Header loaded-models readout
+- The bench header's gauge box gains a third row, MODELS, under RAM and CPU: it shows how many local models are resident in memory and their total weight (e.g. "2 · 3.0 GB"), or "none loaded", or a dash while Ollama isn't answering. Hovering lists each resident model with its size.
+- The data comes from the governor's existing Ollama report on the existing 3-second gauge refresh — no new timer, no extra calls. Provider models never appear (they don't run on this machine).
+
 ## 2026-11-11 — Performance envelope: footprint ceiling raised
 - The install footprint ceiling is raised from 4 MiB / 150 files to 6 MiB / 200 files (owner's call). The tree measured 4,455,870 bytes across 140 files after today's builds landed (browser package, Research/Write rooms, parallel agents, project knowledge, export/convert, Light Machine). The guard still trips on a vendored dependency or stray binary; BENCH.md and the README table state the same numbers.
 
