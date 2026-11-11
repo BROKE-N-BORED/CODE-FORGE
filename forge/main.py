@@ -56,6 +56,8 @@ from . import templates as templates_mod
 from . import bench as bench_mod
 from . import recipes as recipes_mod
 from . import planning as planning_mod
+from . import exporting as export_mod
+from . import converting as convert_mod
 from . import goldfish as goldfish_mod
 from . import context as context_mod
 from . import notes as notes_mod
@@ -12846,6 +12848,242 @@ def quote_block_for(text):
         ("> " + line) if line else ">" for line in text.splitlines())
 
 
+class ExportChatDialog(QDialog):
+    """Export the open (or a stored) conversation as PDF / Markdown
+    / HTML, images embedded where the conversation carries them
+    (forge/exporting.py). Stored conversations keep text only — the
+    store strips image payloads on save — and the dialog says so
+    when the chat in hand has no image data."""
+
+    FORMATS = (("PDF (.pdf)", "pdf"), ("Markdown (.md)", "md"),
+               ("HTML (.html)", "html"))
+
+    def __init__(self, owner, title, messages, model=None, project=None):
+        super().__init__(owner)
+        self._owner = owner
+        self._messages = messages
+        self._title = title or "Conversation"
+        self._model = model
+        self._project = project
+        self.setWindowTitle("Export chat — Code Forge")
+        self.resize(520, 340)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(8)
+        lay.addWidget(QLabel(f"Export “{self._title}”"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Format"))
+        self.format_combo = QComboBox()
+        for label, _ext in self.FORMATS:
+            self.format_combo.addItem(label)
+        self.format_combo.currentIndexChanged.connect(self._sync_path_ext)
+        row.addWidget(self.format_combo, 1)
+        lay.addLayout(row)
+        self.images_check = QCheckBox("Include images")
+        self.images_check.setChecked(True)
+        lay.addWidget(self.images_check)
+        self.note_label = QLabel("")
+        self.note_label.setObjectName("muted")
+        self.note_label.setWordWrap(True)
+        lay.addWidget(self.note_label)
+        prow = QHBoxLayout()
+        self.path_edit = QLineEdit(self._default_path())
+        prow.addWidget(self.path_edit, 1)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse)
+        prow.addWidget(browse_btn)
+        lay.addLayout(prow)
+        self.receipt_label = QLabel("")
+        self.receipt_label.setWordWrap(True)
+        lay.addWidget(self.receipt_label)
+        brow = QHBoxLayout()
+        brow.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        brow.addWidget(close_btn)
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setObjectName("primary")
+        self.export_btn.clicked.connect(self._export)
+        brow.addWidget(self.export_btn)
+        lay.addLayout(brow)
+        self._sync_note()
+
+    def _format(self):
+        return self.FORMATS[self.format_combo.currentIndex()][1]
+
+    def _default_path(self):
+        safe = "".join(ch for ch in self._title
+                       if ch.isalnum() or ch in " -_").strip() or "conversation"
+        stamp = time.strftime("%Y-%m-%d")
+        return str(Path.home() / f"{safe} - {stamp}.{self._format()}")
+
+    def _sync_path_ext(self):
+        current = self.path_edit.text().strip()
+        if current:
+            stem = str(Path(current).with_suffix(""))
+            self.path_edit.setText(f"{stem}.{self._format()}")
+        self._sync_note()
+
+    def _sync_note(self):
+        turns = export_mod.iter_turns(self._messages)
+        has_images = any(t["images"] for t in turns)
+        notes = []
+        if not has_images:
+            notes.append("This conversation has no image data saved "
+                         "(stored chats keep text only), so this "
+                         "export will be text-only.")
+        elif self._format() == "md":
+            notes.append("Markdown puts the images in a "
+                         "“<name>_assets” folder beside the file — "
+                         "keep them together.")
+        else:
+            notes.append("Images are embedded in the exported file.")
+        self.note_label.setText(" ".join(notes))
+
+    def _browse(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export chat", self.path_edit.text())
+        if path:
+            self.path_edit.setText(path)
+
+    def _export(self):
+        path = self.path_edit.text().strip()
+        if not path:
+            self.receipt_label.setText("Choose where to save the export first.")
+            return
+        try:
+            result = export_mod.export_transcript(
+                self._messages, self._format(), path,
+                include_images=self.images_check.isChecked(),
+                title=self._title, model=self._model,
+                project=self._project)
+        except Exception as exc:
+            self.receipt_label.setText(f"Export failed: {exc}")
+            return
+        bits = [f"Exported: {result['path']} ({result['size']} bytes)"]
+        if result.get("embedded"):
+            bits.append(f"{result['embedded']} image(s) embedded")
+        if result.get("missing"):
+            bits.append(f"{result['missing']} image(s) not found — "
+                        "marked in the export")
+        if result.get("omitted"):
+            bits.append(f"{result['omitted']} image(s) left out")
+        receipt = " · ".join(bits)
+        self.receipt_label.setText(receipt)
+        self._owner.log(receipt)
+
+
+class ConverterWindow(QWidget):
+    """The file converter (owner's order, 2026-11-11): pick a file
+    and only the conversions this machine can really do are listed
+    (forge/converting.py probes Qt's image formats, the document
+    extractor, the transcription path, and ffmpeg's muxers at
+    runtime). Forge itself restricts nothing — the toolbox does."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self._path = None
+        self.resize(560, 520)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("Converter — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        self.ffmpeg_label = QLabel("")
+        self.ffmpeg_label.setObjectName("muted")
+        self.ffmpeg_label.setWordWrap(True)
+        lay.addWidget(self.ffmpeg_label)
+        row = QHBoxLayout()
+        self.choose_btn = QPushButton("Choose file…")
+        self.choose_btn.clicked.connect(self._choose_file)
+        row.addWidget(self.choose_btn)
+        self.path_label = QLabel("No file chosen")
+        self.path_label.setObjectName("muted")
+        self.path_label.setWordWrap(True)
+        row.addWidget(self.path_label, 1)
+        lay.addLayout(row)
+        lay.addWidget(QLabel("Convert to"))
+        self.targets_list = QListWidget()
+        self.targets_list.currentRowChanged.connect(self._sync_convert_btn)
+        lay.addWidget(self.targets_list, 1)
+        self.hint_label = QLabel("")
+        self.hint_label.setObjectName("muted")
+        self.hint_label.setWordWrap(True)
+        lay.addWidget(self.hint_label)
+        brow = QHBoxLayout()
+        brow.addStretch()
+        self.convert_btn = QPushButton("Convert…")
+        self.convert_btn.setObjectName("primary")
+        self.convert_btn.setEnabled(False)
+        self.convert_btn.clicked.connect(self._convert)
+        brow.addWidget(self.convert_btn)
+        lay.addLayout(brow)
+        self.receipt_label = QLabel("")
+        self.receipt_label.setWordWrap(True)
+        lay.addWidget(self.receipt_label)
+        self._refresh_ffmpeg_note()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_ffmpeg_note()
+
+    def _refresh_ffmpeg_note(self):
+        # One passive line, only when ffmpeg is missing — never a
+        # popup, never a blocker; silent when it is present.
+        present, note = convert_mod.ffmpeg_status()
+        self.ffmpeg_label.setText("" if present else note)
+        self.ffmpeg_label.setVisible(not present)
+
+    def _choose_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a file to convert")
+        if not path:
+            return
+        self._path = path
+        self.path_label.setText(path)
+        self.targets_list.clear()
+        targets = convert_mod.capabilities(path)
+        for target in targets:
+            item = QListWidgetItem(target["label"])
+            item.setData(Qt.UserRole, target["ext"])
+            self.targets_list.addItem(item)
+        if targets:
+            self.targets_list.setCurrentRow(0)
+            self.hint_label.setText("")
+        else:
+            self.hint_label.setText(
+                "No conversions are available for this file.")
+        self.receipt_label.setText("")
+        self._sync_convert_btn()
+
+    def _sync_convert_btn(self):
+        self.convert_btn.setEnabled(
+            bool(self._path) and self.targets_list.currentRow() >= 0)
+
+    def _convert(self):
+        item = self.targets_list.currentItem()
+        if not self._path or item is None:
+            return
+        ext = item.data(Qt.UserRole)
+        src = Path(self._path)
+        default = str(src.with_name(f"{src.stem}.{ext}"))
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "Save converted file", default)
+        if not dest:
+            return
+        try:
+            result = convert_mod.convert(self._path, ext, dest)
+        except convert_mod.ConversionError as exc:
+            self.receipt_label.setText(str(exc))
+            return
+        except Exception as exc:
+            self.receipt_label.setText(f"Conversion failed: {exc}")
+            return
+        receipt = f"Converted: {result['path']} ({result['size']} bytes)"
+        self.receipt_label.setText(receipt)
+        self._owner.log(receipt)
+
+
 class ForgeWindow(QMainWindow):
     gauge_ready = Signal(dict)
     resident_ready = Signal(object)
@@ -14231,6 +14469,9 @@ class ForgeWindow(QMainWindow):
         # The artifacts room (2026-11-08): plans, designs, reviews
         # and walkthroughs as first-class records, read here.
         self.artifacts_win = ArtifactsWindow(self)
+        # Export & Convert (2026-11-11): the file converter room —
+        # documents, images, data, and (via ffmpeg) audio/video.
+        self.converter_win = ConverterWindow(self)
         # G2 (2026-11-09): the sessions room — every open chat in
         # one list with its state, read-only over the tab/store
         # data this window already keeps.
@@ -14470,6 +14711,7 @@ class ForgeWindow(QMainWindow):
         menu = QMenu(self)
         self.act_new = menu.addAction("＋   New conversation", self.new_chat)
         self.act_fork = menu.addAction("⑂   Fork conversation…", self.fork_conversation)
+        self.act_export_chat = menu.addAction("📤   Export chat…", self.export_current_chat)
         menu.addSeparator()
         self.act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
         self.act_customize = menu.addAction("⚒   Customize — skills · plugins · connectors", self.open_customize)
@@ -14514,6 +14756,8 @@ class ForgeWindow(QMainWindow):
         self.act_debug_window.setToolTip("Run a Python file under the debugger: breakpoints, step, inspect — the agent's debug tools drive the same session")
         self.act_artifacts_window = menu.addAction(
             "🧩   Artifacts window", self.open_artifacts_window)
+        self.act_converter_window = menu.addAction(
+            "🔀   Converter window", self.open_converter_window)
         self.act_sessions_window = menu.addAction(
             "👥   Sessions window", self.open_sessions_window)
         self.act_sessions_window.setToolTip("G2: every open chat in one list — state, model, project, last activity; click a row to go to it")
@@ -14562,6 +14806,7 @@ class ForgeWindow(QMainWindow):
         self.view_act_run = menu.addAction("▶   Run window", self.open_run_window)
         self.view_act_debug = menu.addAction("🐞   Debug window", self.open_debug_window)
         self.view_act_artifacts = menu.addAction("🧩   Artifacts window", self.open_artifacts_window)
+        self.view_act_converter = menu.addAction("🔀   Converter window", self.open_converter_window)
         self.view_act_sessions = menu.addAction("👥   Sessions window", self.open_sessions_window)
         self.view_act_privacy = menu.addAction("🔒   Privacy window", self.open_privacy_window)
         self.view_act_notes = menu.addAction("📝   Session notes window", self.open_notes_window)
@@ -14808,6 +15053,16 @@ class ForgeWindow(QMainWindow):
         if win is None:
             return
         win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_converter_window(self):
+        """The converter room: single instance, like every room."""
+        win = getattr(self, "converter_win", None)
+        if win is None:
+            win = self.converter_win = ConverterWindow(self)
         if not win.isVisible():
             win.show()
         win.raise_()
@@ -15897,6 +16152,8 @@ class ForgeWindow(QMainWindow):
             "test_now": self.test_now,
             "debug_window": self.open_debug_window,
             "artifacts_window": self.open_artifacts_window,
+            "converter_window": self.open_converter_window,
+            "export_chat": self.export_current_chat,
             "sessions_window": self.open_sessions_window,
             "privacy_window": self.open_privacy_window,
             "session_notes": self.open_notes_window,
@@ -16588,22 +16845,40 @@ class ForgeWindow(QMainWindow):
             self.delete_conversation(conversation_id)
 
     def export_conversation(self, conversation_id, title="Conversation"):
-        text = self.store.export_text(conversation_id)
-        if text is None:
+        """Export dialog (2026-11-11): PDF / Markdown / HTML with
+        images, via forge/exporting.py. The OPEN conversation
+        exports its live messages (which carry the image data);
+        a stored one exports what the store holds (text — the
+        store strips image payloads on save, and the dialog's
+        note says so when a chat has no image data)."""
+        if conversation_id is not None and \
+                conversation_id == self.conversation_id and self.messages:
+            messages = list(self.messages)
+        elif conversation_id is None:
+            messages = list(self.messages)
+        else:
+            messages = self.store.load(conversation_id)
+        if messages is None:
             self.log("Export failed — that conversation no longer exists.")
             return
-        safe = "".join(ch for ch in title if ch.isalnum() or ch in " -_").strip()
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export conversation", f"{safe or 'conversation'}.md",
-            "Markdown files (*.md)")
-        if not path:
-            return
-        try:
-            Path(path).write_text(text, encoding="utf-8")
-        except OSError as exc:
-            self.log(f"Export failed: {exc}")
-            return
-        self.log(f"Exported conversation to {path}")
+        model = project = None
+        if conversation_id is not None:
+            model, project = self.store.meta(conversation_id)
+        ExportChatDialog(self, title, messages, model, project).exec()
+
+    def export_current_chat(self):
+        """The hamburger menu's Export chat…: the conversation in
+        front of the owner, titled the way the store titles it —
+        the first line of its first real user message."""
+        title = "Conversation"
+        for message in self.messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                title = content.strip().splitlines()[0][:64]
+                break
+        self.export_conversation(self.conversation_id, title)
 
     def delete_conversation(self, conversation_id):
         if conversation_id == self.conversation_id and (

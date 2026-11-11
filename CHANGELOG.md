@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-11 — Export & Convert
+- Export chat: the open conversation (hamburger menu) or a saved one (right-click in history) exports to PDF, Markdown, or HTML, with images embedded at the turn they belong to; the open chat exports with its images — saved chats are stored text-only by design today, and the export dialog says so when a chat has no images
+- Markdown exports copy images into a matching _assets folder and link them
+- New Converter window: choose a file, pick from the formats that file can become, Convert — documents (PDF/DOCX/ODT to text or Markdown; Markdown/text/HTML to PDF), data (JSON to CSV, CSV to JSON), images (PNG/JPG/BMP/WebP), and, when ffmpeg is installed, audio between formats, video between formats, video to its audio track, and video to GIF
+- Audio-to-text is offered when a transcription backend is set up
+- If ffmpeg is not installed, one line in the converter window says so with the install command; everything else works
+
 ## 2026-11-11 — Parallel agents
 - Mission Control has a Parallel Jobs section: start a job with a task, a project, and a model, and watch its state, elapsed time, and current step
 - Code jobs run in their own git worktree of the project — isolated from your files and from each other; read-only jobs (research, design, review) run against the real project and file results in that mode's folder
