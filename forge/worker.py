@@ -1051,6 +1051,14 @@ class AgentWorker(QThread):
                  light_machine: bool = False):
         super().__init__()
         self.client, self.model = client, model
+        # StartFix (2026-11-11): a client that can report an
+        # automatic model-start retry (OllamaClient, and the
+        # ProviderClient facade forwarding to it) gets this worker's
+        # session log as its hook, so the retry is on the record in
+        # plain words. Clients without the attribute — the seam's
+        # many test doubles — are left exactly as before.
+        if hasattr(client, "on_start_retry"):
+            client.on_start_retry = self._note_start_retry
         self.messages = [dict(m) for m in messages]
         self.options, self.workspace = options, workspace
         # Item #64: this turn's own PluginContext snapshot (the
@@ -1324,6 +1332,12 @@ class AgentWorker(QThread):
     def _log(self, kind: str, **fields):
         if self.eventlog is not None:
             self.eventlog.record(kind, model=self.model, **fields)
+
+    def _note_start_retry(self, line: str):
+        """StartFix: the client's one automatic retry of a timed-out
+        model start, filed in the session log in plain words so a
+        later diagnosis can see the turn recovered — or tried to."""
+        self._log("model_start_retry", detail=line)
 
     def _schemas(self):
         all_schemas = TOOL_SCHEMAS + [entry[0] for entry in self.extra_tools.values()]

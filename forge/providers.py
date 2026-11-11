@@ -43,8 +43,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .ollama_client import (CancelWatch, OllamaClient, OllamaError,
-                            ensure_user_message)
+from .ollama_client import (START_TIMEOUT_MESSAGE, CancelWatch,
+                            OllamaClient, OllamaError,
+                            ensure_user_message, llama_start_timeout)
 
 
 PROVIDERS = ("groq", "gemini", "exaone")
@@ -1192,6 +1193,17 @@ class ProviderClient:
     def base_url(self, value):
         self.local.base_url = str(value).rstrip("/")
 
+    @property
+    def on_start_retry(self):
+        # StartFix: the local client's model-start retry log hook,
+        # forwarded so a worker holding the facade wires its session
+        # log exactly as it would a bare OllamaClient.
+        return getattr(self.local, "on_start_retry", None)
+
+    @on_start_retry.setter
+    def on_start_retry(self, hook):
+        self.local.on_start_retry = hook
+
     def _provider_client(self, provider):
         return create_provider_client(
             provider, self.config, self.local.base_url,
@@ -1357,7 +1369,13 @@ class ProviderClient:
         # same words the chat path shows).
         plain = _rate_limit_message(
             PROVIDER_LABELS.get(provider, "Provider"), scrubbed)
-        return plain if plain is not None else scrubbed
+        if plain is not None:
+            return plain
+        # StartFix: the llama-server start timeout reads as the same
+        # plain line on every surface, this one included.
+        if llama_start_timeout(scrubbed):
+            return START_TIMEOUT_MESSAGE
+        return scrubbed
 
     def chat_stream(self, model, messages, options, tools,
                     images=None, keep_alive="30m", cancel_event=None):

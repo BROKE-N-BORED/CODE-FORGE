@@ -5,6 +5,7 @@ import ipaddress
 import json
 import socket
 import threading
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -275,6 +276,31 @@ def normalize_history(messages: list[dict]) -> tuple[list[dict], list[str]]:
 
 _TEMPLATE_MARKERS = ("jinja", "template", "no user query")
 
+# StartFix (owner-PC find, 2026-11-11): Ollama refusing a generation
+# with HTTP 500 "timed out waiting for llama-server to start" means it
+# gave up waiting for the model's runner process to come up — on the
+# owner's hard-drive machine, usually while the disk is busy loading
+# or swapping models. The failure is transient and precedes any
+# token, so chat_stream retries it exactly once (below); when the
+# retry also fails, this is the one plain line the owner sees, with
+# the raw body preserved on OllamaError.raw exactly like the
+# template line and the provider rate-limit line.
+LLAMA_START_TIMEOUT_MARKER = "timed out waiting for llama-server to start"
+
+START_TIMEOUT_MESSAGE = (
+    "Ollama couldn't start the model in time. On a hard-drive "
+    "machine this usually means the disk was busy loading or "
+    "swapping models. Nothing was lost — send the message again. "
+    "The raw error is kept in the session log.")
+
+START_RETRY_LOG_LINE = "Model start timed out — retrying once"
+
+
+def llama_start_timeout(detail: str) -> bool:
+    """True when an Ollama error body is the llama-server start
+    timeout — Ollama's own wording, matched on the body text."""
+    return LLAMA_START_TIMEOUT_MARKER in (detail or "").lower()
+
 
 def friendly_http_error(code: int, detail: str) -> str | None:
     """Note 26: a template-rejection 500 becomes one plain-language line
@@ -282,6 +308,8 @@ def friendly_http_error(code: int, detail: str) -> str | None:
     worker can keep it in the session log for diagnosis."""
     if code < 500:
         return None
+    if llama_start_timeout(detail):
+        return START_TIMEOUT_MESSAGE
     low = (detail or "").lower()
     if any(marker in low for marker in _TEMPLATE_MARKERS):
         return ("The model's chat template rejected this conversation's shape "
@@ -302,6 +330,14 @@ class OllamaClient:
         # cached None (unresolvable) is also kept: keyed by model
         # name, so switching models is the only invalidation.
         self._context_lengths: dict = {}
+        # StartFix: chat_stream's one automatic retry of a generation
+        # whose model start timed out. on_start_retry is an optional
+        # plain-words log hook (the worker wires it to the session
+        # log); None — bare constructions, test doubles — retries
+        # silently. start_retry_delay is the pause in seconds before
+        # the retry; injectable so tests never wait on it.
+        self.on_start_retry = None
+        self.start_retry_delay = 3.0
 
     def _get(self, path: str):
         req = urllib.request.Request(self.base_url + path)
@@ -420,35 +456,61 @@ class OllamaClient:
             messages = [dict(m) for m in messages]
             messages[-1] = {**messages[-1], "images": images}
         payload = {"model": model, "messages": messages, "stream": True, "options": options, "tools": tools, "keep_alive": keep_alive}
-        request = urllib.request.Request(
-            self.base_url + "/api/chat", data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
-        # Sweep R4: with a cancel event, a watch force-closes the
-        # live response the moment the event fires, so a stream that
-        # stalls mid-generation (no bytes for the consumer's
-        # per-event cancel check to run against) still stops at
-        # once. No event -> no watch -> the legacy path untouched.
-        watch = CancelWatch(cancel_event) if cancel_event is not None else None
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                if watch is not None:
-                    watch.register(response)
-                for raw in response:
-                    if raw.strip():
-                        yield json.loads(raw.decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")
-            friendly = friendly_http_error(exc.code, detail)
-            if friendly:
-                raise OllamaError(friendly, raw=f"HTTP {exc.code}: {detail}") from exc
-            raise OllamaError(f"Ollama returned HTTP {exc.code}: {detail}") from exc
-        except Exception as exc:
-            # Sweep R4: a read broken by the cancel watch is a clean
-            # end-of-stream, not a failure — swallowing it here lets
-            # the consumer's own cancel checks settle the turn.
-            if cancel_event is not None and cancel_event.is_set():
+        # StartFix: the attempt loop. Attempt 1 is the generation
+        # exactly as before; a llama-server start timeout (HTTP 500,
+        # Ollama's own wording) raised BEFORE any chunk was yielded
+        # earns exactly one retry after a short pause — the failure
+        # is transient and precedes every token, so the owner never
+        # sees it. Any other error, any error after a chunk, and a
+        # second start timeout all take the single-attempt path
+        # below unchanged (the second start timeout surfaces as the
+        # plain START_TIMEOUT_MESSAGE via friendly_http_error, raw
+        # body preserved on OllamaError.raw).
+        attempt = 0
+        while True:
+            attempt += 1
+            emitted = False
+            request = urllib.request.Request(
+                self.base_url + "/api/chat", data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            # Sweep R4: with a cancel event, a watch force-closes the
+            # live response the moment the event fires, so a stream that
+            # stalls mid-generation (no bytes for the consumer's
+            # per-event cancel check to run against) still stops at
+            # once. No event -> no watch -> the legacy path untouched.
+            watch = CancelWatch(cancel_event) if cancel_event is not None else None
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    if watch is not None:
+                        watch.register(response)
+                    for raw in response:
+                        if raw.strip():
+                            emitted = True
+                            yield json.loads(raw.decode("utf-8"))
                 return
-            raise OllamaError(f"Ollama request failed: {exc}") from exc
-        finally:
-            if watch is not None:
-                watch.release()
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")
+                if attempt == 1 and not emitted and llama_start_timeout(detail):
+                    if self.on_start_retry is not None:
+                        try:
+                            self.on_start_retry(START_RETRY_LOG_LINE)
+                        except Exception:
+                            # A log hook must never break a generation.
+                            pass
+                    if self.start_retry_delay > 0:
+                        time.sleep(self.start_retry_delay)
+                    continue
+                friendly = friendly_http_error(exc.code, detail)
+                if friendly:
+                    raise OllamaError(friendly, raw=f"HTTP {exc.code}: {detail}") from exc
+                raise OllamaError(f"Ollama returned HTTP {exc.code}: {detail}") from exc
+            except Exception as exc:
+                # Sweep R4: a read broken by the cancel watch is a clean
+                # end-of-stream, not a failure — swallowing it here lets
+                # the consumer's own cancel checks settle the turn.
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                raise OllamaError(f"Ollama request failed: {exc}") from exc
+            finally:
+                if watch is not None:
+                    watch.release()

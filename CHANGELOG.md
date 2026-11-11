@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-11 — Ollama start-timeout fix
+- When Ollama fails to start a local model in time ("timed out waiting for llama-server to start", seen on slow hard drives while models load or swap), Forge now waits 3 seconds and retries the generation once on its own, and logs the retry in the session log.
+- If the retry also fails, the message is plain language — what happened, that nothing was lost, send the message again — with the raw Ollama text kept in the session log. No other errors are retried.
+
 ## 2026-11-11 — Light Machine profile
 - New Settings -> Behavior toggle "Light machine: one model in memory at a time" (default off; read at use time; off = previous behavior).
 - When on: local helper generations (reviewer, tester, SKRIBE grading, vision seat, knowledge distiller) unload their model when they finish; before a local model runs, a different resident local model is unloaded first, with a log line naming the swap; the knowledge distiller waits for the machine to be idle (up to about 10 minutes, then skips quietly); parallel jobs are capped to 1; local context budgets are capped at 4096. Provider models are never unloaded or capped; the Groq per-minute budget math is unchanged.
