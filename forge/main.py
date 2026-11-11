@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from string import Template
@@ -75,6 +76,7 @@ from . import palette as palette_mod
 from . import layout as layout_mod
 from . import parallel as parallel_mod
 from . import lightmachine as light_mod
+from . import designshell_bridge as dsbridge_mod
 from . import council as council_mod
 from . import seats as seats_mod
 from . import monitor as monitor_mod
@@ -2621,6 +2623,21 @@ class SettingsDialog(QDialog):
         self.light_machine.setChecked(
             bool(settings.get("light_machine", False)))
         form.addRow("Light machine", self.light_machine)
+        # Design Shell bridge (B1, 2026-11-11): where the shell is
+        # installed. Blank = auto (FORGE_DESIGN_SHELL, then
+        # ~/design-shell) — the bridge validates whatever it finds
+        # and says so in plain words when there is no install.
+        self.design_shell_path = QLineEdit(
+            _text("design_shell_path", ""))
+        self.design_shell_path.setPlaceholderText(
+            "~/design-shell (auto when blank)")
+        form.addRow("Design Shell folder", self.design_shell_path)
+        form.addRow("", caption(
+            "Design Shell folder (blank = auto: FORGE_DESIGN_SHELL "
+            "or ~/design-shell). The folder of the standalone "
+            "Design Shell install — the design_shell tool runs it "
+            "from there. The shell stays a separate program; Forge "
+            "only calls it."))
         form.addRow("", caption(
             "For small machines: one model in memory at a time. "
             "Helper models (reviewer, tester, and the other seats) "
@@ -2702,6 +2719,7 @@ class SettingsDialog(QDialog):
                 "forge_browser_engine": str(
                     self.forge_browser_engine.currentData() or "auto"),
                 "light_machine": self.light_machine.isChecked(),
+                "design_shell_path": self.design_shell_path.text().strip(),
                 "density": str(self.density.currentData() or "comfortable")}
 
 
@@ -14584,6 +14602,13 @@ class ForgeWindow(QMainWindow):
         # same checklist, same Approve / Edit / Kill gate, aliased
         # here so every existing caller reads the same widgets. It
         # opens on its own when a plan draft lands (on_plan_ready).
+        # Design Shell bridge (B1, 2026-11-11): the owner's gate
+        # for shell jobs — see _design_gate_from_result. The
+        # pending entry is (job, token); the token is minted ONLY
+        # here in the window layer, and the gate button consumes it
+        # to reach the bridge's approve path. No tool argument can
+        # mint or spend it.
+        self._design_gate_pending = None
         self.plan_win = PlanWindow(self)
         self.plan_list = self.plan_win.plan_list
         self.goldfish_view = self.plan_win.goldfish_view
@@ -14890,6 +14915,12 @@ class ForgeWindow(QMainWindow):
             "📜   Activity log panel",
             lambda: self.set_dock_open("activity", not self._dock_open.get("activity", True)))
         self.act_dock_activity.setCheckable(True); self.act_dock_activity.setChecked(True)
+        self.act_design_shell_approve = menu.addAction(
+            "🎨   Approve Design Shell job", self._design_gate_approve_clicked)
+        self.act_design_shell_approve.setToolTip(
+            "Approve the Design Shell job waiting at the gate "
+            "(enabled when a design_shell plan has been presented)")
+        self.act_design_shell_approve.setEnabled(False)
         self.act_plan_window = menu.addAction(
             "🗂   Plan window", self.open_plan_window)
         self.act_plan_window.setToolTip("The plan gate is its own window now, not a panel (owner directive, 2026-11-08)")
@@ -17392,6 +17423,90 @@ class ForgeWindow(QMainWindow):
         if win is not None:
             win.on_research_progress(payload)
 
+    # ---------- Design Shell bridge: tool + owner gate (B1) ----------
+
+    def _design_shell_tool(self, args, workspace):
+        """The design_shell tool handler: a thin adapter over
+        forge/designshell_bridge.Bridge, bound to the turn's
+        workspace and the live settings (the path field is read at
+        use time, like every Behavior setting). After a plan, the
+        result is routed to the owner's Design Shell gate — the
+        Research-room precedent of a gate living on its own surface
+        while the enforcement stays in one place: here the
+        enforcement is structural (the bridge's tool surface has
+        no approve path at all) and the gate spends a one-shot
+        token only this window can mint."""
+        bridge = dsbridge_mod.Bridge(
+            workspace, settings=self.settings,
+            ollama_url=str(self.settings.get(
+                "ollama_url", "http://127.0.0.1:11434")
+                or "http://127.0.0.1:11434"))
+        result = bridge.act(args)
+        action = str((args or {}).get("action", "") or "").strip().lower()
+        if action == "plan":
+            self._design_gate_from_result(result)
+        if action == "build":
+            self._record_artifact(
+                "design", "Design Shell build",
+                result, workspace=workspace)
+        return result
+
+    def _design_gate_from_result(self, result):
+        """A design_shell plan result parks its job at the owner's
+        gate: the pending entry (job + one-shot token) is recorded,
+        the gate menu action lights up, and the activity log tells
+        the owner where their call is made. Called with the tool's
+        result text — a plan that failed to draft records nothing."""
+        marker = "Design Shell job drafted: "
+        job = None
+        for line in (result or "").splitlines():
+            if line.startswith(marker):
+                job = line[len(marker):].strip() or None
+                break
+        if not job:
+            return
+        token = uuid.uuid4().hex
+        self._design_gate_pending = (job, token)
+        action = getattr(self, "act_design_shell_approve", None)
+        if action is not None:
+            action.setEnabled(True)
+        self.log(f"Design Shell plan drafted: job '{job}' is "
+                 "waiting at your gate. Menu → 'Approve Design "
+                 "Shell job' approves it in the shell; nothing "
+                 "builds before that.")
+        self._record_artifact(
+            "design", f"Design Shell plan — {job}", result)
+
+    def _design_gate_approve(self, token):
+        """Spend the gate: the token must match the pending entry
+        (only _design_gate_from_result mints one, only the menu
+        action below carries it), it is consumed either way, and
+        the shell's approve runs exactly once. Any other caller —
+        a stale click, a second click — gets plain words and the
+        shell is never touched."""
+        pending = getattr(self, "_design_gate_pending", None)
+        if not pending or token != pending[1]:
+            self.log("Design Shell approval refused: no matching "
+                     "job is waiting at the gate.")
+            return False
+        job = pending[0]
+        self._design_gate_pending = None
+        action = getattr(self, "act_design_shell_approve", None)
+        if action is not None:
+            action.setEnabled(False)
+        outcome = dsbridge_mod.approve_from_gate(
+            self.workspace, self.settings, job)
+        self.log(f"Design Shell: {outcome}")
+        return True
+
+    def _design_gate_approve_clicked(self):
+        pending = getattr(self, "_design_gate_pending", None)
+        if not pending:
+            self.log("No Design Shell job is waiting at the gate — "
+                     "a design_shell plan presents one first.")
+            return
+        self._design_gate_approve(pending[1])
+
     def on_plan_ready(self, steps):
         """The worker drafted a plan and is parked at the gate."""
         self.plan_state = planning_mod.new_plan(
@@ -18866,6 +18981,21 @@ class ForgeWindow(QMainWindow):
                                        _ws, str(args.get("name", "")),
                                        offset=int(v) if (v := str(args.get("offset") or 0)).lstrip("-").isdigit() else 0),
                                    False, "project knowledge")
+        # Design Shell bridge (B1, 2026-11-11): the design_shell
+        # tool drives the standalone shell as a subprocess
+        # (forge/designshell_bridge.py). Write-class (approval-
+        # gated) like the other subprocess/write tools — it runs
+        # the shell and writes imports into the project, so the
+        # mode fences treat it as Code-mode work. The handler is
+        # bound to THIS window's workspace + settings at tool-table
+        # build time (the read_source discipline), and the bridge
+        # itself never approves a job: approval reaches the shell
+        # only through the owner's gate below.
+        tools["design_shell"] = (
+            dsbridge_mod.DESIGN_SHELL_SCHEMA,
+            lambda args, _ws=self.workspace:
+                self._design_shell_tool(args, _ws),
+            True, "design shell")
         tools["read_source"] = (proj.READ_SOURCE_SCHEMA,
                                 # Item #64: the workspace is bound
                                 # NOW, at tool-table build time (the

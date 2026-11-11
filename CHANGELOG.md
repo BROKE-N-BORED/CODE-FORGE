@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-11 — Design Shell bridge (Phase B1)
+- New tool "design_shell": Forge can now call the standalone Design Shell program (installed separately) and drive it from chat — draft a design plan from words, search the shell's library, build approved jobs, generate batches of 3 reference images, file and import finished work.
+- Approval stays the owner's: a plan comes back as a plain-English summary and stops; the model cannot approve its own plan. Approving happens from the menu ("Approve Design Shell job") and spends a one-time gate token.
+- Built results are COPIED into the project (.forge/design/<job>/) with the description file and build report as lineage; the shell keeps its originals. Reference-image picking uses the shell's picker page (a link is given in the result).
+- Heavy work is guarded: a build or image batch refuses in plain words while a local model is resident in RAM, so the shell and Ollama don't thrash the machine. Set the shell's folder under Settings -> Behavior ("Design Shell folder"); keys stay in the environment only, never stored.
+
 ## 2026-11-11 — Header loaded-models readout
 - The bench header's gauge box gains a third row, MODELS, under RAM and CPU: it shows how many local models are resident in memory and their total weight (e.g. "2 · 3.0 GB"), or "none loaded", or a dash while Ollama isn't answering. Hovering lists each resident model with its size.
 - The data comes from the governor's existing Ollama report on the existing 3-second gauge refresh — no new timer, no extra calls. Provider models never appear (they don't run on this machine).
