@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-11-11 — Write canvas
+- The Write window is a canvas now: conversation, document, and suggestions side by side in one window
+- Type in the document and it auto-saves; every save keeps a steppable version
+- Suggest edits: the model proposes changes as cards; Apply lands that one edit, Dismiss drops it — nothing is applied without you
+- Length and tone steppers (five steps each) apply to a selection or the whole document
+- Selection edits show exactly which passage is targeted
+
+## 2026-11-11 — Project system
+- New projects are created prebuilt: the full .forge folder tree and starter files are laid down at creation, never a bare folder
+- Every folder carries a short PROMPT.md instruction file, and the agent loads the prompt for the folder a mode works in
+- Each project has its own settings file (.forge/settings.json), its own instructions, sources, and uploads
+- Creating a project asks its type (generic, app, tool, data, writing, music, game); a non-generic type sets the reference-build profile for that project
+- A new project starts as a git repo with a first commit of the scaffold, when git is available; creation succeeds either way and the receipt says which happened
+- Every project gets a brief.md (status, decisions, next) created at birth
+
+## 2026-11-11 — Project knowledge
+- Finished work distills itself into draft knowledge entries for the project (decisions, dead ends, current state)
+- Drafts wait in the Artifacts window: Approve files the entry and adds its summary to the project brief; Discard deletes it; nothing unapproved reaches the agent's context
+- Approved entries are indexed like sources (name + one-line summary at rest, full text read on demand with the new read_knowledge tool)
+- The project brief and the approved knowledge index are part of what the agent reads when a project opens
+- You can add a knowledge entry by hand from the same window
+
 ## 2026-11-11 — Research room
 - Research window rebuilt: pick sources (Web / project files / supplied files) and depth (Standard / Deep) in the room
 - The research plan is drafted and approved in the Research room; nothing browses before approval

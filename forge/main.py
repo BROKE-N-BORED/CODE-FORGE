@@ -64,6 +64,7 @@ from . import runfiles as runfiles_mod
 from . import debugger as debugger_mod
 from . import gitpanel as gitpanel_mod
 from . import artifacts as artifacts_mod
+from . import knowledge as knowledge_mod
 from . import diffview as diff_mod
 from . import snapshots as snap_mod
 from . import checkpoints as ckpt_mod
@@ -5926,12 +5927,15 @@ class ModeWindow(QWidget):
                   "each one suggests.",
         "ask": "Everything Ask mode answers this session collects "
                "here — read-only answers, cited from the code.",
-        "write": "The document workshop (Write/Research modes, "
-                 "2026-11-09): everything Write mode produces this "
-                 "session collects here, the Editor tab is the "
-                 "document pane — open a file, type in it, save it "
-                 "back to disk — and the Documents tab lists the "
-                 "project's own document files.",
+        "write": "The document workshop, Canvas-style "
+                 "(Write/Research modes, 2026-11-09; Canvas build, "
+                 "2026-11-11): the conversation sits beside one "
+                 "persistent document — type in it (it auto-saves), "
+                 "prompt the chat to edit it, rewrite a selected "
+                 "passage alone, step its length or tone, and apply "
+                 "the model's suggested edits one card at a time. "
+                 "The document is a real file in the project from "
+                 "the first moment.",
         "research": "Deep research, gated and budgeted "
                     "(rebuilt 2026-11-11): ask a question in the "
                     "room, pick sources and depth, and the drafted "
@@ -6237,14 +6241,27 @@ class ModeWindow(QWidget):
 
 
 class WriteWindow(ModeWindow):
-    """The Write mode room (Write/Research spec, 2026-11-09): a
-    ModeWindow plus its Editor tab — the document pane. The pane
-    is bound to a REAL file in the project: Open loads it, typing
-    edits it, Save writes it back to disk (the owner's own hands
-    need no approval), and a finished Write turn reloads it when
-    the file changed underneath and the pane holds no unsaved
-    typing. The third edit path is the selection rewrite: select
-    a passage, say how it should change, and the instruction goes
+    """The Write mode room (Write/Research spec, 2026-11-09),
+    rebuilt as a Canvas (2026-11-11, owner's directive — the room
+    was a ModeWindow frame with an Editor tab; Canvas is a split:
+    conversation beside ONE persistent document). The window's
+    single "Editor" tab holds a splitter: the room's session
+    conversation (transcript + composer) on the left, the
+    document column in the middle, and the suggestions column on
+    the right. The document is bound to a REAL file in the
+    project: Open loads it, typing edits it and AUTO-SAVES
+    (debounced) back to disk — every save snapshots into the
+    version stepping — Save writes it on demand (the owner's own
+    hands need no approval), and a finished Write turn reloads it
+    when the file changed underneath and the pane holds no
+    unsaved typing. Three edit paths, Canvas parity: type it
+    yourself; prompt the chat (the turn edits the file, the pane
+    reloads); select-and-instruct (only the passage changes).
+    Suggest-edits cards propose changes WITHOUT applying them —
+    Apply lands one card, Dismiss drops it. Length/tone steppers
+    ride one bench turn built by stepper_instruction. The third
+    edit path is the selection rewrite: select a passage, say
+    how it should change, and the instruction goes
     through the bench's normal turn machinery (the Recipes
     window's pattern: set the mode, set the input, send) with the
     selection pinned in the prompt, so the model's edit lands
@@ -6335,18 +6352,128 @@ class WriteWindow(ModeWindow):
         self.editor_status.setObjectName("muted")
         self.editor_status.setWordWrap(True)
         lay.addWidget(self.editor_status)
-        self.tabs.insertTab(1, page, "Editor")
-        # Rooms-are-tools (2026-11-10): open on the Editor — the
-        # working pane is this room's front door, not the
-        # (possibly empty) session transcript in front of it.
-        self.tabs.setCurrentIndex(1)
-        # Double-clicking a file in the Documents tab loads it
-        # into this Editor (2026-11-10 upgrade) — the tab stops
-        # being a separate read-only viewer for Write's own room.
+        # -- Canvas assembly (2026-11-11) ----------------------
+        # The Editor page built above becomes the document COLUMN
+        # of a split: conversation | document | suggestions. The
+        # steppers row joins the column between the document and
+        # the selection row.
+        self._suggest_pending = None
+        self._suggestion_cards = []
+        steppers_row = QHBoxLayout()
+        steppers_row.addWidget(QLabel("Length"))
+        self.length_combo = QComboBox()
+        self.length_combo.addItems(
+            ["Very short", "Shorter", "Same", "Longer", "Very long"])
+        self.length_combo.setCurrentText("Same")
+        self.length_combo.setToolTip(
+            "Step the length of the selection (or the whole "
+            "document) up or down")
+        steppers_row.addWidget(self.length_combo)
+        steppers_row.addWidget(QLabel("Tone"))
+        self.tone_combo = QComboBox()
+        self.tone_combo.addItems(
+            ["Very casual", "Casual", "Same", "Formal",
+             "Very formal"])
+        self.tone_combo.setCurrentText("Same")
+        self.tone_combo.setToolTip(
+            "Step the tone of the selection (or the whole "
+            "document) toward casual or formal")
+        steppers_row.addWidget(self.tone_combo)
+        self.steppers_apply_btn = QPushButton("Apply steppers")
+        self.steppers_apply_btn.setToolTip(
+            "Send the length/tone steps as a Write turn — the "
+            "edit lands in the document")
+        self.steppers_apply_btn.clicked.connect(self.apply_steppers)
+        steppers_row.addWidget(self.steppers_apply_btn)
+        steppers_row.addStretch(1)
+        lay.insertLayout(2, steppers_row)
+        self.selection_status = QLabel(
+            "No selection — the tools act on the whole document.")
+        self.selection_status.setObjectName("muted")
+        self.selection_status.setWordWrap(True)
+        lay.addWidget(self.selection_status)
+        self.doc_editor.selectionChanged.connect(
+            self._note_selection_target)
+        # The Documents listing leaves its tab page and becomes a
+        # strip at the foot of the document column — double-click
+        # still loads a file into the pane (2026-11-10 upgrade).
         _docs = self._doc_tabs.get("Documents")
         if _docs is not None:
             _docs[0].itemDoubleClicked.connect(
                 self._open_doc_from_list)
+            docs_label = QLabel("Documents — double-click loads "
+                                "a file into the pane")
+            docs_label.setObjectName("muted")
+            lay.addWidget(docs_label)
+            _docs[0].setMaximumHeight(84)
+            lay.addWidget(_docs[0])
+        # Suggestions column: the Suggest-edits cards land here,
+        # alongside the document, each applied or dismissed on
+        # its own. Nothing here ever touches the document until
+        # Apply.
+        sugg_page = QWidget()
+        sugg_lay = QVBoxLayout(sugg_page)
+        sugg_lay.setContentsMargins(0, 0, 0, 0); sugg_lay.setSpacing(6)
+        sugg_head = QHBoxLayout()
+        sugg_title = QLabel("SUGGESTIONS")
+        sugg_head.addWidget(sugg_title)
+        sugg_head.addStretch(1)
+        self.suggest_btn = QPushButton("Suggest edits")
+        self.suggest_btn.setToolTip(
+            "Ask the model to PROPOSE edits to the document (or "
+            "the selection) — proposals arrive as cards here and "
+            "change nothing until you Apply one")
+        self.suggest_btn.clicked.connect(self.suggest_edits)
+        sugg_head.addWidget(self.suggest_btn)
+        sugg_lay.addLayout(sugg_head)
+        self._suggest_scroll = QScrollArea()
+        self._suggest_scroll.setWidgetResizable(True)
+        sugg_body = QWidget()
+        self._suggest_cards_lay = QVBoxLayout(sugg_body)
+        self._suggest_cards_lay.setContentsMargins(0, 0, 0, 0)
+        self._suggest_cards_lay.setSpacing(6)
+        self._suggest_empty = QLabel(
+            "No suggestions yet. Suggest edits asks the model "
+            "for proposed changes; each one arrives as a card "
+            "you can Apply or Dismiss, one by one.")
+        self._suggest_empty.setObjectName("muted")
+        self._suggest_empty.setWordWrap(True)
+        self._suggest_cards_lay.addWidget(self._suggest_empty)
+        self._suggest_cards_lay.addStretch(1)
+        self._suggest_scroll.setWidget(sugg_body)
+        sugg_lay.addWidget(self._suggest_scroll, 1)
+        # Assemble the split inside the window's one tab: the
+        # base room's pages come out of the tab widget (clear
+        # removes pages without deleting them) and the session
+        # page becomes the conversation side.
+        session_page = self.tabs.widget(0)
+        self.tabs.clear()
+        split_page = QWidget()
+        split_lay = QVBoxLayout(split_page)
+        split_lay.setContentsMargins(0, 0, 0, 0)
+        self.canvas_splitter = QSplitter(Qt.Horizontal)
+        self.canvas_splitter.addWidget(session_page)
+        self.canvas_splitter.addWidget(page)
+        self.canvas_splitter.addWidget(sugg_page)
+        self.canvas_splitter.setStretchFactor(1, 1)
+        self.canvas_splitter.setSizes([300, 560, 300])
+        split_lay.addWidget(self.canvas_splitter)
+        self.tabs.addTab(split_page, "Editor")
+        # The window opens onto the split — the document beside
+        # the conversation is the front door (rooms-are-tools,
+        # 2026-11-10: the working pane, not the transcript).
+        self.tabs.setCurrentIndex(0)
+        self.resize(1160, 700)
+        # Auto-save: typing restarts a debounce; the tick writes
+        # the pane to its file (snapshotting as Save does) when
+        # the pane holds unsaved typing on the live draft.
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(1200)
+        self._autosave_timer.timeout.connect(self._autosave_tick)
+        self.doc_editor.textChanged.connect(
+            self._autosave_timer.start)
+        self.refresh_documents()
 
     def _note_editor_dirty(self):
         self._editor_dirty = True
@@ -6511,6 +6638,23 @@ class WriteWindow(ModeWindow):
         newer than the pane's copy — unless the owner has unsaved
         typing in the pane, which is never clobbered."""
         super().add_exchange(prompt, reply)
+        # Canvas (2026-11-11): a finished Suggest-edits turn is
+        # harvested into cards — parsed from the reply's OLD/NEW
+        # blocks. The cards are proposals only; the document is
+        # untouched until the owner Applies one.
+        if getattr(self, "_suggest_pending", None) is not None:
+            self._suggest_pending = None
+            blocks = self.parse_suggestion_blocks(reply or "")
+            if blocks:
+                self._add_suggestion_cards(blocks)
+                self.editor_status.setText(
+                    f"{len(blocks)} suggested edit(s) landed as "
+                    "cards — Apply the ones you want; the rest "
+                    "change nothing.")
+            else:
+                self.editor_status.setText(
+                    "That turn returned no suggestion blocks — "
+                    "nothing was proposed.")
         if not self._editor_path or self._editor_dirty:
             return
         target = Path(self._editor_path)
@@ -6683,6 +6827,287 @@ class WriteWindow(ModeWindow):
                 self.tabs.setCurrentIndex(i)
                 break
 
+    # -- Canvas: auto-save, steppers, suggest-edits cards -------
+    # (Canvas build, 2026-11-11)
+
+    LENGTH_PHRASES = {
+        "Very short": "make it much shorter (about half as "
+                      "long or less)",
+        "Shorter": "make it somewhat shorter",
+        "Longer": "make it somewhat longer",
+        "Very long": "make it much longer (roughly twice as "
+                     "long or more)",
+    }
+    TONE_PHRASES = {
+        "Very casual": "make the tone much more casual",
+        "Casual": "make the tone more casual",
+        "Formal": "make the tone more formal",
+        "Very formal": "make the tone much more formal",
+    }
+
+    @staticmethod
+    def stepper_instruction(length_label, tone_label):
+        """The shell-built instruction for one stepper setting:
+        the length phrase and/or the tone phrase, or None when
+        both steppers sit on Same (nothing to ask for). Plain
+        words any model can perform — the Canvas steppers are
+        prompts, not model features."""
+        parts = []
+        length = WriteWindow.LENGTH_PHRASES.get(
+            (length_label or "").strip())
+        if length:
+            parts.append(length)
+        tone = WriteWindow.TONE_PHRASES.get(
+            (tone_label or "").strip())
+        if tone:
+            parts.append(tone)
+        if not parts:
+            return None
+        return " and ".join(parts)
+
+    def _doc_rel(self):
+        """The pane file's project-relative path, for prompts."""
+        try:
+            return str(Path(self._editor_path).relative_to(
+                Path(self._workspace).resolve()))
+        except (ValueError, OSError):
+            return Path(self._editor_path).name
+
+    def _selected_text(self):
+        return self.doc_editor.textCursor().selectedText().replace(
+            "\u2029", "\n")  # Qt marks line breaks as U+2029
+
+    def _note_selection_target(self):
+        """The canvas says what is targeted: with a selection,
+        Rewrite/steppers/Suggest act on it alone; without one,
+        they act on the whole document."""
+        sel = self._selected_text()
+        if sel.strip():
+            self.selection_status.setText(
+                f"Selection targeted: {len(sel)} characters — "
+                "Rewrite selection, the steppers, and Suggest "
+                "edits act on it alone.")
+        else:
+            self.selection_status.setText(
+                "No selection — the tools act on the whole "
+                "document.")
+
+    def _autosave_tick(self):
+        """Auto-save (Canvas parity): a pause in typing writes
+        the pane to its real file — save_document snapshots the
+        version being overwritten, so auto-save feeds the
+        version stepping instead of bypassing it. Never fires
+        while VIEWING a saved version (that text is a view, not
+        the draft) or on an unbound pane."""
+        if self._viewing_stamp is not None or self._loading_version:
+            return
+        if not self._editor_path or not self._editor_dirty:
+            return
+        self.save_document()
+
+    def apply_steppers(self):
+        """One bench turn carrying the stepper instruction:
+        scoped to the selection when one is targeted (edit_file
+        on exactly that passage, like the rewrite path), else
+        the whole file (write_file with the full new content)."""
+        instruction = self.stepper_instruction(
+            self.length_combo.currentText(),
+            self.tone_combo.currentText())
+        if instruction is None:
+            self.editor_status.setText(
+                "Both steppers are on Same — pick a length or a "
+                "tone change first.")
+            return
+        if not self._editor_path:
+            self.editor_status.setText("Open a document first.")
+            return
+        rel = self._doc_rel()
+        selection = self._selected_text()
+        if selection.strip():
+            prompt = (
+                f"In Write mode, edit the file {rel}: rewrite "
+                f"ONLY the passage between the markers — "
+                f"{instruction}.\n\n"
+                f"<<<PASSAGE\n{selection}\nPASSAGE>>>\n\n"
+                "Use edit_file with old_text set to exactly that "
+                "passage and new_text set to your rewrite of it. "
+                "Change nothing else in the file.")
+            scope = "the selected passage"
+        else:
+            prompt = (
+                f"In Write mode, rewrite the whole file {rel}: "
+                f"{instruction}. Use write_file with the complete "
+                "new content of the file. Change nothing outside "
+                "this file.")
+            scope = "the whole document"
+        ok, why = self._bench_turn("Write", prompt)
+        if not ok:
+            self.editor_status.setText(
+                "Nothing was typed to send." if why == "empty"
+                else "The bench is not available to run the turn.")
+            return
+        self.editor_status.setText(
+            f"Steppers sent as a Write turn ({scope}) — the "
+            "edit lands in the document when the turn finishes.")
+
+    def suggest_edits(self):
+        """Ask the model to PROPOSE edits — the reply is
+        harvested into cards by add_exchange and changes
+        nothing by itself. Scoped to the selection when one is
+        targeted. The output contract is strict so a small
+        model can follow it: OLD/NEW blocks, exact passages."""
+        if not self._editor_path:
+            self.editor_status.setText("Open a document first.")
+            return
+        selection = self._selected_text()
+        scoped = bool(selection.strip())
+        passage = selection if scoped \
+            else self.doc_editor.toPlainText()
+        if not passage.strip():
+            self.editor_status.setText(
+                "The document is empty — there is nothing to "
+                "suggest edits for yet.")
+            return
+        rel = self._doc_rel()
+        prompt = (
+            f"In Write mode, suggest edits for the file {rel}. "
+            "Do NOT change the file and do NOT use any tools. "
+            "Reply with ONLY suggestion blocks in exactly this "
+            "form, at most 5:\n\n"
+            "--- OLD ---\n"
+            "<the exact passage, copied word for word>\n"
+            "--- NEW ---\n"
+            "<your replacement for that passage>\n\n"
+            + ("Suggest edits for this passage only:\n"
+               if scoped else
+               "The document:\n")
+            + f"<<<TEXT\n{passage}\nTEXT>>>")
+        ok, why = self._bench_turn("Write", prompt)
+        if not ok:
+            self.editor_status.setText(
+                "Nothing was typed to send." if why == "empty"
+                else "The bench is not available to run the turn.")
+            return
+        self._suggest_pending = {"scoped": scoped}
+        self.editor_status.setText(
+            "Suggestions requested — proposals land as cards "
+            "beside the document when the turn finishes. "
+            "Nothing is applied unless you Apply a card.")
+
+    @staticmethod
+    def parse_suggestion_blocks(reply):
+        """The OLD/NEW blocks out of a suggest-edits reply:
+        [(old, new), ...], at most 5, skipping empties,
+        no-ops, and blocks missing either marker."""
+        blocks = []
+        for chunk in str(reply or "").split("--- OLD ---")[1:]:
+            if "--- NEW ---" not in chunk:
+                continue
+            old, new = chunk.split("--- NEW ---", 1)
+            old = old.strip()
+            new = new.strip()
+            if old and new and old != new:
+                blocks.append((old, new))
+            if len(blocks) >= 5:
+                break
+        return blocks
+
+    def _add_suggestion_cards(self, blocks):
+        self._suggest_empty.setVisible(False)
+        for old, new in blocks:
+            card = {"old": old, "new": new}
+            frame = QFrame()
+            frame.setFrameShape(QFrame.StyledPanel)
+            card_lay = QVBoxLayout(frame)
+            card_lay.setContentsMargins(8, 6, 8, 6)
+            card_lay.setSpacing(4)
+            old_label = QLabel("− " + (old if len(old) <= 300
+                                       else old[:300] + "…"))
+            old_label.setWordWrap(True)
+            old_label.setToolTip(old)
+            card_lay.addWidget(old_label)
+            new_label = QLabel("→ " + (new if len(new) <= 300
+                                       else new[:300] + "…"))
+            new_label.setWordWrap(True)
+            new_label.setToolTip(new)
+            card_lay.addWidget(new_label)
+            btn_row = QHBoxLayout()
+            apply_btn = QPushButton("Apply")
+            apply_btn.setToolTip(
+                "Land this one edit in the document (the version "
+                "before it is snapshotted first)")
+            apply_btn.clicked.connect(
+                lambda _checked=False, c=card: self.apply_suggestion(c))
+            btn_row.addWidget(apply_btn)
+            dismiss_btn = QPushButton("Dismiss")
+            dismiss_btn.setToolTip("Drop this suggestion — the "
+                                   "document is not changed")
+            dismiss_btn.clicked.connect(
+                lambda _checked=False, c=card:
+                self.dismiss_suggestion(c))
+            btn_row.addWidget(dismiss_btn)
+            btn_row.addStretch(1)
+            card_lay.addLayout(btn_row)
+            card["frame"] = frame
+            self._suggestion_cards.append(card)
+            self._suggest_cards_lay.insertWidget(
+                self._suggest_cards_lay.count() - 1, frame)
+
+    def _remove_suggestion_card(self, card):
+        frame = card.get("frame")
+        if frame is not None:
+            self._suggest_cards_lay.removeWidget(frame)
+            frame.setParent(None)
+            frame.deleteLater()
+        if card in self._suggestion_cards:
+            self._suggestion_cards.remove(card)
+        if not self._suggestion_cards:
+            self._suggest_empty.setVisible(True)
+
+    def dismiss_suggestion(self, card):
+        """Dismiss drops the card. The document is not read,
+        not written, not touched."""
+        self._remove_suggestion_card(card)
+        self.editor_status.setText(
+            "Suggestion dismissed — the document is unchanged.")
+
+    def apply_suggestion(self, card):
+        """Apply lands ONE card: the passage must still be in
+        the document exactly once (a stale or ambiguous card is
+        refused in words, never guessed at). The on-disk version
+        is snapshotted before the edit, the edit lands in the
+        pane, and the pane is saved — so the applied edit is a
+        normal, steppable version of the real file."""
+        if not self._editor_path:
+            self.editor_status.setText("Open a document first.")
+            return
+        if self._viewing_stamp is not None:
+            self.editor_status.setText(
+                "You're viewing a saved version — step back to "
+                "the live file before applying a suggestion.")
+            return
+        text = self.doc_editor.toPlainText()
+        old, new = card["old"], card["new"]
+        if text.count(old) != 1:
+            self.editor_status.setText(
+                "That passage isn't in the document exactly once "
+                "anymore — the card can't be applied as-is. "
+                "Dismiss it, or make the change by hand.")
+            return
+        target = Path(self._editor_path)
+        self._take_snapshot(target)
+        cursor = self.doc_editor.document().find(old)
+        if cursor.isNull():
+            self.editor_status.setText(
+                "That passage could not be located in the pane "
+                "— the card was not applied.")
+            return
+        cursor.insertText(new)
+        self.save_document()
+        self._remove_suggestion_card(card)
+        self.editor_status.setText(
+            "Suggestion applied and saved — the version before "
+            "it is kept under Prev.")
 
 
 class CodeWindow(ModeWindow):
@@ -8404,6 +8829,44 @@ class ArtifactsWindow(QWidget):
         self.artifact_comment_status = QLabel("")
         comment_row.addWidget(self.artifact_comment_status, 1)
         lay.addLayout(comment_row)
+        # Project Knowledge gate (2026-11-11): entries the fast
+        # seat distilled from finished turns wait here as DRAFTS.
+        # Approving one moves it into the project's approved
+        # knowledge — the only knowledge a turn ever sees — and
+        # appends its summary to the project brief; discarding
+        # deletes it. The owner can also add an entry by hand,
+        # as a draft or approved on the spot. forge/knowledge.py
+        # owns the store; this window is only its gate.
+        self.knowledge_label = QLabel("Knowledge drafts")
+        self.knowledge_label.setObjectName("section")
+        lay.addWidget(self.knowledge_label)
+        self.knowledge_drafts_list = QListWidget()
+        self.knowledge_drafts_list.setMaximumHeight(110)
+        self.knowledge_drafts_list.currentRowChanged.connect(
+            self._show_draft)
+        lay.addWidget(self.knowledge_drafts_list)
+        knowledge_row = QHBoxLayout()
+        self.knowledge_approve_btn = QPushButton("✔ Approve")
+        self.knowledge_approve_btn.setToolTip(
+            "Approve the selected draft: it becomes project "
+            "knowledge and its summary joins the project brief")
+        self.knowledge_approve_btn.clicked.connect(self._approve_draft)
+        knowledge_row.addWidget(self.knowledge_approve_btn)
+        self.knowledge_discard_btn = QPushButton("✖ Discard")
+        self.knowledge_discard_btn.setToolTip(
+            "Delete the selected draft — it never reaches the agent")
+        self.knowledge_discard_btn.clicked.connect(self._discard_draft)
+        knowledge_row.addWidget(self.knowledge_discard_btn)
+        self.knowledge_add_btn = QPushButton("＋ Add entry")
+        self.knowledge_add_btn.setToolTip(
+            "Write a knowledge entry yourself — filed as a draft, "
+            "or approved immediately if you choose")
+        self.knowledge_add_btn.clicked.connect(self._add_knowledge)
+        knowledge_row.addWidget(self.knowledge_add_btn)
+        self.knowledge_status = QLabel("")
+        knowledge_row.addWidget(self.knowledge_status, 1)
+        lay.addLayout(knowledge_row)
+        self._knowledge_drafts: list[dict] = []
         self.refresh()
 
     def refresh(self):
@@ -8430,6 +8893,121 @@ class ArtifactsWindow(QWidget):
             self.artifacts_list.setCurrentRow(0)
         else:
             self.artifact_view.clear()
+        self._refresh_knowledge_drafts()
+
+    def _refresh_knowledge_drafts(self):
+        owner = self._owner
+        if owner is None:
+            return
+        self._knowledge_drafts = knowledge_mod.list_drafts(
+            owner.workspace)
+        approved = knowledge_mod.list_knowledge(owner.workspace)
+        self.knowledge_label.setText(
+            f"Knowledge drafts — {len(self._knowledge_drafts)} "
+            f"waiting · {len(approved)} approved")
+        self.knowledge_drafts_list.clear()
+        for e in self._knowledge_drafts:
+            label = e.get("title", "")
+            if len(label) > 42:
+                label = label[:41] + "…"
+            item = QListWidgetItem(label)
+            item.setToolTip(e.get("summary", ""))
+            self.knowledge_drafts_list.addItem(item)
+
+    def _selected_draft(self):
+        row = self.knowledge_drafts_list.currentRow()
+        if 0 <= row < len(self._knowledge_drafts):
+            return self._knowledge_drafts[row]
+        return None
+
+    def _show_draft(self, row):
+        owner = self._owner
+        if owner is None or not (0 <= row < len(self._knowledge_drafts)):
+            return
+        entry = self._knowledge_drafts[row]
+        path = (Path(owner.workspace) / ".forge" / "knowledge"
+                / "drafts" / str(entry.get("name", "")))
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if len(text) > ModeWindow._DOC_VIEW_CAP:
+            text = (text[:ModeWindow._DOC_VIEW_CAP]
+                    + "\n\n… (showing the head of the draft)")
+        self.artifact_view.setPlainText(text)
+
+    def _approve_draft(self):
+        owner = self._owner
+        entry = self._selected_draft()
+        if owner is None or entry is None:
+            self.knowledge_status.setText("Pick a draft first.")
+            return
+        try:
+            knowledge_mod.approve_draft(owner.workspace,
+                                        entry["name"])
+        except Exception as exc:
+            self.knowledge_status.setText(f"Approval failed: {exc}")
+            return
+        self.knowledge_status.setText(
+            f"Approved — “{entry.get('title', '')}” is project "
+            f"knowledge now, and its summary is on the brief.")
+        self._refresh_knowledge_drafts()
+
+    def _discard_draft(self):
+        owner = self._owner
+        entry = self._selected_draft()
+        if owner is None or entry is None:
+            self.knowledge_status.setText("Pick a draft first.")
+            return
+        if knowledge_mod.discard_draft(owner.workspace,
+                                       entry["name"]):
+            self.knowledge_status.setText(
+                f"Discarded — “{entry.get('title', '')}” is gone and "
+                f"never reached the agent.")
+        else:
+            self.knowledge_status.setText(
+                "That draft was already gone.")
+        self._refresh_knowledge_drafts()
+
+    def _add_knowledge(self):
+        owner = self._owner
+        if owner is None:
+            return
+        title, ok = QInputDialog.getText(
+            self, "Add knowledge entry",
+            "Title for the entry:")
+        if not ok or not title.strip():
+            return
+        body, ok = QInputDialog.getMultiLineText(
+            self, "Add knowledge entry",
+            "What should the project remember?")
+        if not ok or not body.strip():
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Add knowledge entry")
+        box.setText("File it as a draft, or approve it now?")
+        draft_btn = box.addButton("Save as draft",
+                                  QMessageBox.AcceptRole)
+        approve_btn = box.addButton("Approve now",
+                                    QMessageBox.AcceptRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is draft_btn:
+            knowledge_mod.add_entry(owner.workspace, title, body,
+                                    approved=False)
+            self.knowledge_status.setText(
+                "Saved as a draft — it waits for approval like any "
+                "distilled entry.")
+        elif clicked is approve_btn:
+            knowledge_mod.add_entry(owner.workspace, title, body,
+                                    approved=True)
+            self.knowledge_status.setText(
+                "Approved — it is project knowledge now, and its "
+                "summary is on the brief.")
+        else:
+            return
+        self._refresh_knowledge_drafts()
 
     def _show_selected(self, row):
         owner = self._owner
@@ -14112,6 +14690,42 @@ class ForgeWindow(QMainWindow):
         except Exception as exc:
             self.log(f"Artifact capture failed ({kind}): {exc}")
 
+    # ---------- Project Knowledge: distillation after a turn ----------
+
+    def _distill_knowledge_async(self, prompt, text, workspace=None):
+        """Project Knowledge (2026-11-11): a settled turn with filed
+        work gets distilled by the fast seat into a DRAFT knowledge
+        entry for its project (forge/knowledge.py). The drafting
+        runs on a daemon thread AFTER the turn has fully settled —
+        it never blocks or slows the turn it follows — and it can
+        only ever write a draft: the owner's gate in the Artifacts
+        window is what promotes an entry into context. Every failure
+        along the way is an event-log line (knowledge.distill itself
+        never raises); the owner's finished work is never held
+        hostage by a filing step. Seat resolution mirrors the bench's
+        own tester resolution, registry gate included."""
+        ws = workspace or self.workspace
+
+        def _run():
+            try:
+                roster = self.settings.get("governing_roster", "")
+                model, _refused = seats_mod.effective_seat_model(
+                    "tester", self.settings.get("tester_model", ""),
+                    self._seat_config, roster)
+                if providers_mod.is_provider_model(model) and \
+                        not providers_mod.model_allowed(
+                            self._provider_config(), model,
+                            scope="project", role="tester"):
+                    model = seats_mod.SEAT_DEFAULTS["tester"]
+                knowledge_mod.distill(
+                    self.client, model, ws, prompt, text,
+                    log=lambda msg: self.eventlog.record(
+                        "knowledge", note=msg))
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
     # ---------- Item #66: owner comments on artifacts ----------
 
     def _send_artifact_comment(self, entry, comment):
@@ -15072,14 +15686,53 @@ class ForgeWindow(QMainWindow):
             self.project_list.addWidget(btn)
         self.workspace_label.setText("PROJECT ROOT\n" + self.workspace)
 
+    def _ask_project_type(self, folder):
+        """Project System (2026-11-11): the type choice at creation.
+        Returns the chosen type, or None when the owner cancels —
+        cancelling never blocks the add; creation proceeds exactly
+        as it did before types existed. The dialog says plainly that
+        a non-generic type also sets the project's reference-build
+        profile (that is what the types ARE — the owner's profiles)."""
+        recorded = proj.project_settings(folder).get("project_type")
+        current = recorded if recorded in proj.PROJECT_TYPES else "generic"
+        choice, ok = QInputDialog.getItem(
+            self, "Project type",
+            "What kind of project is this? The type seeds the project's "
+            "brief and folder prompts; a non-generic type also sets the "
+            "project's reference-build profile.",
+            list(proj.PROJECT_TYPES),
+            proj.PROJECT_TYPES.index(current), False)
+        if not ok:
+            return None
+        return choice
+
     def add_project(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose a project folder", str(Path.home()))
         if not folder:
             return
+        ptype = self._ask_project_type(folder)
+        if ptype is not None:
+            # Lay the scaffold with the type recorded BEFORE
+            # set_project's own ensure runs (it is idempotent and
+            # keeps the recorded type from then on).
+            proj.ensure_project(folder, project_type=ptype)
         if not any(e.get("path") == folder for e in self.projects):
             self.projects.append({"name": Path(folder).name, "path": folder})
         self.set_project(folder)
         self.save_settings()
+        # Git start (2026-11-11): a project begins with version
+        # history — git init + the scaffold as its first snapshot.
+        # Any outcome is a receipt line, never a blocked creation.
+        git_status = proj.git_start(folder)
+        if git_status.get("status") == "started":
+            self.log(f"Git started for this project — first snapshot "
+                     f"{git_status.get('commit', '')} (the prebuilt scaffold).")
+        elif git_status.get("status") == "no-git":
+            self.log("Git isn't installed on this PC, so this project "
+                     "starts without version history.")
+        elif git_status.get("status") == "failed":
+            self.log(f"Git start failed for this project: "
+                     f"{git_status.get('error', '')}")
 
     def set_project(self, path: str):
         # Item #64: a detachable turn moves to the background and
@@ -15235,9 +15888,16 @@ class ForgeWindow(QMainWindow):
         instructions = proj.project_instructions(self.workspace)
         if instructions:
             parts.append("Project instructions (owner-written, this project only):\n" + instructions)
+        brief = knowledge_mod.brief_text(self.workspace)
+        if brief:
+            parts.append("Project brief — what this project is and where it "
+                         "stands (.forge/brief.md; read it first):\n" + brief)
         sources = proj.sources_index_text(self.workspace)
         if sources:
             parts.append(sources)
+        knowledge_idx = knowledge_mod.knowledge_index_text(self.workspace)
+        if knowledge_idx:
+            parts.append(knowledge_idx)
         hints = proj.hints_text(self.workspace)
         if hints:
             parts.append("Project hints — the owner's standing instructions for THIS project "
@@ -15268,6 +15928,22 @@ class ForgeWindow(QMainWindow):
         guidance = perm_mod.MODE_GUIDANCE.get(mode_now)
         if guidance:
             parts.append(guidance)
+        # Project System (2026-11-11): folder prompts are LIVE — the
+        # PROMPT.md of the folder this mode files into rides in the
+        # prompt, and the sources folder's prompt rides whenever its
+        # index does, so the folder rules are working instructions.
+        folder_prompt = proj.folder_prompt_text(self.workspace, mode_now)
+        if folder_prompt:
+            parts.append(
+                "Folder instructions — the PROMPT.md of the folder this "
+                "mode files into (.forge/, owner-editable). Follow them "
+                "for anything you file there:\n" + folder_prompt)
+        if sources:
+            sources_prompt = proj.sources_prompt_text(self.workspace)
+            if sources_prompt:
+                parts.append("Sources folder instructions "
+                             "(.forge/sources/PROMPT.md):\n"
+                             + sources_prompt)
         macro_idx = macros_mod.index_text(self.macros)
         if macro_idx:
             parts.append(macro_idx)
@@ -17340,6 +18016,17 @@ class ForgeWindow(QMainWindow):
                                   self._debug_tool_inspect, False, "debugger")
         tools["debug_stop"] = (debugger_mod.DEBUG_STOP_SCHEMA,
                                self._debug_tool_stop, False, "debugger")
+        tools["read_knowledge"] = (knowledge_mod.READ_KNOWLEDGE_SCHEMA,
+                                   # Workspace bound at build time,
+                                   # exactly like read_source beside it:
+                                   # approved entries only — the module
+                                   # confines reads to the approved
+                                   # folder, so a draft name reads as
+                                   # not-found.
+                                   lambda args, _ws=self.workspace: knowledge_mod.read_knowledge(
+                                       _ws, str(args.get("name", "")),
+                                       offset=int(v) if (v := str(args.get("offset") or 0)).lstrip("-").isdigit() else 0),
+                                   False, "project knowledge")
         tools["read_source"] = (proj.READ_SOURCE_SCHEMA,
                                 # Item #64: the workspace is bound
                                 # NOW, at tool-table build time (the
@@ -18222,6 +18909,11 @@ class ForgeWindow(QMainWindow):
                     "walkthrough", prompt_title, text,
                     workspace=stream["workspace"],
                     conversation_id=stream["conversation_id"])
+            # Project Knowledge: a settled background turn distills
+            # into a draft entry for ITS OWN project, exactly as a
+            # stage turn does (see on_finished).
+            self._distill_knowledge_async(
+                stream["prompt"], text, workspace=stream["workspace"])
         self.refresh_history()
         if outcome == "failed":
             self.log(f"Background turn in '{stream['title']}' FAILED: {error}")
@@ -19329,6 +20021,13 @@ class ForgeWindow(QMainWindow):
                 self._record_artifact(turn_mode, prompt_title, _text)
             elif turn_mode == "code":
                 self._record_artifact("walkthrough", prompt_title, _text)
+        # Project Knowledge: the same settled turn that just filed
+        # its mode-session exchange / artifact also gets distilled
+        # into a draft knowledge entry (fast seat, background
+        # thread, drafts only — see _distill_knowledge_async).
+        if not side and (_text or "").strip():
+            self._distill_knowledge_async(
+                getattr(self, "_turn_prompt", ""), _text)
         self._turn_mode = None
         self._turn_prompt = ""
         self._plan_settle_draft()
