@@ -27,7 +27,7 @@ Local use requires no account and no subscription. Optional cloud providers are 
 
 - **Plan gate.** Plans park until you approve them. A parked approval has no timer.
 - **Diff-first approvals.** File changes are shown as diffs or full content before they are written.
-- **Goldfish review.** An optional fresh-eyes pass reads every plan with a clean context and flags blockers before the gate.
+- **GoFish review.** An optional fresh-eyes pass reads every plan with a clean context and flags blockers before the gate.
 - **SKRIBE grading.** Finished work is graded against a rubric before it is presented as done.
 
 ### Seats

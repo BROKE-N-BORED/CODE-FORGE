@@ -4,7 +4,7 @@
 
 - SKRIBE grading gets an optional Decisions lane: with the lane on, each queued draft is scored through the Gemini Decisions API (free tier, on the existing Gemini key) and the shell's finalize rule still makes the call. Off by default; when off, grading works exactly as before.
 - Review window gains finishing touches: Docstrings and Unit tests checkboxes plus a "Run finishing touches" button that sends the review's files to the Driver for docstrings or tests.
-- The plan-review pass is renamed GoFish (was Goldfish). Old plans, the toggle, and the skill's on/off state carry over automatically.
+- The plan-review pass is now GoFish. Old plans, the toggle, and the skill's on/off state carry over automatically.
 - Removed third-party brand names from code comments and documentation throughout the tree.
 - Fixed: a canvas test failed when an earlier test left the app in Plan mode. The test now sets its own mode.
 - Full test suite green: 2,480 tests, zero failures.
