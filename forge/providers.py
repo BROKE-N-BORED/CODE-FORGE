@@ -731,7 +731,7 @@ def _to_groq_messages(messages, images=None):
                 call_id = str(call.get("id") or f"call_{mi}_{ci}")
                 args = fn.get("arguments") or {}
                 if not isinstance(args, str):
-                    # Manus study M1: deterministic bytes for the same
+                    # Study item M1: deterministic bytes for the same
                     # arguments, whatever order the dict was built in.
                     args = json.dumps(args, sort_keys=True)
                 calls.append({"id": call_id, "type": "function",
@@ -857,7 +857,7 @@ class GroqClient(_ProviderHTTP):
         def make_request():
             return urllib.request.Request(
                 self.base_url + "/chat/completions",
-                # Manus study M1: sorted keys — deterministic request
+                # Study item M1: sorted keys — deterministic request
                 # bytes for the same conversation (see ollama_client).
                 data=json.dumps(payload, sort_keys=True).encode("utf-8"),
                 headers=self._headers(content_type=True), method="POST")
@@ -1168,7 +1168,7 @@ class GeminiClient(_ProviderHTTP):
                 + ":streamGenerateContent?alt=sse")
         req = urllib.request.Request(
             self.base_url + path,
-            # Manus study M1: sorted keys, as in the Groq path above.
+            # Study item M1: sorted keys, as in the Groq path above.
             data=json.dumps(payload, sort_keys=True).encode("utf-8"),
             headers=self._headers(content_type=True), method="POST")
         for data in self._sse(req, cancel_event=cancel_event):

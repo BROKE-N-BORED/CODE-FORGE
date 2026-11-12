@@ -1,5 +1,5 @@
 """Reference-Driven Build — the universal reference-first workflow
-(pure stdlib, no Qt, like modes.py / planning.py / goldfish.py).
+(pure stdlib, no Qt, like modes.py / planning.py / gofish.py).
 
 Owner directive (2026-11-09): take the workflow from Shikhar's
 Sumiro thread — reference first, break it down, build a slice,

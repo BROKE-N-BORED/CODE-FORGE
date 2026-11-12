@@ -6,6 +6,11 @@ finished the shell issues ONE batched grading pass (worker.py drives
 it) instructing the session model to load the SKRIBE skill and grade
 every queued file. Grading rides the session's own model only — the
 governing-seat rule: no other model, stock or otherwise, may grade.
+One exception: the Decisions fast lane (worker.py, settings
+`skribe_decisions`, default off) scores files through the Gemini
+Decisions API — but that endpoint only measures a score; the shell's
+deterministic rule makes the finalize/revise call, so no model holds
+the grader seat there either.
 
 The model reports verdicts as prose; the shell trusts only the exact
 machine line

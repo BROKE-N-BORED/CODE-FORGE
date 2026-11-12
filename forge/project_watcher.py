@@ -1,4 +1,4 @@
-"""Owner-enabled file-change watcher (Manus fix F7 — the M11
+"""Owner-enabled file-change watcher (Fix F7 — the M11
 remainder the M13 module docstring named, not invented).
 
 A project tree the owner edits outside the Forge — another

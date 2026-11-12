@@ -1,4 +1,4 @@
-"""Gated local event triggers (Manus study M13, Tier 2 #5).
+"""Gated local event triggers (Study item M13, Tier 2 #5).
 
 A local event the shell already observes — a Tester run that came
 back VERDICT: FAIL, a run that crashed — may PROPOSE an action to
@@ -16,7 +16,7 @@ decided within PROPOSAL_TTL_SECONDS dies on its own — it never
 queues forever and can never execute late.
 
 What is NOT covered, on purpose:
-- File-changed events (Manus fix F7, the M11 remainder):
+- File-changed events (Fix F7, the M11 remainder):
   forge/project_watcher.py watches the project tree when the
   owner enables it (Settings → File watcher, default OFF) and
   raises a file_changed proposal through the existing path —
@@ -53,7 +53,7 @@ PROPOSAL_TTL_SECONDS = 24 * 60 * 60
 MAX_PROPOSALS = 50
 STORE_NAME = "proposals.json"
 
-# Manus fix F7: file_changed joins the two M13 kinds — a file
+# Fix F7: file_changed joins the two M13 kinds — a file
 # the owner (or another tool) changed outside the Forge, raised
 # by the owner-enabled watcher only.
 PROPOSAL_KINDS = ("tester_failed", "run_failed", "file_changed")
@@ -143,7 +143,7 @@ def fix_turn_task(proposal: dict) -> str:
 
 def review_turn_task(proposal: dict) -> str:
     """The task text an accepted file_changed proposal starts
-    as an ordinary Code turn (Manus fix F7). Built from the
+    as an ordinary Code turn (Fix F7). Built from the
     record only — the file the watcher saw change. The turn
     looks and reports; it changes nothing unless the owner
     asks, because the change came from outside the Forge and

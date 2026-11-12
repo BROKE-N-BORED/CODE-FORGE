@@ -365,7 +365,7 @@ MODE_GUIDANCE = {
                  "carries its source number in brackets — a claim "
                  "with no number is a defect. What the research could "
                  "not answer goes under Open questions, plainly. "
-                 "AUTHORITATIVE SOURCES FIRST (Manus study M11): "
+                 "AUTHORITATIVE SOURCES FIRST: "
                  "before you trust a page, check the authoritative "
                  "source — the official docs, the official API "
                  "reference, the project's own repository. A scraped "
@@ -382,7 +382,7 @@ MODE_GUIDANCE = {
                  "tools and must not write tool-call markup or XML."),
 }
 
-# Review voices (CR5 — CodeRabbit Tier 1 #5, 2026-11-11): how much
+# Review voices (CR5 — Review Tier 1 #5, 2026-11-11): how much
 # a Review turn says, and how hard it pushes. The finding format,
 # the Walkthrough and the severity scale never change — only the
 # voice. "chill" is the default and is exactly MODE_GUIDANCE's
@@ -476,7 +476,7 @@ def mode_allows(mode: str, name: str, args: dict, classes: dict | None = None) -
         # check: browse_open is approval-gated at the plugin (a
         # "write" class), but opening and reading pages IS this
         # mode's read work. Whether a call may RUN yet is the plan
-        # gate's business — since Manus study M5 the verbs stay in
+        # gate's business — since Study item M5 the verbs stay in
         # the offered surface for the whole session and the gate
         # refuses the call at execution (the worker's
         # _research_refusal) until the owner approves a plan.
@@ -529,7 +529,7 @@ def mode_visible_tools(mode: str, names: list[str], classes: dict | None = None)
         # per call) + the two browse verbs BY NAME (browse_open's
         # plugin class is "write"; see RESEARCH_BROWSE_TOOLS).
         # Visibility here is the mode's ceiling and the session's
-        # whole surface (Manus study M5): the research plan gate
+        # whole surface (Study item M5): the research plan gate
         # no longer withholds the verbs from the offer — it
         # refuses their calls at execution until approval.
         return [n for n in names if tool_class(n, classes) == "read"

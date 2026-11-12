@@ -61,7 +61,7 @@ from . import fanout as fanout_mod
 from . import handoff as handoff_mod
 from . import exporting as export_mod
 from . import converting as convert_mod
-from . import goldfish as goldfish_mod
+from . import gofish as gofish_mod
 from . import context as context_mod
 from . import project_watcher as pwatch_mod
 from . import notes as notes_mod
@@ -76,6 +76,7 @@ from . import guidelines as guidelines_mod
 from . import review_state as review_state_mod
 from . import gate_checks as gate_checks_mod
 from . import linters as linters_mod
+from . import decisions as decisions_mod
 from . import diffview as diff_mod
 from . import snapshots as snap_mod
 from . import checkpoints as ckpt_mod
@@ -1568,8 +1569,8 @@ class CustomizeDialog(QDialog):
 
     def __init__(self, parent, skills, plugins, disabled_skills, disabled_plugins, config, rules=None,
                  skribe_writes=True, project_local=None, on_house=None,
-                 tools=None, disabled_tools=None, goldfish_review=True,
-                 offer_save_run_as_skill=False):
+                 tools=None, disabled_tools=None, gofish_review=True,
+                 offer_save_run_as_skill=False, skribe_decisions=False):
         super().__init__(parent)
         self.setWindowTitle("Customize — skills · plugins · connectors")
         self.setMinimumWidth(600)
@@ -1638,30 +1639,45 @@ class CustomizeDialog(QDialog):
         self._skribe_box.setChecked(bool(skribe_writes))
         sk_lay.addWidget(self._skribe_box)
         skribe_note = QLabel("Grading runs on the session model itself — no other model judges "
-                             "(governing-seat rule). One batched pass per turn that writes; a "
-                             "\"revise\" verdict bounces the file back once, then unverified "
-                             "files are reported, never dropped. Off = writes behave as before. "
-                             "Turning the SKRIBE skill itself off above also disables the gate.")
+                             "(governing-seat rule) — unless the Decisions lane below is on. One "
+                             "batched pass per turn that writes; a \"revise\" verdict bounces the "
+                             "file back once, then unverified files are reported, never dropped. "
+                             "Off = writes behave as before. Turning the SKRIBE skill itself off "
+                             "above also disables the gate.")
         skribe_note.setObjectName("muted"); skribe_note.setWordWrap(True); sk_lay.addWidget(skribe_note)
-        # Item #56: Goldfish spec review toggle — packaged like the
+        # Decisions fast lane (2026-11-12): grade through the Gemini
+        # Decisions API instead of a local generation. Default off —
+        # opt-in only, like the save-run-as-skill offer.
+        self._decisions_box = QCheckBox("SKRIBE Decisions lane — grade written files with the "
+                                        "Gemini Decisions API instead of a local grading pass")
+        self._decisions_box.setChecked(bool(skribe_decisions))
+        sk_lay.addWidget(self._decisions_box)
+        decisions_note = QLabel("Uses your Gemini key; each written file's contents go to "
+                                "Google's free tier (Google may use free-tier data to improve "
+                                "its products). Scores come back as numbers in ~250 ms a file "
+                                "instead of minutes of local generation — and the shell still "
+                                "makes the finalize call from the score. Any failure falls back "
+                                "to the local grading pass.")
+        decisions_note.setObjectName("muted"); decisions_note.setWordWrap(True); sk_lay.addWidget(decisions_note)
+        # Item #56: GoFish spec review toggle — packaged like the
         # SKRIBE gate above (a skill + this toggle; the values()
-        # tuple keeps its shape, so the state rides goldfish_on(),
+        # tuple keeps its shape, so the state rides gofish_on(),
         # the same side door requested_editor uses).
-        self._goldfish_box = QCheckBox("Goldfish plan review — a fresh reviewer-seat pass "
+        self._gofish_box = QCheckBox("GoFish plan review — a fresh reviewer-seat pass "
                                        "reads each Plan-mode draft before the approval gate")
-        self._goldfish_box.setChecked(bool(goldfish_review))
-        sk_lay.addWidget(self._goldfish_box)
-        goldfish_note = QLabel("The reviewer sees ONLY the plan and the files it names — no "
+        self._gofish_box.setChecked(bool(gofish_review))
+        sk_lay.addWidget(self._gofish_box)
+        gofish_note = QLabel("The reviewer sees ONLY the plan and the files it names — no "
                                "conversation (the firewall that makes the review worth having). "
                                "Two stages (Zoom Out, Comprehension) plus a mechanical check that "
                                "named files/functions exist; findings are advisory and never block "
                                "approval. Cost: each stage is a full extra local generation — "
                                "minutes on this PC — and a Blocker/Major earns one revision "
-                               "round. Turning the goldfish skill itself off above also "
+                               "round. Turning the gofish skill itself off above also "
                                "disables the pass.")
-        goldfish_note.setObjectName("muted"); goldfish_note.setWordWrap(True); sk_lay.addWidget(goldfish_note)
-        # Manus study M10: offer to save a finished run as a skill —
-        # default OFF, packaged like the Goldfish toggle above (a
+        gofish_note.setObjectName("muted"); gofish_note.setWordWrap(True); sk_lay.addWidget(gofish_note)
+        # Study item M10: offer to save a finished run as a skill —
+        # default OFF, packaged like the GoFish toggle above (a
         # checkbox + this accessor; the values() tuple keeps its
         # shape). The offer fires only after a plan completes, and
         # the draft lands DISABLED until the owner enables it.
@@ -2060,16 +2076,23 @@ class CustomizeDialog(QDialog):
             del self._rules[row]
             self._refresh_rules_list()
 
-    def goldfish_on(self):
-        """Item #56: the Goldfish toggle's state. Read by
+    def gofish_on(self):
+        """Item #56: the GoFish toggle's state. Read by
         ForgeWindow.open_customize after the dialog closes — the
         values() tuple keeps its long-standing 6-element shape."""
-        return bool(self._goldfish_box.isChecked())
+        return bool(self._gofish_box.isChecked())
+
+    def decisions_on(self):
+        """Decisions fast lane (2026-11-12): the lane toggle's state.
+        Read by ForgeWindow.open_customize after the dialog closes —
+        the values() tuple keeps its long-standing 6-element shape,
+        like gofish_on()."""
+        return bool(self._decisions_box.isChecked())
 
     def save_skill_offer_on(self):
-        """Manus study M10: the save-run-as-skill toggle's state.
+        """Study item M10: the save-run-as-skill toggle's state.
         Read by ForgeWindow.open_customize after the dialog closes
-        — the values() tuple keeps its shape, like goldfish_on()."""
+        — the values() tuple keeps its shape, like gofish_on()."""
         return bool(self._save_skill_box.isChecked())
 
     def _secret_widgets(self, key, edit):
@@ -2729,7 +2752,7 @@ class SettingsDialog(QDialog):
         self.light_machine.setChecked(
             bool(settings.get("light_machine", False)))
         form.addRow("Light machine", self.light_machine)
-        # File watcher (Manus fix F7, M11 remainder): the owner
+        # File watcher (Fix F7, M11 remainder): the owner
         # enables a QFileSystemWatcher on the project tree; a
         # changed file raises a proposal through the existing
         # path only — it never auto-applies, never runs tools,
@@ -4994,7 +5017,7 @@ class PaletteDialog(QDialog):
 
 
 class FanOutDialog(QDialog):
-    """Manus fix F5: the M12 fan-out entry point on the desktop.
+    """Fix F5: the M12 fan-out entry point on the desktop.
     The owner types the batch — one item per line — and asserts
     independence with the checkbox: the batch fans ONLY when the
     owner says none of the items waits on another. The checkbox
@@ -7903,6 +7926,40 @@ class ReviewWindow(ModeWindow):
             self.run_linters_btn.clicked.connect(
                 self._run_linters)
             col_lay.addWidget(self.run_linters_btn)
+            # Tier 2 #3 (Finishing Touches): the two
+            # finishing moves, offered as checkboxes at the end of
+            # the review — docstrings and unit tests for the files
+            # the shown review names. Both run as Code turns
+            # through the existing bench wiring (the Tester seat
+            # has no write tools — it verifies the new tests on
+            # its normal run, it cannot write them). Nothing runs
+            # until Run is clicked; both checked sends both, the
+            # second queuing behind the first. Each run is
+            # recorded in the review under Finishing touches.
+            self.finishing_label = QLabel("Finishing touches")
+            col_lay.addWidget(self.finishing_label)
+            self.docstrings_check = QCheckBox("Docstrings")
+            self.docstrings_check.setToolTip(
+                "Add docstrings to the public functions, classes "
+                "and methods in the files this review names — a "
+                "Code turn, change nothing else.")
+            col_lay.addWidget(self.docstrings_check)
+            self.unittests_check = QCheckBox("Unit tests")
+            self.unittests_check.setToolTip(
+                "Write unit tests for the files this review names "
+                "— a Code turn. The Tester seat verifies the new "
+                "tests on its normal run.")
+            col_lay.addWidget(self.unittests_check)
+            self.run_finishing_btn = QPushButton(
+                "Run finishing touches")
+            self.run_finishing_btn.setToolTip(
+                "Run the checked finishing touches as Code turns "
+                "on the files this review names — docstrings "
+                "first, then unit tests. Each run is recorded in "
+                "the review under Finishing touches.")
+            self.run_finishing_btn.clicked.connect(
+                self._run_finishing_touches)
+            col_lay.addWidget(self.run_finishing_btn)
             self.review_state_status = QLabel("")
             self.review_state_status.setObjectName("muted")
             self.review_state_status.setWordWrap(True)
@@ -8048,6 +8105,136 @@ class ReviewWindow(ModeWindow):
             counts = modes_mod.finding_counts_text(parsed_lines)
             self.findings_label.setText(
                 f"Findings — {counts}" if counts else "Findings")
+        # T2-3: the finishing-touch checkboxes follow the shown
+        # review — unchecked, with a "requested" mark on any kind
+        # already recorded in it.
+        self._refresh_finishing_touches(full_text)
+
+    def _refresh_finishing_touches(self, review_text):
+        """T2-3: reset the Finishing Touches checkboxes for the
+        shown review — both unchecked, plain labels, then a
+        "↻ requested <when>" suffix on any kind already recorded
+        in this review. The boxes stay enabled: the owner may
+        re-run a touch, and each run records a new entry."""
+        if getattr(self, "docstrings_check", None) is None:
+            return
+        for check, kind, label in (
+                (self.docstrings_check, "Docstrings", "Docstrings"),
+                (self.unittests_check, "Unit tests", "Unit tests")):
+            check.setChecked(False)
+            requested = modes_mod.finishing_touched_for(
+                review_text or "", kind)
+            check.setText(
+                f"{label} ↻ requested {requested}" if requested
+                else label)
+
+    def _run_finishing_touches(self):
+        """T2-3: run the checked finishing touches as Code turns
+        on the files the shown review names — docstrings first,
+        then unit tests, so the tests are written against the
+        final code. Both checked sends both: the first runs and
+        the second queues behind it (the bench's message queue
+        fires it in order when the turn settles). A refused touch
+        is never recorded and stays checked; a sent one is
+        recorded in the review under ## Finishing touches, its
+        box unchecked, its label marked requested. The status
+        line says exactly what ran, what queued, and what did
+        not go out."""
+        if getattr(self, "docstrings_check", None) is None:
+            return
+        wanted = []
+        if self.docstrings_check.isChecked():
+            wanted.append("Docstrings")
+        if self.unittests_check.isChecked():
+            wanted.append("Unit tests")
+        if not wanted:
+            self.composer_status.setText(
+                "Check Docstrings and/or Unit tests first — "
+                "nothing is selected to run.")
+            return
+        review_path = getattr(self, "_current_review_path", "")
+        review_name = getattr(self, "_current_review_name", "")
+        files = modes_mod.review_files(
+            getattr(self, "_finding_lines", []))
+        if not review_path or not files:
+            self.composer_status.setText(
+                "This review names no files — open a review with "
+                "findings first.")
+            return
+        file_list = ", ".join(files)
+        prompts = {
+            "Docstrings": (
+                f"Add docstrings to the public functions, classes "
+                f"and methods in these files from review "
+                f"{review_name}: {file_list}. Follow the existing "
+                f"docstring style in each file; change nothing "
+                f"else, do not refactor, and verify by reading "
+                f"the files back."),
+            "Unit tests": (
+                f"Write unit tests for these files from review "
+                f"{review_name}: {file_list}. Put the tests where "
+                f"this project's tests live (or tests/ if there "
+                f"is no test folder yet); cover the main paths "
+                f"and one edge case per public function. Run the "
+                f"new tests and report the result."),
+        }
+        checks = {"Docstrings": self.docstrings_check,
+                  "Unit tests": self.unittests_check}
+        outcomes = []
+        record_failed = False
+        updated = None
+        for kind in wanted:
+            prompt = prompts[kind]
+            ok, _why = self._bench_turn("Code", prompt)
+            if not ok:
+                outcomes.append(
+                    f"{kind.lower()} did not go out — the bench "
+                    f"is not available")
+                break
+            # The bench settles the send three ways: started,
+            # queued behind a running turn, or refused (the
+            # parallel-turn cap). Only a refusal means it did
+            # not go out — and it is never recorded.
+            owner = self._owner
+            refusal = getattr(owner, "_send_refusal", None)
+            if refusal:
+                outcomes.append(
+                    f"{kind.lower()} did not go out — {refusal}")
+                break
+            queued = bool(getattr(owner, "_send_queued", False))
+            recorded = False
+            try:
+                from datetime import datetime
+                current = Path(review_path).read_text(
+                    encoding="utf-8", errors="replace")
+                updated = modes_mod.record_finishing_touch(
+                    current,
+                    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    kind, files, prompt)
+                Path(review_path).write_text(updated,
+                                             encoding="utf-8")
+                recorded = True
+            except Exception:
+                recorded = False
+            if not recorded:
+                record_failed = True
+            checks[kind].setChecked(False)
+            outcomes.append(
+                f"{kind.lower()} queued — they run when the "
+                f"current turn ends" if queued else
+                f"{kind.lower()} sent as a Code turn")
+        if updated is not None:
+            # The viewer still holds the pre-write text — refresh
+            # it first, so the re-rendered checkboxes show the
+            # new "requested" marks.
+            viewer = self._doc_tabs["Reviews"][1]
+            viewer.setPlainText(updated)
+            self._on_doc_shown("Reviews", Path(review_path))
+        status = "; ".join(outcomes) + "."
+        if record_failed:
+            status += (" One run could not be recorded in the "
+                       "review file.")
+        self.composer_status.setText(status)
 
     def fix_selected_finding(self):
         row = self.findings_list.currentRow() \
@@ -9204,7 +9391,7 @@ class ResearchWindow(ModeWindow):
 
 
 class ProposalsWindow(QWidget):
-    """Manus fix F6: the proposals room — the M13 proposals the
+    """Fix F6: the proposals room — the M13 proposals the
     owner can still decide, oldest first, each with Accept /
     Decline wired to the window's decide_proposal (the one seam:
     no new approval concept, no Remember option anywhere on this
@@ -9358,22 +9545,22 @@ class PlanWindow(QWidget):
         # the gate reads the list, never the selection.
         self.plan_list.setSelectionMode(QListWidget.SingleSelection)
         glay.addWidget(self.plan_list, 1)
-        # Item #56: the Goldfish review, rendered under the checklist
+        # Item #56: the GoFish review, rendered under the checklist
         # in the same gate — findings ranked Blocker / Major / Nit
         # plus the reviewer's paraphrase. Advisory only: this view
         # holds no control and nothing reads it back.
-        self.goldfish_view = QPlainTextEdit()
-        self.goldfish_view.setReadOnly(True)
-        self.goldfish_view.setMaximumHeight(170)
-        self.goldfish_view.setPlaceholderText(
-            "Goldfish review — a fresh reviewer-seat pass reads each "
+        self.gofish_view = QPlainTextEdit()
+        self.gofish_view.setReadOnly(True)
+        self.gofish_view.setMaximumHeight(170)
+        self.gofish_view.setPlaceholderText(
+            "GoFish review — a fresh reviewer-seat pass reads each "
             "draft plan (plan + named files only, no conversation) "
             "and its findings land here before you approve.")
-        glay.addWidget(self.goldfish_view)
-        # CR8: the pre-merge checks, rendered under the Goldfish
+        glay.addWidget(self.gofish_view)
+        # CR8: the pre-merge checks, rendered under the GoFish
         # review in the same gate — the owner's plain-words
         # checks from .forge/gate-checks.md, each shown PASS /
-        # FAIL / CAN'T CHECK. Advisory only, like the Goldfish
+        # FAIL / CAN'T CHECK. Advisory only, like the GoFish
         # view: this view holds no control and nothing reads it
         # back — Approve stays the owner's call, a failed check
         # never blocks it.
@@ -9388,7 +9575,7 @@ class PlanWindow(QWidget):
         # checklist was extracted from (goal, context, contents,
         # risks, assumptions ride with the steps now, so the gate
         # judges the whole document, not bare one-liners). Read-only
-        # like the Goldfish view: it holds no control and nothing
+        # like the GoFish view: it holds no control and nothing
         # reads it back; the sidecar's copy is the record.
         self.document_view = QPlainTextEdit()
         self.document_view.setReadOnly(True)
@@ -14354,12 +14541,12 @@ class ForgeWindow(QMainWindow):
         # own line stream (see _append_run_output / start_run).
         self._run_monitor = monitor_mod.RunMonitor()
         self._monitor_thread = None
-        # Manus study M13: bench-log lines for proposals raised
+        # Study item M13: bench-log lines for proposals raised
         # from a worker thread wait here until the GUI-thread
         # watch tick drains them — a worker thread must never
         # touch the activity widget directly.
         self._proposal_log_queue: list[str] = []
-        # Manus fix F7: the file watcher — None until the owner
+        # Fix F7: the file watcher — None until the owner
         # enables it (default OFF) and _apply_file_watcher
         # builds it. OFF means no watcher object exists at all.
         self._file_watcher = None
@@ -14529,9 +14716,9 @@ class ForgeWindow(QMainWindow):
         # (forge/planning.py dict or None) + the request that drafted it.
         self.plan_state = None
         self._pending_plan_request = ""
-        # Item #56: the Goldfish result the worker emits just before
+        # Item #56: the GoFish result the worker emits just before
         # plan_ready; on_plan_ready folds it into the plan state.
-        self._pending_goldfish = None
+        self._pending_gofish = None
         # Item #58: the plan document the worker emits just before
         # plan_ready, folded in the same way.
         self._pending_plan_document = None
@@ -14619,6 +14806,20 @@ class ForgeWindow(QMainWindow):
             self.settings["known_skills"] = current_skill_names
             self.save_settings()
         else:
+            # GoFish rename (2026-11-12): the goldfish skill was
+            # renamed gofish — it is NOT a new skill. It inherits
+            # the old name's state: known, and disabled only if
+            # the old name was disabled.
+            if ("goldfish" in known_skills
+                    and "gofish" not in known_skills):
+                known_skills = list(known_skills) + ["gofish"]
+                if "goldfish" in disabled_skills:
+                    disabled_skills.add("gofish")
+                    self.settings["disabled_skills"] = sorted(
+                        disabled_skills)
+                self.settings["known_skills"] = sorted(
+                    set(known_skills))
+                self.save_settings()
             new_skills = [name for name in current_skill_names
                           if name not in known_skills]
             if new_skills:
@@ -15044,18 +15245,21 @@ class ForgeWindow(QMainWindow):
                                  on_house=self._house_project_local,
                                  tools=self._customize_tools(),
                                  disabled_tools=set(self.settings.get("disabled_tools", [])),
-                                 goldfish_review=bool(self.settings.get("goldfish_review", True)),
-                                 offer_save_run_as_skill=bool(self.settings.get("offer_save_run_as_skill", False)))
+                                 gofish_review=self._gofish_toggle(),
+                                 offer_save_run_as_skill=bool(self.settings.get("offer_save_run_as_skill", False)),
+                                 skribe_decisions=bool(self.settings.get("skribe_decisions", False)))
         if dialog.exec() == QDialog.Accepted:
             disabled_skills, disabled_plugins, config, rules, skribe_on, disabled_tools = dialog.values()
             self.settings["permission_rules"] = rules
             self.settings["skribe_writes"] = skribe_on
-            # Item #56: the Goldfish toggle rides its own accessor —
+            # Item #56: the GoFish toggle rides its own accessor —
             # the values() tuple keeps its 6-element shape.
-            self.settings["goldfish_review"] = dialog.goldfish_on()
-            # Manus study M10: default off — the offer never fires
+            self.settings["gofish_review"] = dialog.gofish_on()
+            # Study item M10: default off — the offer never fires
             # until the owner turns this on.
             self.settings["offer_save_run_as_skill"] = dialog.save_skill_offer_on()
+            # Decisions fast lane: default off, opt-in only.
+            self.settings["skribe_decisions"] = dialog.decisions_on()
             self.settings["disabled_skills"] = sorted(disabled_skills)
             self.settings["disabled_plugins"] = sorted(disabled_plugins)
             # Item #52: persisted like the other disabled sets — the
@@ -15139,14 +15343,36 @@ class ForgeWindow(QMainWindow):
         return bool(self.settings.get("skribe_writes", True)) and \
             any(s.name == "skribe" for s in self.skills)
 
-    def _goldfish_enabled(self):
-        """Item #56: the Goldfish pass needs BOTH the owner's toggle
-        (settings `goldfish_review`, default on — the SKRIBE
-        convention) AND the goldfish skill itself enabled: the pass
+    def _decisions_client(self):
+        """The Gemini Decisions client for the SKRIBE fast lane, or
+        None when the lane is off or no Gemini key is stored. Built
+        fresh per turn, so a new key takes effect on the next turn
+        without a restart. The worker treats None as "lane
+        unavailable" and falls back to local grading."""
+        if not bool(self.settings.get("skribe_decisions", False)):
+            return None
+        key = providers_mod.provider_api_key(
+            self._provider_config(), "gemini")
+        if not key:
+            return None
+        return decisions_mod.DecisionsClient(key)
+
+    def _gofish_toggle(self):
+        """GoFish rename (2026-11-12): the toggle's settings key
+        moved from "goldfish_review" to "gofish_review". A setting
+        saved under the old key still applies until the owner saves
+        Customize again; the new key wins when present; default on."""
+        return bool(self.settings.get(
+            "gofish_review", self.settings.get("goldfish_review", True)))
+
+    def _gofish_enabled(self):
+        """Item #56: the GoFish pass needs BOTH the owner's toggle
+        (settings `gofish_review`, default on — the SKRIBE
+        convention) AND the gofish skill itself enabled: the pass
         is packaged as that skill, so a skill switched off in
         Customize disables the pass too, exactly like SKRIBE."""
-        return bool(self.settings.get("goldfish_review", True)) and \
-            any(s.name == "goldfish" for s in self.skills)
+        return self._gofish_toggle() and \
+            any(s.name == "gofish" for s in self.skills)
 
     def _seen_once(self, seen: set, key) -> bool:
         """Sweep R59: the log-once dedupe sets (hook problems,
@@ -15719,7 +15945,7 @@ class ForgeWindow(QMainWindow):
         self._design_gate_pending = None
         self.plan_win = PlanWindow(self)
         self.plan_list = self.plan_win.plan_list
-        self.goldfish_view = self.plan_win.goldfish_view
+        self.gofish_view = self.plan_win.gofish_view
         self.gate_checks_view = self.plan_win.gate_checks_view
         self.document_view = self.plan_win.document_view
         self.plan_approve_btn = self.plan_win.plan_approve_btn
@@ -16409,7 +16635,7 @@ class ForgeWindow(QMainWindow):
         win.activateWindow()
 
     def open_proposals_window(self):
-        """Manus fix F6: the proposals room: single instance,
+        """Fix F6: the proposals room: single instance,
         refreshed on open so the pending proposals are the ones
         right now."""
         win = getattr(self, "proposals_win", None)
@@ -16736,7 +16962,7 @@ class ForgeWindow(QMainWindow):
     # ---------- Project Knowledge: distillation after a turn ----------
 
     def _distiller_client(self):
-        """Manus fix F2: the Knowledge distiller gets its OWN
+        """Fix F2: the Knowledge distiller gets its OWN
         client instance — never the turn client. A fresh
         ProviderClient built from the same Ollama URL and
         connector config as the turn client, so it serves the
@@ -16765,7 +16991,7 @@ class ForgeWindow(QMainWindow):
         hostage by a filing step. Seat resolution mirrors the bench's
         own tester resolution, registry gate included. The
         distillation runs through the distiller's OWN client
-        (_distiller_client), never the turn client (Manus fix F2)."""
+        (_distiller_client), never the turn client (Fix F2)."""
         ws = workspace or self.workspace
 
         def _run():
@@ -16781,7 +17007,7 @@ class ForgeWindow(QMainWindow):
                     model = seats_mod.SEAT_DEFAULTS["tester"]
                 _log = lambda msg: self.eventlog.record(  # noqa: E731
                     "knowledge", note=msg)
-                # Manus fix F2: the distiller's own client (see
+                # Fix F2: the distiller's own client (see
                 # _distiller_client) — never the turn client, so
                 # a distiller generation can never consume a
                 # turn's reply.
@@ -17390,7 +17616,7 @@ class ForgeWindow(QMainWindow):
         self.deck.set_state(monitor={
             "alerts": self._run_monitor.active(),
             "watching": self.run_is_running()})
-        # Manus study M13: a crash or HTTP alert is a local event
+        # Study item M13: a crash or HTTP alert is a local event
         # the owner may want to act on — it raises a proposal
         # (deduplicated: the same alert never stacks a second
         # one). Stall and repeat alerts stay alerts only: a stall
@@ -17533,7 +17759,7 @@ class ForgeWindow(QMainWindow):
         prior_worker = self.worker
         self.worker = _WatchGateAsker(self._watch_seat_model())
         try:
-            # Manus study M13: this gate presents a proposal's
+            # Study item M13: this gate presents a proposal's
             # action, so Remember stays hidden — approving a fix
             # must never mint a remembered rule that would
             # auto-allow a later identical write unjudged.
@@ -17563,7 +17789,7 @@ class ForgeWindow(QMainWindow):
         except Exception:
             pass
 
-    # ---------- Manus study M13: gated local event triggers ----------
+    # ---------- Study item M13: gated local event triggers ----------
 
     def _proposal_store(self):
         """This project's proposal store (forge/proposals.py). A
@@ -17651,7 +17877,7 @@ class ForgeWindow(QMainWindow):
             self.log(f"📩 Proposal raised · {kind} · {event} — "
                      f"{action}. Accept or decline it; nothing "
                      f"happens until you do.")
-        # Manus fix F6: the proposals room follows the record.
+        # Fix F6: the proposals room follows the record.
         self._refresh_proposals_window()
         return proposal
 
@@ -17702,7 +17928,7 @@ class ForgeWindow(QMainWindow):
                            for p in store.pending()])
         except Exception:
             pass
-        # Manus fix F6: the proposals room follows the record.
+        # Fix F6: the proposals room follows the record.
         self._refresh_proposals_window()
         if not accept:
             self.log(f"📩 Proposal declined · {decided['kind']} · "
@@ -17717,7 +17943,7 @@ class ForgeWindow(QMainWindow):
         if decided["kind"] == "tester_failed":
             self._proposal_start_fix_turn(decided)
         elif decided["kind"] == "file_changed":
-            # Manus fix F7: an accepted file-change proposal
+            # Fix F7: an accepted file-change proposal
             # starts the review turn — the same ordinary Code
             # turn shape as the tester fix, looking at what
             # changed outside the Forge.
@@ -17764,7 +17990,7 @@ class ForgeWindow(QMainWindow):
 
     def _proposal_start_review_turn(self, proposal):
         """An accepted file_changed proposal starts the review
-        turn (Manus fix F7) — the task text is built from the
+        turn (Fix F7) — the task text is built from the
         proposal record only, and the turn looks and reports
         without changing anything."""
         self._proposal_start_turn(
@@ -17772,7 +17998,7 @@ class ForgeWindow(QMainWindow):
 
     def _apply_file_watcher(self):
         """The file watcher follows the setting and the project
-        (Manus fix F7): OFF (the default) means no watcher at
+        (Fix F7): OFF (the default) means no watcher at
         all — no thread, no watches, no proposals; ON starts
         one on the current project tree. Called after a
         settings save and on every project switch; a watcher
@@ -17797,7 +18023,7 @@ class ForgeWindow(QMainWindow):
                  f"watched.")
 
     def _on_watched_file_changed(self, rel_path):
-        """The watcher's only act (Manus fix F7): raise a
+        """The watcher's only act (Fix F7): raise a
         proposal through the existing path. The watcher never
         edits, never runs a tool, never starts a turn — the
         proposal waits for the owner, and the store's
@@ -18270,7 +18496,7 @@ class ForgeWindow(QMainWindow):
             self.plan_win.set_project(self.workspace)
         for mode_win in getattr(self, "mode_windows", {}).values():
             mode_win.set_project(self.workspace)
-        # Manus fix F7: the watcher follows the project — it
+        # Fix F7: the watcher follows the project — it
         # restarts on the new tree, or stays stopped while OFF.
         self._apply_file_watcher()
         self.save_settings()
@@ -18830,7 +19056,7 @@ class ForgeWindow(QMainWindow):
         right-click menu — export the transcript, or delete the chat."""
         menu = QMenu(self)
         export_act = menu.addAction("Export conversation…")
-        # Manus study M9: the session replay — C9 timeline +
+        # Study item M9: the session replay — C9 timeline +
         # transcript as one self-contained local HTML file — lives
         # on the same menu as the Markdown transcript export.
         replay_act = menu.addAction("Export session replay…")
@@ -18880,7 +19106,7 @@ class ForgeWindow(QMainWindow):
         self.export_conversation(self.conversation_id, title)
 
     def export_replay(self, conversation_id, title="Conversation"):
-        """Manus study M9: export this conversation as a session
+        """Study item M9: export this conversation as a session
         replay — the C9 turn timeline plus the chronological
         transcript in one self-contained local HTML file at
         <workspace>/.forge/replays/conversation-<id>-replay.html.
@@ -19136,7 +19362,7 @@ class ForgeWindow(QMainWindow):
         if not plan:
             self.plan_list.addItem("No plan. In Plan mode, the agent's first answer "
                                    "is drafted as a plan and held here for your call.")
-            self.goldfish_view.clear()
+            self.gofish_view.clear()
             self.document_view.clear()
             # CR8: the checks still run — the owner may have
             # written them before any plan lands.
@@ -19156,20 +19382,20 @@ class ForgeWindow(QMainWindow):
             self.plan_list.addItem(f"✓  SKRIBE verification — {skribe}")
         else:
             self.plan_list.addItem("·  SKRIBE verification — the final step, graded by the gate")
-        # Item #56: the Goldfish rendering lives in its own view
+        # Item #56: the GoFish rendering lives in its own view
         # under the checklist — the checklist's rows stay exactly
         # the plan's steps plus the SKRIBE line, as before.
-        goldfish_text = goldfish_mod.format_result(plan.get("goldfish"))
-        self.goldfish_view.setPlainText(
-            goldfish_text or
-            "Goldfish review — no review on record for this plan.")
+        gofish_text = gofish_mod.format_result(plan.get("gofish"))
+        self.gofish_view.setPlainText(
+            gofish_text or
+            "GoFish review — no review on record for this plan.")
         # Item #58: the plan document under the review — the full
         # text the checklist was extracted from. A bare-list draft
         # (or a pre-#58 sidecar) has none on record.
         self.document_view.setPlainText(plan.get("document") or "")
         # CR8: the pre-merge checks run fresh every time a draft
         # lands at the gate — the owner reads them beside the
-        # Goldfish review before approving.
+        # GoFish review before approving.
         if getattr(self, "plan_win", None) is not None:
             self.plan_win.refresh_gate_checks()
 
@@ -19229,20 +19455,20 @@ class ForgeWindow(QMainWindow):
         except Exception:
             return ""
 
-    def on_plan_goldfish(self, result):
-        """Item #56: the worker's Goldfish pass finished — the result
+    def on_plan_gofish(self, result):
+        """Item #56: the worker's GoFish pass finished — the result
         rides into the plan state on_plan_ready is about to build
         (the worker emits this signal first). Pure record-keeping:
         the findings are advisory and touch nothing else."""
-        self._pending_goldfish = result
-        summary = goldfish_mod.summary_line(result)
+        self._pending_gofish = result
+        summary = gofish_mod.summary_line(result)
         if summary:
             self.log("🐠 " + summary + " — findings are in the Plan window.")
 
     def on_plan_document(self, text):
         """Item #58: the worker's plan document, emitted just
         before plan_ready — folded into the plan state there, the
-        same pattern as the Goldfish result. The document is the
+        same pattern as the GoFish result. The document is the
         plan's full text; the gate shows it under the checklist."""
         self._pending_plan_document = text
 
@@ -19346,9 +19572,9 @@ class ForgeWindow(QMainWindow):
             list(steps), request=self._pending_plan_request,
             document=self._pending_plan_document or "")
         self._pending_plan_document = None
-        # Item #56: fold in the Goldfish result emitted just before.
-        self.plan_state["goldfish"] = self._pending_goldfish
-        self._pending_goldfish = None
+        # Item #56: fold in the GoFish result emitted just before.
+        self.plan_state["gofish"] = self._pending_gofish
+        self._pending_gofish = None
         # Item #66: a fresh draft starts with a clean comment box
         # and no revision under way.
         self._plan_revising = False
@@ -19420,7 +19646,7 @@ class ForgeWindow(QMainWindow):
         plan["status"] = "running"
         self._plan_render()
         self._plan_persist()
-        # Manus fix F4: approving a new plan ENDS the previous
+        # Fix F4: approving a new plan ENDS the previous
         # one — any trajectory on record from the old plan is
         # superseded here, at the moment the owner actually ends
         # it, so a later resume never re-arms it (the worker's
@@ -19523,7 +19749,7 @@ class ForgeWindow(QMainWindow):
         """Item #66: the worker revised the draft against the
         owner's gate comment and is parked at the gate again. The
         SAME plan state updates in place — the comment history and
-        the Goldfish record ride it — the checklist and document
+        the GoFish record ride it — the checklist and document
         re-render, and the gate waits for the owner's next call."""
         plan = self.plan_state
         if not plan:
@@ -19631,7 +19857,7 @@ class ForgeWindow(QMainWindow):
                  f"SKRIBE: {plan['skribe']}.")
 
     def _on_skill_drafted(self, info):
-        """Manus study M10: a drafted skill landed on disk — run the
+        """Study item M10: a drafted skill landed on disk — run the
         S6 reload so the new name is recorded as known-and-disabled
         immediately (rather than at the next app start), and say so.
         A failed draft never reaches here as a success: ok is False
@@ -19727,14 +19953,14 @@ class ForgeWindow(QMainWindow):
             _rollback()
 
     def _watch_tick(self):
-        # Manus study M13: drain the worker-thread proposal log
+        # Study item M13: drain the worker-thread proposal log
         # queue on the GUI thread, where the activity widget lives.
         if getattr(self, "_proposal_log_queue", None):
             queued, self._proposal_log_queue = \
                 self._proposal_log_queue, []
             for line in queued:
                 self.log(line)
-            # Manus fix F6: a worker-raised proposal lands in the
+            # Fix F6: a worker-raised proposal lands in the
             # room on this same GUI-thread tick.
             self._refresh_proposals_window()
         # C1: the Watch seat's stall check runs on EVERY tick, ahead
@@ -20389,7 +20615,7 @@ class ForgeWindow(QMainWindow):
 
     def _deck_fan_out(self, payload, holder):
         """GUI-thread slot for the deck's blocking /fanout round
-        trip (Manus fix F5): a phone batch fans through the very
+        trip (Fix F5): a phone batch fans through the very
         same submit_fan_out the desktop dialog calls — the phone
         is a second door to the same room. The payload carries
         the items and the independence assertion; only a real
@@ -20413,7 +20639,7 @@ class ForgeWindow(QMainWindow):
 
     def _deck_proposal_decision(self, payload, holder):
         """GUI-thread slot for the deck's blocking /proposal round
-        trip (Manus fix F6): a phone Accept/Decline lands on the
+        trip (Fix F6): a phone Accept/Decline lands on the
         very same decide_proposal the desktop proposals room
         calls — the phone is a second door to the same room. The
         answer names the outcome: a decision that landed, a
@@ -21829,7 +22055,7 @@ class ForgeWindow(QMainWindow):
         if not isinstance(mcp_trust_store, dict):
             mcp_trust_store = {}
             self.settings["trusted_mcp_servers"] = mcp_trust_store
-        # Manus study M5: the session's tool-surface memory — one
+        # Study item M5: the session's tool-surface memory — one
         # dict for the life of this window, handed to every worker
         # (the mcp_trust pattern), so a turn whose offered surface
         # differs from the previous turn's is logged as a surface
@@ -21844,6 +22070,11 @@ class ForgeWindow(QMainWindow):
                                   permissions=turn_perms,
                                   skribe_writes=(self._skribe_enabled()
                                                  and not maintenance_active),
+                                  skribe_decisions=(
+                                      bool(self.settings.get(
+                                          "skribe_decisions", False))
+                                      and not maintenance_active),
+                                  decisions_client=self._decisions_client(),
                                   council=(self.council_check.isChecked()
                                            and not maintenance_active),
                                   reviewer_model=reviewer_model,
@@ -21872,25 +22103,25 @@ class ForgeWindow(QMainWindow):
                                   contained_docker_image=str(self.settings.get(
                                       "contained_docker_image", "python:3-slim")
                                       or "python:3-slim"),
-                                  # Item #56: the Goldfish pass rides
+                                  # Item #56: the GoFish pass rides
                                   # Plan turns only (the worker checks
                                   # planning itself); off in maintenance
                                   # like council/SKRIBE. Its budget is
                                   # the #53 seat cycle cap.
-                                  goldfish=(self._goldfish_enabled()
+                                  gofish=(self._gofish_enabled()
                                             and not maintenance_active),
-                                  goldfish_budget=self.settings.get(
+                                  gofish_budget=self.settings.get(
                                       "tester_max_cycles"),
                                   plugin_ctx=turn_ctx,
                                   skills_dir=self.app_skills_dir,
                                   plugins_dir=self.app_plugins_dir,
                                   mcp_trust=mcp_trust_store,
                                   mcp_trust_save=self.save_settings,
-                                  # Manus study M10: default off.
+                                  # Study item M10: default off.
                                   offer_save_run_as_skill=bool(self.settings.get(
                                       "offer_save_run_as_skill", False)),
                                   surface_state=surface_state,
-                                  # Manus study M13: the worker
+                                  # Study item M13: the worker
                                   # reports local events it observes
                                   # (a Tester FAIL verdict) to this
                                   # callback; the window turns them
@@ -21917,7 +22148,7 @@ class ForgeWindow(QMainWindow):
         worker.receipt.connect(lambda r, s=stream: self._ws_receipt(s, r))
         worker.turn_changes.connect(
             lambda c, s=stream: self._ws_changes(s, c))
-        worker.plan_goldfish.connect(self.on_plan_goldfish)
+        worker.plan_gofish.connect(self.on_plan_gofish)
         worker.plan_document.connect(self.on_plan_document)
         worker.plan_ready.connect(self.on_plan_ready)
         _rp = getattr(worker, "research_progress", None)
@@ -22041,9 +22272,9 @@ class ForgeWindow(QMainWindow):
             return False
         return self._max_parallel_turns() > 1
 
-    # ---------- Manus study M12: fan-out ----------
+    # ---------- Study item M12: fan-out ----------
     def submit_fan_out(self, items, independent):
-        """Manus fix F5: the ONE core both fan-out doors call —
+        """Fix F5: the ONE core both fan-out doors call —
         the desktop dialog and the phone deck. `items` is text
         (one item per line) or a list of task strings;
         `independent` is the owner's assertion that none of the
@@ -22086,7 +22317,7 @@ class ForgeWindow(QMainWindow):
                       "Control tracks them.")
 
     def open_fan_out_dialog(self):
-        """Manus fix F5: the desktop door — the palette's
+        """Fix F5: the desktop door — the palette's
         'Fan out a batch…' entry opens the dialog."""
         FanOutDialog(self).exec()
 
@@ -22100,7 +22331,7 @@ class ForgeWindow(QMainWindow):
         True when the run started; False with the plain refusal
         logged when nothing runs (bad batch, cap 1, a run already
         live, or the parallel cap already full). UI entry points
-        (Manus fix F5): the command palette's 'Fan out a batch…'
+        (Fix F5): the command palette's 'Fan out a batch…'
         dialog and the phone deck's fan-out card, both through
         submit_fan_out. Each fanned turn is a Code turn in its
         own fresh conversation (no history, no plan slot — Plan
@@ -22419,7 +22650,7 @@ class ForgeWindow(QMainWindow):
             self.on_finished(text, messages)
             self._push_deck_streams()
             self._refresh_mission()
-            # Manus study M12: the stream's own settle is done —
+            # Study item M12: the stream's own settle is done —
             # now the fan-out hook may start the next queued item
             # or a repair turn.
             self._fanout_collect(stream, text, None)
@@ -22437,7 +22668,7 @@ class ForgeWindow(QMainWindow):
             self.on_failed(error)
             self._push_deck_streams()
             self._refresh_mission()
-            # Manus study M12: as in _ws_finished.
+            # Study item M12: as in _ws_finished.
             self._fanout_collect(stream, None, error)
             return
         self._settle_background_stream(stream, None, None, error)
@@ -23042,7 +23273,7 @@ class ForgeWindow(QMainWindow):
                 "model": stage["model"] if stage is not None else "",
                 "request": plan.get("request") or "",
                 "steps": len(plan.get("steps") or []),
-                "goldfish": plan.get("goldfish") is not None,
+                "gofish": plan.get("gofish") is not None,
                 "workspace": self.workspace,
                 "started_at": (stage["started_at"]
                                if stage is not None else None)}
@@ -23483,7 +23714,7 @@ class ForgeWindow(QMainWindow):
         self._sync_send_button()
 
     def _write_trajectory_fallback(self, plan) -> None:
-        """Manus study M8 — the between-turn half of the saturation
+        """Study item M8 — the between-turn half of the saturation
         backstop (see worker._write_trajectory for the mid-turn
         half). Plan state comes from the window's sidecar
         (APP_DIR/plans/<id>.json): completed steps stay ticked, so
@@ -23569,7 +23800,7 @@ class ForgeWindow(QMainWindow):
         # that same number, never re-derived from the raw options.
         num_ctx = int(num_ctx or options.get("num_ctx", 8192) or 8192)
         style = self.settings.get("fold_style", "prose")
-        # Manus study M2: archive the FULL span before the summarizer
+        # Study item M2: archive the FULL span before the summarizer
         # render clips it. If the archive cannot be written, the fold
         # does NOT happen — the send proceeds with the history
         # unfolded, exactly as a refused fold does; content is never
@@ -23654,7 +23885,7 @@ class ForgeWindow(QMainWindow):
                 self._update_context_gauge()
             else:
                 self.log("The summary would not have shrunk the conversation — left exactly as it was.")
-                # Manus study M8: the between-turn fold could not
+                # Study item M8: the between-turn fold could not
                 # shrink — the same saturation backstop as the
                 # worker's mid-turn path. The span is replaced with
                 # a program-built trajectory summary (plan state
@@ -23799,7 +24030,7 @@ class ForgeWindow(QMainWindow):
         # S6 (audit S1-33): the soft long-turn prompt rides this
         # same gate, but it is not a tool call — it must never grow
         # a remembered allow-rule, so its dialog hides Remember.
-        # Manus study M13: a proposal-driven gate passes
+        # Study item M13: a proposal-driven gate passes
         # allow_remember=False for the same reason — a proposal
         # must never mint a rule that auto-allows a later call
         # without the owner judging it. The default (True) keeps
@@ -24283,7 +24514,7 @@ class ForgeWindow(QMainWindow):
             # Item #69: the URL may have changed — rebuild the
             # provider facade on it, with the saved connector config.
             self._rebuild_provider_client()
-            # Manus fix F7: the watcher toggle applies now, not
+            # Fix F7: the watcher toggle applies now, not
             # at the next restart.
             self._apply_file_watcher()
             self.log("Agent settings saved.")
@@ -24299,7 +24530,7 @@ class ForgeWindow(QMainWindow):
         for timer in (self._render_timer, self._gauge_timer,
                       self._sched_timer, self._watch_timer):
             timer.stop()
-        # Manus fix F7: the file watcher's debounce timer stops
+        # Fix F7: the file watcher's debounce timer stops
         # with the rest — no proposal can land into a closing
         # window.
         if getattr(self, "_file_watcher", None) is not None:

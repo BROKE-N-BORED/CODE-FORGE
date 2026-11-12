@@ -1,4 +1,4 @@
-"""Session replay export (Manus study M9, Tier 2 #1): a finished
+"""Session replay export (Study item M9, Tier 2 #1): a finished
 session rendered as one self-contained HTML file — the C9 turn
 timeline plus the chronological transcript, as it happened.
 
@@ -32,7 +32,7 @@ import html
 import json
 from pathlib import Path
 
-# Manus study M9: the render caps follow the fold render's own
+# Study item M9: the render caps follow the fold render's own
 # conventions (context.render_span) — tool results are the
 # bulkiest thing in any history, tool calls render as one compact
 # line. A clipped body says so and points at the stored record.

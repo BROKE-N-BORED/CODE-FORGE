@@ -96,10 +96,10 @@ _CONTENT_CAP = 4000       # chars per message inside the span text
 _TOOL_CALL_CAP = 300      # chars per rendered tool call
 
 
-# --- Manus study M2: restorable folds --------------------------------
+# --- Study item M2: restorable folds --------------------------------
 # The fold above is lossy by design — render_span clips the span for
 # the summarizer and the summary then replaces the originals. M2 makes
-# every fold RESTORABLE (Manus: "the file system as the ultimate
+# every fold RESTORABLE ("the file system as the ultimate
 # context — drop content, keep the pointer"): before a span is
 # rendered/clipped for the summarizer, the caller archives the FULL
 # span, un-clipped, inside the project, and the summary that replaces
@@ -140,7 +140,7 @@ def archive_span(span, workspace) -> str:
 
 def archive_pointer(archive_rel: str) -> str:
     """The pointer line a summary carries when its span was archived
-    (Manus study M2). Plain text inside the summary content, so it
+    (Study item M2). Plain text inside the summary content, so it
     persists, renders, and re-folds like any other summary text."""
     return (f"[Full earlier conversation archived at {archive_rel} — "
             "use read_file on it if exact details are needed.]")
@@ -311,7 +311,7 @@ def render_span(span) -> str:
                 fn = (call.get("function") or {}) if isinstance(call, dict) else {}
                 name = fn.get("name", "tool")
                 raw_args = fn.get("arguments")
-                # Manus study M1: sort_keys — this rendering enters
+                # Study item M1: sort_keys — this rendering enters
                 # the summarizer's request verbatim, so the same call
                 # must render to the same bytes whatever order its
                 # arguments dict was parsed in.
@@ -354,7 +354,7 @@ def apply_fold(messages, plan, summary_text: str, style="prose",
     The caller's list is never mutated. style="scratchpad" stamps
     the result with SCRATCHPAD_PREFIX instead of SUMMARY_PREFIX;
     every other rule is identical for both styles. archive_rel
-    (Manus study M2) is the workspace-relative path archive_span
+    (Study item M2) is the workspace-relative path archive_span
     returned for this span: the summary gains the archive pointer
     line and a "fold_archive" marker, so the clipped originals stay
     reachable. None — every caller without a project in scope — is
@@ -383,8 +383,7 @@ def apply_fold(messages, plan, summary_text: str, style="prose",
 # summary when the window fills. What it never touched is the
 # leading system prompt: it rides whole, every turn, however big
 # the project got (repo map, knowledge index, guidelines, briefs).
-# CR10 ranks and compresses THAT side before the model, the way
-# CodeRabbit ranks its review context before its model. The
+# CR10 ranks and compresses THAT side before the model. The
 # ranking is by tier, not by keyword — no model call, no guessing:
 #
 #   tier 0 — core: the base prompt, house rules, mode guidance,
@@ -522,7 +521,7 @@ def compression_note(report: dict) -> str:
         return ""
 
 
-# --- Manus study M8: schema-based trajectory summary -----------------
+# --- Study item M8: schema-based trajectory summary -----------------
 # The backstop for when M2's restorable compression SATURATES: the
 # fold cannot shrink the history any further (apply_fold refuses a
 # non-shrinking fold, the summary comes back empty, or the mid-turn
@@ -679,7 +678,7 @@ def build_trajectory(messages, plan_steps=None, plan_done=None,
         plan_status = None
     else:
         done_idx = sorted(i + 1 for i in done if 0 <= i < len(steps))
-        # Manus fix F4: the plan's standing. A fresh build is for
+        # Fix F4: the plan's standing. A fresh build is for
         # the LIVE plan, so it is always "active". The other values
         # are written only by an explicit owner act, never inferred:
         # "superseded" when the owner approves a newer plan (the
@@ -730,7 +729,7 @@ def render_trajectory(data: dict) -> str:
         total = status.get("total") or len(status.get("steps") or [])
         open_idx = [i + 1 for i in range(total)
                     if (i + 1) not in set(done)]
-        # Manus fix F4: a dead plan says so in its own text, so a
+        # Fix F4: a dead plan says so in its own text, so a
         # model reading the record never mistakes it for live work.
         standing = status.get("status") or "active"
         marker = ""
@@ -794,7 +793,7 @@ def latest_trajectory(messages):
 
 
 def supersede_trajectory(messages):
-    """Manus fix F4: mark the newest trajectory's plan SUPERSEDED —
+    """Fix F4: mark the newest trajectory's plan SUPERSEDED —
     the owner approved a newer plan, so the old one is dead and a
     later resume must never re-arm it. Only a LIVE plan is marked:
     no trajectory, no plan on record, an already-finished plan

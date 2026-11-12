@@ -1,6 +1,6 @@
-"""Sub-agent handoffs + the knowledge keeper (Manus study M7).
+"""Sub-agent handoffs + the knowledge keeper (Study item M7).
 
-Manus's shape, at Forge scale: a seat's return is not freeform
+The shape, at Forge scale: a seat's return is not freeform
 prose the caller has to mine — it closes in a fixed five-field
 schema, and at task end ONE keeper pass decides what of it is
 worth keeping in the project's .forge/learnings.md and discards
@@ -38,7 +38,7 @@ keeps, at most MAX_KEEPER_BULLETS_PER_TASK bullets:
   - every OPEN item (unfinished work is the pointer worth
     persisting), as "Open (<seat>): <item>";
   - a tester FAIL verdict, as one pointer to the failure;
-  - Goldfish Blocker/Major findings, as pointers to the plan
+  - GoFish Blocker/Major findings, as pointers to the plan
     gate's own findings.
 A clean task — no open items, no failures, no findings — writes
 nothing and creates no file. Bullets land in
@@ -193,7 +193,7 @@ def _candidates(handoffs: list[dict]) -> list[str]:
         for finding in entry.get("findings") or []:
             if str(finding.get("severity", "")).capitalize() in (
                     "Blocker", "Major"):
-                out.append(f"Goldfish {finding['severity']}: "
+                out.append(f"GoFish {finding['severity']}: "
                            f"{_flatten(finding.get('text', ''))[:200]}")
     return out
 

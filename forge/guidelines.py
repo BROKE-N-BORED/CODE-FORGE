@@ -1,7 +1,7 @@
-"""Project Guidelines (CR4 — CodeRabbit path instructions, 2026-11-11).
+"""Project Guidelines (CR4 — path instructions, 2026-11-11).
 
-CodeRabbit reads a repo's guideline files and enforces them in
-review. Forge's version is smaller and gated, because the naive
+Forge reads a repo's guideline files and enforces them in
+review. Its shape is smaller and gated, because the naive
 shape is a hole: guideline files arrive with the project, and a
 project can be cloned from anywhere — an AGENTS.md dropped into a
 repo by someone else must never reach the agent's system prompt on

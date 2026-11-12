@@ -47,7 +47,7 @@ Changes from v1:
   repeats. A success clears the streak. "Failed" means a tool-level
   error (a result starting "Tool error") — a command that ran and
   exited non-zero is the command's failure, not the tool's.
-- Manus study M4 (keep the wrong stuff in): an UNEXPECTED exception
+- Study item M4 (keep the wrong stuff in): an UNEXPECTED exception
   escaping _dispatch (a bug, not an authored ToolError) used to reach
   the model as a bare "Tool error: {exc}" — a KeyError read as just
   "'config'", with the type and the raising frame existing nowhere,
@@ -57,7 +57,7 @@ Changes from v1:
   failure_detail) to that call's message copy. Authored ToolError
   messages stay byte-exact — they are the designed diagnostic — and
   _execute's return shape is untouched.
-- Manus study M6 (anti-rut): the Note 17 identical-result refusal
+- Study item M6 (anti-rut): the Note 17 identical-result refusal
   resets its count whenever a repeated call's result CHANGES, so a
   successful call with a fresh result every time (a poll, a live
   listing) could repeat all turn steered by nothing. A per-turn
@@ -86,6 +86,12 @@ Changes from v1:
   silently dropped. Grading rides the session model only
   (governing-seat rule) and is switched by the `skribe_writes`
   setting (default on; off = writes behave exactly as before).
+  One exception: the Decisions fast lane (settings
+  `skribe_decisions`, default off) scores the queued files through
+  the Gemini Decisions API instead of a local generation — the
+  endpoint only measures a score, the shell's deterministic rule
+  makes the finalize/revise call, and any failure falls back to
+  the local pass for the whole batch.
 - Item 8 (Note 3) append_file: chunked writes join the same SKRIBE
   queue by path (so a write plus its appends grade once, on the
   final assembled file) and earn the same post-edit feedback as
@@ -107,8 +113,8 @@ Changes from v1:
   failed snapshot never blocks an approved edit — it is logged and
   the edit proceeds without a restore point. Setting:
   `auto_snapshot_edits` (default on).
-- Item #56 Goldfish spec review: between the Plan capture and the
-  owner's gate, a fresh reviewer-seat pass (forge/goldfish.py) reads
+- Item #56 GoFish spec review: between the Plan capture and the
+  owner's gate, a fresh reviewer-seat pass (forge/gofish.py) reads
   ONLY the plan plus the files it names — never this conversation —
   in two model stages (Zoom Out, Comprehension) plus one mechanical
   readiness check against the filesystem. Findings (Blocker / Major /
@@ -231,7 +237,7 @@ from . import context as context_mod
 from . import seats as seats_mod
 from . import create_ext as create_mod
 from . import planning as planning_mod
-from . import goldfish as goldfish_mod
+from . import gofish as gofish_mod
 from . import run_skill as run_skill_mod
 from . import mcp_trust as mcp_trust_mod
 from . import modes as modes_mod
@@ -241,6 +247,7 @@ from . import snapshots as snapshots_mod
 from . import checkpoints as checkpoints_mod
 from . import testcadence as cadence_mod
 from . import providers as providers_mod
+from . import decisions as decisions_mod
 from . import lightmachine as light_mod
 
 # Note 20: how many times a failed SKRIBE grade may bounce a turn back
@@ -957,7 +964,7 @@ PLAN_FALLBACK_TEXT = (
     "so I stopped the turn: nothing was executed and no files were "
     "touched. Ask again and I'll draft the plan.")
 
-# Manus fix F3: the D39 stored plan-progress reminder is retired
+# Fix F3: the D39 stored plan-progress reminder is retired
 # (its PLAN_REMIND_EVERY cadence and plan_progress_text are gone).
 # M3's programmatic recitation — a fresh block on the outgoing
 # request copy only, never stored — is the only reminder now.
@@ -975,7 +982,7 @@ PLAN_FALLBACK_TEXT = (
 CYCLE_PROMPT_AT = 40
 LONG_TURN_TOOL = "long_turn_check"
 
-# Manus study M6 (anti-rut): the identical-result refusal (Note 17)
+# Study item M6 (anti-rut): the identical-result refusal (Note 17)
 # only counts a repeat while the RESULT stays byte-identical — a
 # call whose result keeps changing (run_command polling a live
 # directory, `date`, a file another process keeps rewriting) reset
@@ -1051,13 +1058,13 @@ class AgentWorker(QThread):
     failed = Signal(str)
     # Note 12: the planning gate + live checklist.
     plan_ready = Signal(object)      # parsed steps (list[str]) — gate is open
-    plan_goldfish = Signal(object)   # Item #56: review result dict, before plan_ready
+    plan_gofish = Signal(object)   # Item #56: review result dict, before plan_ready
     plan_document = Signal(str)      # Item #58: the plan document text, before plan_ready
     plan_revised = Signal(object, str)  # Item #66: (steps, document) — an owner-comment revision is back at the gate
     plan_active = Signal(int)        # a step became the current one
     plan_step_done = Signal(int)     # a step was announced DONE
     plan_turn_done = Signal(object)  # SKRIBE outcome dict at turn end
-    # Manus study M10: a drafted skill landed on disk — the window
+    # Study item M10: a drafted skill landed on disk — the window
     # reloads extensions so the S6 rule records it disabled at once.
     skill_drafted = Signal(object)  # {"name", "ok", "message"}
     # Research room (2026-11-11): the run's live state, emitted
@@ -1074,6 +1081,8 @@ class AgentWorker(QThread):
                  verify_commands: list | None = None,
                  permissions: dict | None = None,
                  skribe_writes: bool = True,
+                 skribe_decisions: bool = False,
+                 decisions_client=None,
                  council: bool = False,
                  reviewer_model: str = "",
                  governing_roster: str = "",
@@ -1086,8 +1095,8 @@ class AgentWorker(QThread):
                  contained_run: bool = False,
                  contained_docker: bool = False,
                  contained_docker_image: str = "",
-                 goldfish: bool = False,
-                 goldfish_budget=None,
+                 gofish: bool = False,
+                 gofish_budget=None,
                  offer_save_run_as_skill: bool = False,
                  plugin_ctx=None,
                  skills_dir=None,
@@ -1129,14 +1138,14 @@ class AgentWorker(QThread):
         # no gate — handlers behave exactly as before.
         self.mcp_trust = mcp_trust
         self.mcp_trust_save = mcp_trust_save
-        # Manus study M13: the window's event callback — the worker
+        # Study item M13: the window's event callback — the worker
         # reports a local event it observed (a Tester FAIL verdict)
         # and the window decides whether it becomes a proposal.
         # None (bare constructions, every pre-M13 test) means the
         # event is observed and dropped: the turn itself is
         # unchanged, and no proposal is ever raised from here.
         self.on_event = on_event
-        # Manus study M5: the session's tool-surface memory — a
+        # Study item M5: the session's tool-surface memory — a
         # plain dict the window owns and hands to every worker it
         # builds (the mcp_trust pattern above), so _record_surface
         # can log a surface CHANGE between turns, not just each
@@ -1189,6 +1198,13 @@ class AgentWorker(QThread):
         self.verify_commands = verify_commands or []
         self.permissions = permissions or {}
         self.skribe_writes = bool(skribe_writes)
+        # Decisions fast lane (2026-11-12): score the queued files
+        # through the Gemini Decisions API instead of a local
+        # grading generation. The client is None when the lane is
+        # off or no Gemini key is stored — the lane then falls back
+        # to local grading, never to nothing.
+        self.skribe_decisions = bool(skribe_decisions)
+        self._decisions_client = decisions_client
         self._skribe_queue = skribe_mod.WriteQueue()
         self._skribe_awaiting = False
         self._skribe_bounces = 0
@@ -1214,11 +1230,11 @@ class AgentWorker(QThread):
                 resolved=council_mod.DEFAULT_REVIEWER_MODEL,
                 reason="reviewer model is not on the governing roster"))
         self._council_done = False
-        # Manus study M7: the turn's validated seat handoffs, for
-        # the keeper pass at run()'s end. Council + goldfish hold
+        # Study item M7: the turn's validated seat handoffs, for
+        # the keeper pass at run()'s end. Council + gofish hold
         # one entry each; tester runs collect in order.
         self._council_handoff: dict | None = None
-        self._goldfish_handoff: dict | None = None
+        self._gofish_handoff: dict | None = None
         self._tester_handoffs: list[dict] = []
         # Note 12: planning engages only when the window passes
         # planning=True (Plan mode). The gate decision rides an Event
@@ -1254,21 +1270,21 @@ class AgentWorker(QThread):
         self._research_depth = "standard"
         self._research_consulted: list[str] = []
         self._research_slug = ""
-        # Item #56: the Goldfish pass, on only when the window turns
-        # it on (settings toggle + goldfish skill, the SKRIBE
-        # convention — see ForgeWindow._goldfish_enabled). The
+        # Item #56: the GoFish pass, on only when the window turns
+        # it on (settings toggle + gofish skill, the SKRIBE
+        # convention — see ForgeWindow._gofish_enabled). The
         # reviewer seat it rides was resolved above through the same
         # guarded door as the council's; this flag adds no authority.
         # The budget is the #53 sub-agent cap value the window hands
         # over, resolved with the bench/tester fallback pattern.
-        self.goldfish = bool(goldfish)
-        self._goldfish_budget = goldfish_mod.resolve_budget(goldfish_budget)
-        # Manus study M10: offer to save a finished run as a skill
+        self.gofish = bool(gofish)
+        self._gofish_budget = gofish_mod.resolve_budget(gofish_budget)
+        # Study item M10: offer to save a finished run as a skill
         # at turn end. Default off (settings
         # `offer_save_run_as_skill`); off means this flag is False
         # and the offer path below is never entered.
         self.offer_save_run_as_skill = bool(offer_save_run_as_skill)
-        self._goldfish_result: dict | None = None
+        self._gofish_result: dict | None = None
         # Item 14: per-turn by construction (one worker per turn) —
         # the pre-edit snapshot is attempted at most once, before the
         # first write executes, however the attempt turns out.
@@ -1298,7 +1314,7 @@ class AgentWorker(QThread):
         self._plan_event = None
         self._plan_steps: list[str] | None = None
         self._plan_done: set[int] = set()
-        # Manus study M3: programmatic recitation state, armed at
+        # Study item M3: programmatic recitation state, armed at
         # plan approval — the title is the turn request's first line
         # and the criteria the approved document's Success criteria
         # section ("" when the owner's edit is what runs, or the
@@ -1312,7 +1328,7 @@ class AgentWorker(QThread):
         # only read tools are offered, and the first text-only
         # generation ends the pass instead of settling the turn.
         self._homework_active = False
-        # Manus study M5: the PHASE homework pass (_homework_phase)
+        # Study item M5: the PHASE homework pass (_homework_phase)
         # is active — the in-loop pass above uses _homework_active;
         # _homework_refusal reads both through _in_homework().
         self._homework_phase_active = False
@@ -1333,7 +1349,7 @@ class AgentWorker(QThread):
         # writes the council_review record.
         self._review_stats: dict = {}
         self._verify_fails: dict[str, int] = {}
-        # Manus study M4: the compact failure detail (type + raising
+        # Study item M4: the compact failure detail (type + raising
         # frame) for the MOST RECENT _execute dispatch exception, or
         # None. _execute stashes it where the traceback is alive;
         # _execute_call_batch's tail appends it to that call's tool
@@ -1397,7 +1413,7 @@ class AgentWorker(QThread):
         return approved
 
     def _maybe_offer_save_run_as_skill(self, handoffs):
-        """Manus study M10: at the end of a completed plan, offer
+        """Study item M10: at the end of a completed plan, offer
         to draft the run as a skill. The draft is programmatic
         (run_skill.build_run_skill_draft over M8's trajectory —
         goal, plan steps, files touched, errors, open items), the
@@ -1515,7 +1531,7 @@ class AgentWorker(QThread):
         visible = set(perms_mod.mode_visible_tools(
             mode, [s["function"]["name"] for s in all_schemas], classes))
         offered = [s for s in all_schemas if s["function"]["name"] in visible]
-        # Manus study M5: the research plan gate used to ALSO live
+        # Study item M5: the research plan gate used to ALSO live
         # here — until _research_approved, the browse verbs were
         # stripped from this offer, so the surface changed
         # mid-session at the gate. The gate now lives ONLY at
@@ -1528,7 +1544,7 @@ class AgentWorker(QThread):
 
     def _read_schemas(self):
         """Item #58: the mode's visible schemas cut to READ-class
-        tools only. Manus study M5 retired this from the OFFER
+        tools only. Study item M5 retired this from the OFFER
         path: homework generations are now offered the mode's full
         surface (_schemas) so the surface never changes mid-turn,
         and the pass's read-only discipline is enforced at
@@ -1540,7 +1556,7 @@ class AgentWorker(QThread):
                 if perms_mod.tool_class(s["function"]["name"], classes) == "read"]
 
     def _surface_fingerprint(self, schemas=None) -> str:
-        """Manus study M5: the canonical fingerprint of the tool
+        """Study item M5: the canonical fingerprint of the tool
         surface this worker offers — a hash of the schemas'
         deterministic JSON (sort_keys, the M1 discipline), so two
         surfaces are the same surface iff their bytes are."""
@@ -1550,7 +1566,7 @@ class AgentWorker(QThread):
         return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
 
     def _record_surface(self):
-        """Manus study M5: record this turn's tool surface in the
+        """Study item M5: record this turn's tool surface in the
         event log, against the session's shared surface memory
         (surface_state). The first turn of a session logs the
         baseline (tool_surface); a later turn whose surface
@@ -1894,8 +1910,8 @@ class AgentWorker(QThread):
         if phase == "grading":
             _keep_alive = self._seat_keep_alive(self.model, _keep_alive)
         self._prepare_residency(self.model)
-        # Manus study M3: programmatic recitation. Only the main
-        # loop passes recite_plan — homework, drafting, Goldfish and
+        # Study item M3: programmatic recitation. Only the main
+        # loop passes recite_plan — homework, drafting, GoFish and
         # council generations assemble exactly as before — and only
         # while an approved plan is executing with steps still open
         # (the D39 reminder's gate). The block is built FRESH here,
@@ -2062,7 +2078,7 @@ class AgentWorker(QThread):
         read; whether the project is EMPTY) as a system note —
         except "failed", where the turn is already over."""
         self.status.emit("Reading the project first…")
-        # Manus study M5: the pass is offered the mode's full
+        # Study item M5: the pass is offered the mode's full
         # surface, exactly like every other generation of the turn
         # (it used to be cut to read-class here); the read-only
         # discipline is enforced at execution for the length of
@@ -2072,7 +2088,7 @@ class AgentWorker(QThread):
         schemas = self._schemas()
         call_history: dict = {}
         fail_history: dict = {}
-        # Manus study M6: the pass's own rut counter, scoped like
+        # Study item M6: the pass's own rut counter, scoped like
         # the pass's other repeat-guard dicts above.
         rut_history: dict = {}
         reads: list[str] = []
@@ -2151,7 +2167,7 @@ class AgentWorker(QThread):
             self._log("homework_done", mode=mode, reads=len(reads),
                       files=len(self._project_files()),
                       outcome=outcome["outcome"])
-        # Manus study M5: the pass is over — the execution gate
+        # Study item M5: the pass is over — the execution gate
         # lifts with it (the drafting generations that follow run
         # under the ordinary mode permissions again).
         self._homework_phase_active = False
@@ -2201,7 +2217,7 @@ class AgentWorker(QThread):
         # project that opted in (.forge/reference/profile.txt)
         # drafts against the workflow's skeleton — the plain
         # Item #58 sections plus ## Reference lock and
-        # ## Breakdown — everything downstream (gate, Goldfish,
+        # ## Breakdown — everything downstream (gate, GoFish,
         # checklist extraction) consumes the document as usual.
         _rdb_profile = rdb_mod.active_profile(self.workspace)
         for section in rdb_mod.plan_sections(_rdb_profile is not None):
@@ -2250,7 +2266,7 @@ class AgentWorker(QThread):
         PROCEED / plain answer; skipped when an earlier turn
         already asked) → DRAFT (the plan document, section by
         section; a homework reply that already parses as a plan
-        is the draft directly) → Goldfish → the gate, exactly as
+        is the draft directly) → GoFish → the gate, exactly as
         before."""
         hw = self._homework_phase("plan")
         if self._cancel:
@@ -2298,18 +2314,18 @@ class AgentWorker(QThread):
             if asked:
                 document = modes_mod.assumptions_fallback(document, asked)
         self._log("plan_draft", steps=len(steps))
-        # Item #56: the Goldfish pass — fresh reviewer-seat eyes on
+        # Item #56: the GoFish pass — fresh reviewer-seat eyes on
         # the draft BEFORE the gate opens. Advisory only: whatever it
         # finds (or however it fails), the gate opens next and the
         # owner decides. One revision round is already spent inside
         # the pass when it returns revised steps.
-        steps, goldfish_result, final_text = self._goldfish_pass(document, steps)
+        steps, gofish_result, final_text = self._gofish_pass(document, steps)
         if self._cancel:
             return False
-        if goldfish_result is not None:
-            self.plan_goldfish.emit(goldfish_result)
-        if goldfish_result is not None and goldfish_result.get("revised"):
-            # The revision comes back as a bare list (the goldfish
+        if gofish_result is not None:
+            self.plan_gofish.emit(gofish_result)
+        if gofish_result is not None and gofish_result.get("revised"):
+            # The revision comes back as a bare list (the gofish
             # instruction's shape): lay its steps into the document
             # when the document has a Steps section; a bare-list
             # draft is replaced by the revised text outright. The
@@ -2325,7 +2341,7 @@ class AgentWorker(QThread):
         # Item #66: the gate is a LOOP, not a single wait. A
         # COMMENT decision settles the wait as a revision: the
         # driver rewrites the draft once against the owner's words
-        # (_owner_comment_revision — the Goldfish revision's shape,
+        # (_owner_comment_revision — the GoFish revision's shape,
         # owner-driven) and the revised draft returns to THIS gate
         # via plan_revised. Approve / kill leave the loop exactly
         # as the single wait did, and comment rounds are uncapped
@@ -2357,7 +2373,7 @@ class AgentWorker(QThread):
                 if revised is not None:
                     rev_text, rev_steps = revised
                     # The revision comes back as a bare list (the
-                    # Goldfish revision's shape): lay its steps
+                    # GoFish revision's shape): lay its steps
                     # into the document when the document has a
                     # Steps section; a bare-list draft is replaced
                     # by the revised text outright.
@@ -2382,7 +2398,7 @@ class AgentWorker(QThread):
             self.status.emit("Plan killed — nothing was executed.")
             return False
         self._plan_steps = approved
-        # Manus study M3: arm the recitation state from the same
+        # Study item M3: arm the recitation state from the same
         # sources the gate itself used — the request that opened the
         # turn (its first line, the notes-file clip) for the title,
         # and the approved document's Success criteria, but only
@@ -2400,7 +2416,7 @@ class AgentWorker(QThread):
         # (The window built this worker's permissions dict for this
         # turn only; the mode combo on screen does not change.)
         self.permissions = {**self.permissions, "mode": "code"}
-        # Manus study M5: the promotion changes the offered surface
+        # Study item M5: the promotion changes the offered surface
         # mid-turn — legitimately, because the OWNER's gate
         # approval causes it — so it goes on the record as a
         # surface change at the moment it happens, like any other
@@ -2653,7 +2669,7 @@ class AgentWorker(QThread):
         return True
 
     def _note_tester_verdict(self, result: str, parsed: dict) -> None:
-        """Manus study M13: report a Tester FAIL verdict as a local
+        """Study item M13: report a Tester FAIL verdict as a local
         event. Only a FAIL is an event — the verdict is read by
         the same contract reader the cadence tab uses
         (testcadence.verdict_of), so a PASS, an error, or an
@@ -2683,14 +2699,14 @@ class AgentWorker(QThread):
                       detail=str(exc)[:200])
 
     def _in_homework(self) -> bool:
-        """Manus study M5: a homework pass is in progress — either
+        """Study item M5: a homework pass is in progress — either
         the phase pass (_homework_phase, Plan/Research) or the
         in-loop pass (the document/answer modes, until the first
         text-only generation ends it)."""
         return bool(self._homework_active or self._homework_phase_active)
 
     def _homework_refusal(self, name: str) -> str | None:
-        """Manus study M5: the homework pass's execution gate, or
+        """Study item M5: the homework pass's execution gate, or
         None when the call may proceed. The pass gathers facts; it
         does not draft. The tools stay in the offered definitions
         for the whole turn (the offer no longer shrinks for the
@@ -2827,10 +2843,10 @@ class AgentWorker(QThread):
                       error=str(exc)[:200])
 
 
-    # ---------- Item #56: the Goldfish pass ----------
+    # ---------- Item #56: the GoFish pass ----------
 
-    def _goldfish_pass(self, plan_text: str, steps: list[str]):
-        """Run the Goldfish review over a drafted plan. Returns
+    def _gofish_pass(self, plan_text: str, steps: list[str]):
+        """Run the GoFish review over a drafted plan. Returns
         (steps, result, final_text): the steps to present at the
         gate (the revised draft's, when the one revision round
         produced a parseable plan), the review result dict for
@@ -2843,19 +2859,19 @@ class AgentWorker(QThread):
         missing, empty, or over budget leaves a result whose
         `skipped` (or partial findings) says exactly that, and the
         original draft goes to the owner untouched."""
-        if not self.goldfish:
+        if not self.gofish:
             return steps, None, plan_text
-        result = goldfish_mod.new_result(self.reviewer_model)
-        self._goldfish_result = result
+        result = gofish_mod.new_result(self.reviewer_model)
+        self._gofish_result = result
         try:
-            budget = self._goldfish_budget
+            budget = self._gofish_budget
             used = 0
             current_text, current_steps = plan_text, steps
             for round_no in (0, 1):
                 if self._cancel:
                     break
                 round_findings, paraphrase, checks, ran = \
-                    self._goldfish_round(current_text, budget - used)
+                    self._gofish_round(current_text, budget - used)
                 used += ran
                 result["rounds"] = round_no + 1
                 result["readiness"] = checks
@@ -2873,13 +2889,13 @@ class AgentWorker(QThread):
                     break
                 # One revision round max — and only while reviewer
                 # budget remains for the re-review.
-                if not goldfish_mod.needs_revision(result["findings"]):
+                if not gofish_mod.needs_revision(result["findings"]):
                     break
                 if used >= budget:
-                    self._log("goldfish_revision_skipped",
+                    self._log("gofish_revision_skipped",
                               reason="generation budget exhausted")
                     break
-                revised = self._goldfish_revision(current_text, result)
+                revised = self._gofish_revision(current_text, result)
                 if revised is None:
                     break
                 current_text, current_steps = revised
@@ -2887,52 +2903,52 @@ class AgentWorker(QThread):
             if result["rounds"] and not result["findings"] \
                     and not result["paraphrase"] and used == 0:
                 result["skipped"] = "reviewer unavailable"
-            self._log("goldfish_review", reviewer=self.reviewer_model,
+            self._log("gofish_review", reviewer=self.reviewer_model,
                       rounds=result["rounds"], revised=result["revised"],
                       findings=len(result["findings"]),
                       skipped=result["skipped"] or None)
-            # Manus study M7: the parsed findings ARE the goldfish
+            # Study item M7: the parsed findings ARE the gofish
             # handoff — already structured by parse_findings, so no
             # repair round is needed. The keeper reads them at the
             # turn's end.
-            self._goldfish_handoff = {
-                "seat": "goldfish",
+            self._gofish_handoff = {
+                "seat": "gofish",
                 "parsed": {"asked": "", "done": "", "files": [],
                            "evidence": "", "open": []},
                 "missing": [], "unparsed": False,
                 "findings": list(result["findings"])}
             return current_steps, result, current_text
         except Exception as exc:  # the pass must never eat the plan
-            self._log("goldfish_failed", error=str(exc)[:300])
+            self._log("gofish_failed", error=str(exc)[:300])
             result["skipped"] = "review failed — plan stands as drafted"
             return steps, result, plan_text
 
-    def _goldfish_round(self, plan_text: str, budget_left: int):
+    def _gofish_round(self, plan_text: str, budget_left: int):
         """One review round: the mechanical readiness check (no
         generation) plus the two model stages, sequentially, each
         in its own FRESH context. Returns (findings, paraphrase,
         readiness_checks, generations_run)."""
-        findings, checks = goldfish_mod.check_readiness(
+        findings, checks = gofish_mod.check_readiness(
             self.workspace, plan_text)
-        contents = goldfish_mod.read_named_files(
+        contents = gofish_mod.read_named_files(
             self.workspace, plan_text,
             total_budget=self.result_digest_chars)
         paraphrase = ""
         ran = 0
-        for stage in goldfish_mod.STAGES:
+        for stage in gofish_mod.STAGES:
             if self._cancel:
                 break
             if ran >= budget_left:
-                self._log("goldfish_stage_skipped", stage=stage,
+                self._log("gofish_stage_skipped", stage=stage,
                           reason="generation budget exhausted")
                 break
-            text = self._run_goldfish_stage(stage, plan_text, contents)
+            text = self._run_gofish_stage(stage, plan_text, contents)
             if text is None:
                 break  # unavailable/empty — a second stage won't fix it
             ran += 1
-            findings.extend(goldfish_mod.parse_findings(text, stage))
+            findings.extend(gofish_mod.parse_findings(text, stage))
             if stage == "comprehension":
-                paraphrase = goldfish_mod.parse_paraphrase(text)
+                paraphrase = gofish_mod.parse_paraphrase(text)
         return findings, paraphrase, checks, ran
 
     def _resolve_budget(self, model) -> int:
@@ -2968,7 +2984,7 @@ class AgentWorker(QThread):
         are summarized in place with forge/context.py's own machinery
         (the same plan / render / apply pieces the between-turn fold
         uses; the summary is written by the session model with tools
-        off, through the same client seam as the Goldfish stages) and
+        off, through the same client seam as the GoFish stages) and
         the turn keeps its tools and its task. Returns True when a
         fold landed and shrank the history. Returns False — and the
         caller falls back to the classic B18 wrap-up — when no fold
@@ -2985,7 +3001,7 @@ class AgentWorker(QThread):
                                      force=True)
         if plan is None:
             return False
-        # Manus study M2: archive the FULL span before the summarizer
+        # Study item M2: archive the FULL span before the summarizer
         # render clips it. If the archive cannot be written, the fold
         # does NOT happen — the turn falls back to the classic wrap-up
         # with its history untouched; content is never dropped
@@ -3038,7 +3054,7 @@ class AgentWorker(QThread):
         return True
 
     def _write_trajectory(self, num_ctx, schemas) -> bool:
-        """Manus study M8 — the saturation backstop. When the
+        """Study item M8 — the saturation backstop. When the
         mid-turn fold could not land and older history exists that
         a fold would have covered (plan_fold finds a span),
         replace that span with a program-built trajectory summary
@@ -3054,8 +3070,8 @@ class AgentWorker(QThread):
                                      force=True)
         if plan is None:
             return False
-        handoffs = ([self._goldfish_handoff]
-                    if self._goldfish_handoff else []) \
+        handoffs = ([self._gofish_handoff]
+                    if self._gofish_handoff else []) \
             + list(self._tester_handoffs) \
             + ([self._council_handoff]
                if self._council_handoff else [])
@@ -3087,7 +3103,7 @@ class AgentWorker(QThread):
         return True
 
     def _restore_trajectory_plan(self):
-        """Manus study M8 — a resumed turn re-arms the live
+        """Study item M8 — a resumed turn re-arms the live
         checklist from the newest trajectory message on record, so
         the first generation starts oriented (M3 recitation and
         STEP DONE ticking resume from the recorded state instead
@@ -3098,7 +3114,7 @@ class AgentWorker(QThread):
         with a fresh approval. The message is refreshed at every
         turn end (_refresh_trajectory), so the snapshot the next
         turn restores from is the latest known state, not the
-        state at saturation. Manus fix F4: a SUPERSEDED or
+        state at saturation. Fix F4: a SUPERSEDED or
         ABANDONED plan never re-arms — the owner ended it, and
         the record says so; it stays dead until a fresh plan is
         approved. A record written before F4 has no status key
@@ -3125,7 +3141,7 @@ class AgentWorker(QThread):
                   done=len(self._plan_done), total=len(steps))
 
     def _refresh_trajectory(self):
-        """Manus study M8 — at turn end, refresh the newest
+        """Study item M8 — at turn end, refresh the newest
         trajectory message in place to the plan's current state, so
         the snapshot a later turn restores from never goes stale
         while the plan evolves. Only when this turn had a live
@@ -3137,8 +3153,8 @@ class AgentWorker(QThread):
         if latest is None:
             return
         try:
-            handoffs = ([self._goldfish_handoff]
-                        if self._goldfish_handoff else []) \
+            handoffs = ([self._gofish_handoff]
+                        if self._gofish_handoff else []) \
                 + list(self._tester_handoffs) \
                 + ([self._council_handoff]
                    if self._council_handoff else [])
@@ -3156,9 +3172,9 @@ class AgentWorker(QThread):
         except Exception:
             pass
 
-    def _run_goldfish_stage(self, stage: str, plan_text: str,
+    def _run_gofish_stage(self, stage: str, plan_text: str,
                             contents: dict) -> str | None:
-        """One goldfish stage generation on the REVIEWER seat through
+        """One gofish stage generation on the REVIEWER seat through
         the same client seam as everything else (the ProviderClient
         facade included), with NO tools — the reviewer reads the plan
         and its named files, it never acts. Mirrors _run_review's
@@ -3167,7 +3183,7 @@ class AgentWorker(QThread):
         failure, logged plainly either way.
 
         THE FIREWALL: the messages come from
-        goldfish_mod.build_stage_messages — plan text + named-file
+        gofish_mod.build_stage_messages — plan text + named-file
         contents only. self.messages (the conversation) is never
         read here, so nothing the driver or owner said can leak into
         the reviewer's context."""
@@ -3184,21 +3200,21 @@ class AgentWorker(QThread):
                 # a reviewer that may not exist. Skip plainly.
                 installed = None
             if installed is None:
-                self._log("goldfish_skipped", reviewer=reviewer,
+                self._log("gofish_skipped", reviewer=reviewer,
                           reason="model list unavailable")
-                self.status.emit("Goldfish: reviewer check unavailable — plan stands as drafted.")
+                self.status.emit("GoFish: reviewer check unavailable — plan stands as drafted.")
                 return None
             if not council_mod.model_installed(reviewer, installed):
-                self._log("goldfish_skipped", reviewer=reviewer,
+                self._log("gofish_skipped", reviewer=reviewer,
                           reason="reviewer model not installed")
-                self.status.emit("Goldfish: reviewer model not installed — plan stands as drafted.")
+                self.status.emit("GoFish: reviewer model not installed — plan stands as drafted.")
                 return None
-            messages = goldfish_mod.build_stage_messages(
+            messages = gofish_mod.build_stage_messages(
                 stage, plan_text, contents)
             # The reviewer seat budgets at ITS OWN model's window.
             options = {"temperature": 0.3, "num_predict": 1024,
                        "num_ctx": self._resolve_budget(reviewer)}
-            self.status.emit("Goldfish review — fresh eyes on the plan…")
+            self.status.emit("GoFish review — fresh eyes on the plan…")
             self._prepare_residency(reviewer)
             chunks = []
             for event in self.client.chat_stream(
@@ -3206,7 +3222,7 @@ class AgentWorker(QThread):
                     **self._stream_cancel_kwargs(
                         self._seat_keep_alive(reviewer, "5m"))):
                 if self._cancel:
-                    self._log("goldfish_skipped", reviewer=reviewer,
+                    self._log("gofish_skipped", reviewer=reviewer,
                               reason="turn cancelled")
                     return None
                 content = event.get("message", {}).get("content", "")
@@ -3214,46 +3230,46 @@ class AgentWorker(QThread):
                     chunks.append(content)
             text = strip_text_tool_calls("".join(chunks)).strip()
             if not text:
-                self._log("goldfish_skipped", reviewer=reviewer,
+                self._log("gofish_skipped", reviewer=reviewer,
                           reason="empty review")
                 return None
             return text
         except Exception as exc:
-            self._log("goldfish_failed", reviewer=reviewer,
+            self._log("gofish_failed", reviewer=reviewer,
                       error=str(exc)[:300])
-            self.status.emit("Goldfish review unavailable — plan stands as drafted.")
+            self.status.emit("GoFish review unavailable — plan stands as drafted.")
             return None
 
-    def _goldfish_revision(self, plan_text: str, result: dict):
+    def _gofish_revision(self, plan_text: str, result: dict):
         """The ONE revision round: the driver (in its own main
         context — the firewall binds the reviewer, not the driver)
-        rewrites the draft once against the goldfish's findings.
+        rewrites the draft once against the gofish's findings.
         Returns (revised_text, revised_steps), or None when the
         reply is not a parseable plan — the original draft then
         stands, with the findings still riding to the gate."""
         self.messages.append({"role": "user",
-                              "content": goldfish_mod.revision_instruction(result)})
-        self.status.emit("Goldfish found blockers — driver revising the plan once…")
+                              "content": gofish_mod.revision_instruction(result)})
+        self.status.emit("GoFish found blockers — driver revising the plan once…")
         text, _dropped = self._generate([], num_predict=1024,
-                                        phase="goldfish-revision")
+                                        phase="gofish-revision")
         if not text.strip() or self._cancel:
             return None
         self.messages.append({"role": "assistant", "content": text})
         steps = planning_mod.parse_plan(text)
         if steps is None:
-            self._log("goldfish_revision_unusable")
+            self._log("gofish_revision_unusable")
             return None
-        self._log("goldfish_revision", steps=len(steps))
+        self._log("gofish_revision", steps=len(steps))
         return text, steps
 
     def _owner_comment_revision(self, comment: str):
         """Item #66: the owner's comment round at the gate — the
-        driver (in its own main context, exactly the Goldfish
+        driver (in its own main context, exactly the GoFish
         revision's shape) rewrites the draft once against the
         owner's own words. Returns (revised_text, revised_steps),
         or None when the reply is not a parseable plan — the
         drafted plan then stands and returns to the gate as-is.
-        The Goldfish pass does NOT re-run on the revision: its
+        The GoFish pass does NOT re-run on the revision: its
         one-round budget belongs to the reviewer's loop, and at
         this gate the owner is the reviewer."""
         self.messages.append({"role": "user", "content":
@@ -3281,7 +3297,7 @@ class AgentWorker(QThread):
         feedback, receipts, SKRIBE queueing and the tool messages
         themselves. call_history / fail_history are the turn's
         repeat-guard dicts, shared by every batch of the turn.
-        rut_history (Manus study M6) is the turn's identical-
+        rut_history (Study item M6) is the turn's identical-
         SUCCESS counter; direct one-batch callers may omit it and
         get a batch-local counter, exactly as if their batch were
         the whole turn."""
@@ -3392,7 +3408,7 @@ class AgentWorker(QThread):
                 self._log("tool_loop_blocked", tool=name, repeats=seen[0])
             elif (rut_history.get(call_key, 0) >= RUT_BREAK_AT
                     and call_key not in fail_history):
-                # Manus study M6: the hard rut-break. This exact
+                # Study item M6: the hard rut-break. This exact
                 # call has already SUCCEEDED RUT_BREAK_AT times
                 # this turn — with results that kept changing, or
                 # the identical-result refusal above would own it
@@ -3424,7 +3440,7 @@ class AgentWorker(QThread):
                           cap=self._research_cap)
             elif (homework_refusal := self._homework_refusal(name)) is not None \
                     and mode_ok:
-                # Manus study M5: the homework pass's gate — since
+                # Study item M5: the homework pass's gate — since
                 # M5 the pass is offered the full surface, so a
                 # non-read call can arrive; it is refused here,
                 # before permissions and approval, with the plain
@@ -3624,7 +3640,7 @@ class AgentWorker(QThread):
                 else:
                     fail_history.pop(call_key, None)
             if executed:
-                # Manus study M6: count identical SUCCESSES for
+                # Study item M6: count identical SUCCESSES for
                 # the rut guard — digest-independent, which is the
                 # whole point: call_history above resets its count
                 # on a changed result, this counter does not, so a
@@ -3687,7 +3703,7 @@ class AgentWorker(QThread):
             # same shell receipts — compact, and shell-authored.
             self._turn_receipts.append(receipt_line)
             self.receipt.emit(receipt_line)
-            # Manus study M7: a tester run's report is a seat
+            # Study item M7: a tester run's report is a seat
             # handoff — parse it (the plugin already repaired it
             # once inside the tool call) and keep it for the keeper
             # pass. The result text itself is untouched here.
@@ -3700,7 +3716,7 @@ class AgentWorker(QThread):
                     {"seat": "tester", "parsed": parsed,
                      "missing": missing, "unparsed": bool(missing),
                      "raw": result})
-                # Manus study M13: a FAIL verdict is a local event
+                # Study item M13: a FAIL verdict is a local event
                 # the owner may want to act on — report it to the
                 # window (which raises a proposal, or nothing when
                 # no callback is wired). A PASS, an error, or an
@@ -3722,7 +3738,7 @@ class AgentWorker(QThread):
             # detection, receipts, SKRIBE) and the event log have
             # already seen the tool's raw text.
             content = _untrusted_frame(name, content)
-            # Manus study M4: an UNEXPECTED dispatch failure's
+            # Study item M4: an UNEXPECTED dispatch failure's
             # detail line (exception type + raising frame, stashed
             # by _execute where the traceback was alive) joins the
             # message copy here, on the same terms as the framing
@@ -3754,7 +3770,7 @@ class AgentWorker(QThread):
             # identical (tool, args) key. Presence in this dict means
             # the key's last executed result was a tool error.
             fail_history: dict[str, int] = {}
-            # Manus study M6: identical SUCCESSFUL executions per
+            # Study item M6: identical SUCCESSFUL executions per
             # (tool, args) key, digest-independent — the rut guard's
             # counter (see RUT_NOTICE_AT / RUT_BREAK_AT).
             rut_history: dict[str, int] = {}
@@ -3772,7 +3788,7 @@ class AgentWorker(QThread):
             # clean — none of them may leak from a previous turn.
             self._denial_history = {}
             self._verify_fails = {}
-            # Manus study M4: a fresh turn carries no stale failure
+            # Study item M4: a fresh turn carries no stale failure
             # detail from a previous turn's last execution.
             self._failure_detail = None
             self._auto_snap_attempted = False
@@ -3785,24 +3801,24 @@ class AgentWorker(QThread):
             self._budget_stopped = False
             self._mid_turn_folds = 0
             self._council_done = False
-            # Manus study M7: a fresh turn has no handoffs yet.
+            # Study item M7: a fresh turn has no handoffs yet.
             self._council_handoff = None
-            self._goldfish_handoff = None
+            self._gofish_handoff = None
             self._tester_handoffs = []
             self._plan_steps = None
             self._plan_done = set()
-            # Manus study M3: recitation state resets with the plan
+            # Study item M3: recitation state resets with the plan
             # state — a fresh turn recites nothing until its own
             # plan is approved.
             self._plan_title = ""
             self._plan_success = ""
-            # Manus study M8: …unless a trajectory summary from a
+            # Study item M8: …unless a trajectory summary from a
             # saturated earlier turn is on record — then the live
             # checklist re-arms from it (see
             # _restore_trajectory_plan).
             self._restore_trajectory_plan()
             self._plan_skribe = {"verified": 0, "unverified": 0, "graded": False}
-            self._goldfish_result = None
+            self._gofish_result = None
             # Write/Research modes: a fresh research turn starts
             # unapproved, unbudgeted-spent, with an empty consulted
             # list — the phase arms the run only at the gate.
@@ -3831,7 +3847,7 @@ class AgentWorker(QThread):
                                      and not self.researching
                                      and self._homework_mode
                                      in modes_mod.HOMEWORK_MODES)
-            # Manus study M5: the turn's tool surface goes on the
+            # Study item M5: the turn's tool surface goes on the
             # record before anything generates — and a change from
             # the session's previous turn is logged as one (see
             # _record_surface).
@@ -3868,7 +3884,7 @@ class AgentWorker(QThread):
                     if not self._ask_continue_long_turn():
                         break
                 self.status.emit("Generating response…" if cycle == 0 else "Processing tool result…")
-                # Item #58, as amended by Manus study M5: the
+                # Item #58, as amended by Study item M5: the
                 # offer is the mode's full surface for EVERY main
                 # generation of the turn — including the homework
                 # pass, which used to shrink it to read-class and
@@ -3935,7 +3951,7 @@ class AgentWorker(QThread):
                                else BUDGET_STOP_FRACTION)
                     if fill >= stop_at:
                         if not self._try_mid_turn_fold(num_ctx, schemas):
-                            # Manus study M8: the fold could not land
+                            # Study item M8: the fold could not land
                             # (cap spent, non-shrinking, or no
                             # summary) — the compression has
                             # saturated. Before the classic wrap-up,
@@ -3955,7 +3971,7 @@ class AgentWorker(QThread):
                             schemas = []
                             self.status.emit(
                                 "Context nearly full — wrapping up without tools…")
-                # Manus fix F3: no stored plan-progress reminder
+                # Fix F3: no stored plan-progress reminder
                 # any more — the D39 re-injection is retired. The
                 # plan stays in attention through M3 recitation
                 # alone (a fresh block on the outgoing request
@@ -3974,7 +3990,7 @@ class AgentWorker(QThread):
                     num_predict=1024 if self._skribe_awaiting else None,
                     phase="grading" if self._skribe_awaiting else "main",
                     cycle=cycle,
-                    # Manus study M3: the main loop is the one place
+                    # Study item M3: the main loop is the one place
                     # an approved plan executes — every one of its
                     # generations recites the plan state at request
                     # time (see _generate).
@@ -4094,24 +4110,24 @@ class AgentWorker(QThread):
                     "unverified": self._plan_skribe["unverified"],
                     "graded": self._plan_skribe["graded"],
                     "cancelled": bool(self._cancel)})
-            # Manus study M8: the trajectory snapshot on record
+            # Study item M8: the trajectory snapshot on record
             # is refreshed to this turn's final plan state before
             # the turn settles, so a later resume restores the
             # latest known state.
             self._refresh_trajectory()
-            # Manus study M7: the keeper pass — programmatic, once,
+            # Study item M7: the keeper pass — programmatic, once,
             # over this turn's validated handoffs. Only a finished
             # (not cancelled) turn with a workspace in scope; the
             # keeper itself never raises.
-            handoffs = ([self._goldfish_handoff]
-                        if self._goldfish_handoff else []) \
+            handoffs = ([self._gofish_handoff]
+                        if self._gofish_handoff else []) \
                 + list(self._tester_handoffs) \
                 + ([self._council_handoff]
                    if self._council_handoff else [])
             if self.workspace and not self._cancel and handoffs:
                 handoff_mod.keeper_pass(self.workspace, handoffs,
                                         log=self._log)
-            # Manus study M10: offer to save a finished run as a
+            # Study item M10: offer to save a finished run as a
             # skill — only when the setting is on, a skills
             # directory is in scope, the turn was not cancelled,
             # and an approved plan completed (every step announced
@@ -4256,49 +4272,26 @@ class AgentWorker(QThread):
             self._skribe_tool_rounds = 0
             verdicts = skribe_mod.match_verdicts(
                 self._skribe_queue.paths(), skribe_mod.parse_verdicts(text))
-            failing: list[tuple[str, dict | None]] = []
-            for path in self._skribe_queue.paths():
-                cls = self._skribe_queue.class_of(path)
-                verdict = verdicts.get(path)
-                if verdict and verdict["decision"] == "finalize" \
-                        and verdict["fzi"] >= skribe_mod.FINALIZE_MIN_FZI:
-                    self._skribe_queue.discard(path)
-                    self._plan_skribe["verified"] += 1
-                    self._log("skribe_verdict", file=path, file_class=cls,
-                              fzi=verdict["fzi"], decision="finalize")
-                    self.receipt.emit(skribe_mod.verified_receipt(path, cls, verdict["fzi"]))
-                elif verdict:
-                    # A finalize below FINALIZE_MIN_FZI lands here
-                    # too: it does not verify, and the log keeps the
-                    # grader's REAL decision — never relabeled.
-                    self._log("skribe_verdict", file=path, file_class=cls,
-                              fzi=verdict["fzi"], decision=verdict["decision"])
-                    self.receipt.emit(skribe_mod.revision_receipt(path, cls, verdict["fzi"]))
-                    failing.append((path, verdict))
-                else:
-                    failing.append((path, None))
-            if not failing:
-                return False
-            if self._skribe_bounces < SKRIBE_MAX_BOUNCES:
-                self._skribe_bounces += 1
-                self._log("skribe_bounce", bounce=self._skribe_bounces,
-                          files=[p for p, _v in failing])
-                self.status.emit("SKRIBE asked for revisions — bouncing back…")
-                self.messages.append({"role": "user",
-                                      "content": skribe_mod.revise_instruction(failing)})
-                return True
-            # Out of bounces: report the unverified files UP (receipt +
-            # event log + status) rather than dropping them silently.
-            for path, verdict in failing:
-                cls = self._skribe_queue.class_of(path)
-                self._skribe_queue.discard(path)
-                self._plan_skribe["unverified"] += 1
-                reason = "revise requested" if verdict else "no verdict returned"
-                self._log("skribe_unverified", file=path, file_class=cls, reason=reason)
-                self.receipt.emit(skribe_mod.unverified_receipt(path, cls, reason))
-            self.status.emit(f"SKRIBE: {len(failing)} file(s) NOT VERIFIED — see the receipts.")
-            return False
+            return self._skribe_apply_verdicts(verdicts)
         if len(self._skribe_queue):
+            # Decisions fast lane (2026-11-12): when the owner
+            # switched it on, score the queued files through the
+            # Gemini Decisions API instead of a local grading
+            # generation — ~250 ms a file against minutes of 2B
+            # generation. The endpoint only MEASURES (a score); the
+            # shell's deterministic rule in _skribe_apply_verdicts
+            # makes the finalize/revise call, so no model holds the
+            # grader seat here (governing-seat rule) — which is why
+            # this lane runs ahead of the seat check below: that
+            # check guards a MODEL grading, and no model grades on
+            # this lane. Any failure falls through to the local pass.
+            if self.skribe_decisions:
+                verdicts = self._skribe_decisions_grade()
+                if verdicts is not None:
+                    self._plan_skribe["graded"] = True
+                    return self._skribe_apply_verdicts(
+                        skribe_mod.match_verdicts(
+                            self._skribe_queue.paths(), verdicts))
             # Governing seat (bite #3): grading runs on the SESSION
             # model, and the grader seat is a governing seat. A session
             # model that is not on the roster may not grade — the
@@ -4331,6 +4324,101 @@ class AgentWorker(QThread):
             return True
         return False
 
+    def _skribe_apply_verdicts(self, verdicts) -> bool:
+        """Settle one grading pass's verdicts — local or Decisions,
+        the downstream path is the same: verified files leave the
+        queue with receipts, failing files bounce once for revision,
+        and files still unverified after the bounce are reported up.
+        Returns True when the turn must continue (a bounce was just
+        requested), False when the gate is settled."""
+        failing: list[tuple[str, dict | None]] = []
+        for path in self._skribe_queue.paths():
+            cls = self._skribe_queue.class_of(path)
+            verdict = verdicts.get(path)
+            if verdict and verdict["decision"] == "finalize" \
+                    and verdict["fzi"] >= skribe_mod.FINALIZE_MIN_FZI:
+                self._skribe_queue.discard(path)
+                self._plan_skribe["verified"] += 1
+                self._log("skribe_verdict", file=path, file_class=cls,
+                          fzi=verdict["fzi"], decision="finalize")
+                self.receipt.emit(skribe_mod.verified_receipt(path, cls, verdict["fzi"]))
+            elif verdict:
+                # A finalize below FINALIZE_MIN_FZI lands here
+                # too: it does not verify, and the log keeps the
+                # grader's REAL decision — never relabeled.
+                self._log("skribe_verdict", file=path, file_class=cls,
+                          fzi=verdict["fzi"], decision=verdict["decision"])
+                self.receipt.emit(skribe_mod.revision_receipt(path, cls, verdict["fzi"]))
+                failing.append((path, verdict))
+            else:
+                failing.append((path, None))
+        if not failing:
+            return False
+        if self._skribe_bounces < SKRIBE_MAX_BOUNCES:
+            self._skribe_bounces += 1
+            self._log("skribe_bounce", bounce=self._skribe_bounces,
+                      files=[p for p, _v in failing])
+            self.status.emit("SKRIBE asked for revisions — bouncing back…")
+            self.messages.append({"role": "user",
+                                  "content": skribe_mod.revise_instruction(failing)})
+            return True
+        # Out of bounces: report the unverified files UP (receipt +
+        # event log + status) rather than dropping them silently.
+        for path, verdict in failing:
+            cls = self._skribe_queue.class_of(path)
+            self._skribe_queue.discard(path)
+            self._plan_skribe["unverified"] += 1
+            reason = "revise requested" if verdict else "no verdict returned"
+            self._log("skribe_unverified", file=path, file_class=cls, reason=reason)
+            self.receipt.emit(skribe_mod.unverified_receipt(path, cls, reason))
+        self.status.emit(f"SKRIBE: {len(failing)} file(s) NOT VERIFIED — see the receipts.")
+        return False
+
+    def _skribe_decisions_grade(self):
+        """The Decisions fast lane: score each queued file with one
+        Decisions request per file (that file's contents as the
+        shared input). Returns {normalized path: {fzi, decision}}
+        in the match_verdicts input shape, or None when the lane
+        failed — the caller falls back to the local grading pass
+        for the whole batch. The decision here is the SHELL's
+        deterministic rule on the measured FZI (finalize at or
+        above FINALIZE_MIN_FZI, revise below it): the endpoint
+        never decides, it only scores."""
+        client = self._decisions_client
+        if client is None:
+            self._log("skribe_decisions_fallback",
+                      reason="no Gemini key stored")
+            return None
+        verdicts: dict[str, dict] = {}
+        try:
+            for path in self._skribe_queue.paths():
+                result = decisions_mod.score_fzi(
+                    client, self._read_decisions_input(path))
+                fzi = result.fzi
+                verdicts[skribe_mod.normalize_path(path).lower()] = {
+                    "fzi": fzi,
+                    "decision": ("finalize"
+                                 if fzi >= skribe_mod.FINALIZE_MIN_FZI
+                                 else "revise"),
+                }
+        except Exception as exc:
+            # ONE plain log line naming the fallback reason; the
+            # local grading pass below grades the batch instead.
+            reason = str(exc).strip() or exc.__class__.__name__
+            self._log("skribe_decisions_fallback", reason=reason[:200])
+            return None
+        return verdicts
+
+    def _read_decisions_input(self, path: str) -> str:
+        """One queued file's on-disk contents for the Decisions
+        input. Queue paths are workspace-relative (absolute paths
+        pass through); unreadable bytes read as replacement
+        characters rather than failing the batch."""
+        p = Path(path)
+        if not p.is_absolute():
+            p = Path(self.workspace) / p
+        return p.read_text(encoding="utf-8", errors="replace")
+
     def _council_step(self, final_text: str) -> bool:
         """Council gate (bite #2), consulted once the turn has settled
         (SKRIBE graded, stop hooks quiet). Returns True exactly once —
@@ -4353,7 +4441,7 @@ class AgentWorker(QThread):
         critique = self._run_review(reviewer, answer)
         if critique is None:
             return False
-        # Manus study M7: the reviewer's return closes in the
+        # Study item M7: the reviewer's return closes in the
         # handoff schema. Parse it; an attempted-but-incomplete
         # return gets ONE repair generation (the missing sections
         # only); a return that never attempted the format is left
@@ -4476,7 +4564,7 @@ class AgentWorker(QThread):
 
     def _run_review_repair(self, reviewer: str, critique: str,
                            missing: list[str]) -> str | None:
-        """Manus study M7: the ONE repair round for a council
+        """Study item M7: the ONE repair round for a council
         handoff that attempted the schema but missed sections —
         the missing sections only, no tools. None on any failure;
         the turn never waits on structure."""
@@ -4706,7 +4794,7 @@ class AgentWorker(QThread):
         self._take_checkpoint(f"Step — {name} {path}".rstrip())
 
     def _execute(self, name: str, args: dict) -> str:
-        # Manus study M4: every execution starts with a clean detail
+        # Study item M4: every execution starts with a clean detail
         # stash — the batch tail reads it only for THIS call.
         self._failure_detail = None
         blocked = self._maybe_pre_delete_checkpoint(name, args)
@@ -4720,7 +4808,7 @@ class AgentWorker(QThread):
             # error either way — it also reaches the event log, so
             # a dispatch bug is diagnosable after the fact instead
             # of existing only inside one transcript.
-            # Manus study M4: the log record now carries the
+            # Study item M4: the log record now carries the
             # exception TYPE and a compact traceback tail as well —
             # str(exc) alone made a bare KeyError undiagnosable —
             # and the model-facing detail line (tools.failure_detail)

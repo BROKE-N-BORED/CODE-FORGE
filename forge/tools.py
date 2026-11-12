@@ -284,7 +284,7 @@ class ToolError(RuntimeError):
     pass
 
 
-# Manus study M4 ("keep the wrong stuff in"): the compact diagnostic
+# Study item M4 ("keep the wrong stuff in"): the compact diagnostic
 # line for an UNEXPECTED tool failure. A ToolError's message is an
 # authored diagnostic — written to tell the model exactly what was
 # refused and how to fix the call — so it needs no help. Any OTHER

@@ -10,7 +10,7 @@ Settings → Behavior, default OFF) enforcing Forge's own established
 pattern for this hardware: one local model in memory at a time,
 working in sequence. When the toggle is ON:
 
-1. Every non-driver seat generation (reviewer/council, Goldfish,
+1. Every non-driver seat generation (reviewer/council, GoFish,
    tester, bench, Watch, SKRIBE grading, vision, the Knowledge
    distiller) runs with keep_alive 0, so its model unloads the
    moment it finishes instead of lingering.

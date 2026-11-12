@@ -1,7 +1,7 @@
 """Natural-language pre-merge checks for the plan gate (CR8 —
-CodeRabbit study, Tier 1 #8).
+the review study, Tier 1 #8).
 
-CodeRabbit gates a merge on conditions written in plain words.
+Forge gates a merge on conditions written in plain words.
 Forge's gate is the plan gate (the Plan window: Approve / Edit /
 Kill — forge/main.py PlanWindow + ForgeWindow._plan_render), and
 CR8 rides in it: the owner writes the checks in plain words, one
@@ -16,7 +16,7 @@ names the latest review. A line that maps to no evaluator is
 never silently passed: it shows as CAN'T CHECK with the reason,
 so the owner reads it with their own eyes. Nothing here blocks
 anything — Approve stays the owner's call, exactly as the
-Goldfish view beside it is advisory only. Reads never raise;
+GoFish view beside it is advisory only. Reads never raise;
 a missing gate-checks.md simply means no checks written."""
 
 from __future__ import annotations

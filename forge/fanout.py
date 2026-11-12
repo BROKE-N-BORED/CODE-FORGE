@@ -1,7 +1,7 @@
-"""Fan-out for similar independent items (Manus study M12).
+"""Fan-out for similar independent items (Study item M12).
 
-Manus's Wide Research fans a task out to many agents at once;
-Forge's hardware (Ryzen 3 / 8 GB, CPU-only) cannot do that, and
+Fanning a task out to many agents at once is the wide-research
+shape. Forge's hardware (Ryzen 3 / 8 GB, CPU-only) cannot do that, and
 the #53 cap (max_parallel_turns, 1-4, default 1) is the hard
 ceiling on how many turns may ever be live. What M12 adds, at
 Forge scale, is a fan-out path for a batch of SIMILAR

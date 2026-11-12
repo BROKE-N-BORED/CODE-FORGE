@@ -1,8 +1,8 @@
-"""Code graph, light edition (Tier 2 #2 — CodeRabbit study).
+"""Code graph, light edition (Tier 2 #2 — the review study).
 
-CodeRabbit builds a full code graph of the repo (definitions,
-usages, cross-file references) and lets its reviewer investigate
-with it. Forge already owns the static half of that idea:
+A full code graph of the repo (definitions, usages, cross-file
+references) lets a reviewer investigate with it. Forge already
+owns the static half of that idea:
 forge/repomap.py renders a PROJECT MAP — classes, functions,
 signatures, ranked by how much the rest of the project imports
 them — into every system prompt. What Forge did NOT have is the

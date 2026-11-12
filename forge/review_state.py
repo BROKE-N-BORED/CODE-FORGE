@@ -1,8 +1,8 @@
-"""Review state (CR6 — CodeRabbit Tier 1 #6, 2026-11-11).
+"""Review state (CR6 — Review Tier 1 #6, 2026-11-11).
 
-CodeRabbit reviews only what changed since the last review and
-keeps a running summary. Forge's version is file-based and
-owner-gated, because only the owner can say a review is done:
+Forge reviews only what changed since the last review and
+keeps a running summary — file-based and owner-gated,
+because only the owner can say a review is done:
 
   <project>/.forge/reviews/state.json   — what was reviewed, when
   <project>/.forge/reviews/summary.md   — the running summary

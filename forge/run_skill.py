@@ -1,4 +1,4 @@
-"""Save a finished run as a skill (Manus study M10).
+"""Save a finished run as a skill (Study item M10).
 
 At the end of a successful task — an approved plan whose every
 step was announced done — Forge may offer to draft a skill from

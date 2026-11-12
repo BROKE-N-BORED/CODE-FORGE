@@ -1,7 +1,7 @@
-"""Review Learnings (CR1 — the CodeRabbit Learnings loop, 2026-11-11;
+"""Review Learnings (CR1 — the Learnings loop, 2026-11-11;
 perfection pass 2026-11-11).
 
-CodeRabbit's main anti-noise mechanism, at Forge scale: when the
+The main anti-noise mechanism, at Forge scale: when the
 owner dismisses a review finding in plain language ("not a finding —
 handled higher up the stack"), that correction PERSISTS and is
 applied to future reviews, so the reviewer stops re-raising what the

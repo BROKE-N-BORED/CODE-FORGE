@@ -181,7 +181,11 @@ exactly that finding (file, exact change, how to verify). When
 the owner sends a finding for fixing, the request is recorded
 in the review under a '## Fix requests' section at the end
 (date, finding, and the prompt that was sent), so the review
-carries its own fix history. Reviews change nothing by
+carries its own fix history. When the owner runs a finishing
+touch (docstrings or unit tests for the reviewed files), the
+request is recorded the same way under a '## Finishing touches'
+section at the end (date, kind, files, and the prompt that was
+sent). Reviews change nothing by
 themselves — they are the record the owner acts on.
 Incremental reviews cover only the files changed since the last
 review the owner marked reviewed; after filing a report, update

@@ -506,7 +506,7 @@ class OllamaClient:
         while True:
             attempt += 1
             emitted = False
-            # Manus study M1 (stable-prefix discipline): sort_keys makes
+            # Study item M1 (stable-prefix discipline): sort_keys makes
             # the request bytes a pure function of the request's MEANING.
             # Without it, a message dict rebuilt in a different insertion
             # order (a history restored from storage, a tool call parsed

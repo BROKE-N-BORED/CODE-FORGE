@@ -1,7 +1,7 @@
-"""Linter layer, light edition (Tier 2 #1 — CodeRabbit study).
+"""Linter layer, light edition (Tier 2 #1 — the review study).
 
-CodeRabbit runs ~60 linter/SAST tools in a cloud microVM. Forge's
-machine cannot, and must not install anything for this: the layer
+A hosted reviewer runs ~60 linter/SAST tools in a cloud microVM.
+Forge's machine cannot, and must not install anything for this: the layer
 runs ONLY the linters already installed on the project (Ruff,
 ShellCheck, ESLint when present), on demand, and hands their
 findings to the Reviewer as CR2-format lines with the tool named

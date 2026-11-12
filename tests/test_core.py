@@ -4640,7 +4640,7 @@ class SkribeWorkerTests(unittest.TestCase):
 
     def test_restricted_mode_writes_are_graded_too(self):
         # Plan mode may write plan files; those writes pass the same gate.
-        # Manus study M5: the script now opens with the turn's
+        # Study item M5: the script now opens with the turn's
         # homework pass (a read, then the text reply that ends it)
         # before writing — the pre-M5 script wrote as its first
         # action, which only worked because a scripted call could
@@ -4735,6 +4735,220 @@ class SkribeWorkerTests(unittest.TestCase):
         self.assertNotIn("blob.bin", gate_msgs[0])
         self.assertTrue(any("made_by_cmd.py" in r and "FZI 88" in r
                             and r.endswith("VERIFIED")
+                            for r in receipts if r.startswith("SKRIBE")))
+        self.assertTrue(finished)
+
+
+class _FakeDecisionsClient:
+    """A Decisions client that returns scripted FZI scores (one per
+    call, in order) and records the inputs it was asked to score."""
+
+    def __init__(self, fzis, error=None):
+        from forge.decisions import ScoreResult
+        self._fzis = list(fzis)
+        self._last = self._fzis[-1] if self._fzis else 0
+        self._error = error
+        self._ScoreResult = ScoreResult
+        self.calls = []
+
+    def score_text(self, text, levels, question, key):
+        self.calls.append(text)
+        if self._error is not None:
+            raise self._error
+        if self._fzis:
+            self._last = self._fzis.pop(0)
+        fzi = self._last
+        score = fzi / 25.0
+        return self._ScoreResult(fzi, score, {}, {}, 0.9, 120)
+
+
+class _FakeEventlog:
+    def __init__(self):
+        self.records = []
+
+    def record(self, kind, **fields):
+        self.records.append((kind, fields))
+
+
+class SkribeDecisionsTests(unittest.TestCase):
+    """The Decisions fast lane (2026-11-12): when the owner switches
+    it on, the queued files are scored through the Gemini Decisions
+    API instead of a local grading generation — no SKRIBE GATE
+    message, no extra generation, same verdicts and receipts
+    downstream. Any failure falls back to the local pass."""
+
+    def _worker(self, script, workspace, decisions=None, **kw):
+        from forge.worker import AgentWorker
+        eventlog = kw.pop("eventlog", None)
+        worker = AgentWorker(_ScriptedClient(script), "maternion/minicpm5-heretic:2b",
+                             [{"role": "user", "content": "go"}], {},
+                             str(workspace), eventlog=eventlog,
+                             skribe_decisions=decisions is not None,
+                             decisions_client=decisions, **kw)
+        worker.approval_needed.connect(lambda *a: worker.resolve_approval(True))
+        receipts, finished = [], []
+        worker.receipt.connect(receipts.append)
+        worker.finished_text.connect(lambda text, msgs: finished.append(text))
+        return worker, receipts, finished
+
+    WRITE = {"tool": "write_file", "args": {"path": "a.py", "content": "x = 1"}}
+
+    def _gate_msgs(self, worker):
+        # The grading prompt only — the bounce's revise instruction
+        # shares the SKRIBE GATE prefix but is not a grading pass.
+        return [m["content"] for m in worker.messages
+                if m.get("role") == "user"
+                and "SKRIBE GATE" in m.get("content", "")
+                and "Call load_skill" in m.get("content", "")]
+
+    def _revise_msgs(self, worker):
+        return [m["content"] for m in worker.messages
+                if m.get("role") == "user"
+                and "Grading did not pass these files" in m.get("content", "")]
+
+    def test_lane_on_scores_without_a_grading_generation(self):
+        ws = Path(tempfile.mkdtemp())
+        fake = _FakeDecisionsClient([87])
+        script = [self.WRITE, {"content": "written"}]
+        w, receipts, finished = self._worker(script, ws, decisions=fake)
+        w.run()
+        # Work + quiet only — no third call for a grading reply.
+        self.assertEqual(w.client.calls, 2)
+        self.assertEqual(self._gate_msgs(w), [])
+        self.assertEqual(fake.calls, ["x = 1"])
+        skribe_receipts = [r for r in receipts if r.startswith("SKRIBE")]
+        self.assertEqual(len(skribe_receipts), 1)
+        self.assertIn("FZI 87", skribe_receipts[0])
+        self.assertTrue(skribe_receipts[0].endswith("VERIFIED"))
+        self.assertTrue(finished)
+
+    def test_lane_off_never_calls_decisions(self):
+        ws = Path(tempfile.mkdtemp())
+        fake = _FakeDecisionsClient([87])
+        script = [self.WRITE,
+                  {"content": "written"},
+                  {"content": "SKRIBE-VERDICT file=a.py fzi=87 decision=finalize"}]
+        # Lane off: the client is passed but the switch is off.
+        w, receipts, finished = self._worker(script, ws, decisions=None)
+        w.run()
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(w.client.calls, 3)  # work, quiet, grading reply
+        self.assertEqual(len(self._gate_msgs(w)), 1)
+        self.assertTrue(any("FZI 87" in r and r.endswith("VERIFIED")
+                            for r in receipts if r.startswith("SKRIBE")))
+        self.assertTrue(finished)
+
+    def test_lane_on_without_a_client_falls_back_to_local(self):
+        ws = Path(tempfile.mkdtemp())
+        log = _FakeEventlog()
+        script = [self.WRITE,
+                  {"content": "written"},
+                  {"content": "SKRIBE-VERDICT file=a.py fzi=87 decision=finalize"}]
+        w, receipts, finished = self._worker(
+            script, ws, decisions=None, eventlog=log)
+        # The _worker helper keys the switch off the client; force
+        # the lane on with no client (the no-key shape).
+        w.skribe_decisions = True
+        w._decisions_client = None
+        w.run()
+        self.assertEqual(w.client.calls, 3)  # the local pass ran
+        self.assertEqual(len(self._gate_msgs(w)), 1)
+        self.assertTrue(any("FZI 87" in r and r.endswith("VERIFIED")
+                            for r in receipts if r.startswith("SKRIBE")))
+        fallbacks = [f for k, f in log.records
+                     if k == "skribe_decisions_fallback"]
+        self.assertEqual(len(fallbacks), 1)
+        self.assertIn("key", fallbacks[0]["reason"])
+        self.assertTrue(finished)
+
+    def test_decisions_failure_falls_back_to_local(self):
+        from forge.ollama_client import OllamaError
+        ws = Path(tempfile.mkdtemp())
+        log = _FakeEventlog()
+        fake = _FakeDecisionsClient([87], error=OllamaError("boom"))
+        script = [self.WRITE,
+                  {"content": "written"},
+                  {"content": "SKRIBE-VERDICT file=a.py fzi=87 decision=finalize"}]
+        w, receipts, finished = self._worker(script, ws, decisions=fake,
+                                             eventlog=log)
+        w.run()
+        self.assertEqual(fake.calls, ["x = 1"])  # tried once, then fell back
+        self.assertEqual(w.client.calls, 3)  # the local pass ran
+        self.assertEqual(len(self._gate_msgs(w)), 1)
+        self.assertTrue(any("FZI 87" in r and r.endswith("VERIFIED")
+                            for r in receipts if r.startswith("SKRIBE")))
+        fallbacks = [f for k, f in log.records
+                     if k == "skribe_decisions_fallback"]
+        self.assertEqual(len(fallbacks), 1)
+        self.assertIn("boom", fallbacks[0]["reason"])
+        self.assertTrue(finished)
+
+    def test_fzi_zero_from_decisions_revises_then_verifies(self):
+        ws = Path(tempfile.mkdtemp())
+        fake = _FakeDecisionsClient([0, 90])
+        script = [self.WRITE,
+                  {"content": "written"},
+                  {"tool": "write_file",
+                   "args": {"path": "a.py", "content": "x = 2"}},
+                  {"content": "revised"}]
+        w, receipts, finished = self._worker(script, ws, decisions=fake)
+        w.run()
+        # Work, quiet, revise-write, quiet — both grades rode the
+        # Decisions lane, no grading generation either time.
+        self.assertEqual(w.client.calls, 4)
+        self.assertEqual(self._gate_msgs(w), [])
+        # The bounce's revise instruction IS expected — it is the
+        # shell asking the model to rewrite, not a grading pass.
+        self.assertEqual(len(self._revise_msgs(w)), 1)
+        self.assertIn("FZI 0", self._revise_msgs(w)[0])
+        self.assertEqual(fake.calls, ["x = 1", "x = 2"])
+        skribe_receipts = [r for r in receipts if r.startswith("SKRIBE")]
+        self.assertTrue(any("FZI 0" in r and "REVISION REQUIRED" in r
+                            for r in skribe_receipts))
+        self.assertTrue(any("FZI 90" in r and r.endswith("VERIFIED")
+                            for r in skribe_receipts))
+        self.assertTrue(finished)
+
+    def test_low_but_nonzero_fzi_finalizes_by_the_shell_rule(self):
+        # FINALIZE_MIN_FZI (=1) is the WHOLE shell rule — no higher
+        # passing bar is implied by it. A Decisions FZI of 25
+        # finalizes, where the local grader might have said revise
+        # at a higher score: the endpoint measures, the shell's
+        # existing threshold decides. The FZI passing floor is
+        # Joshua's open decision; when he sets one, this lane must
+        # use it.
+        ws = Path(tempfile.mkdtemp())
+        fake = _FakeDecisionsClient([25])
+        script = [self.WRITE, {"content": "written"}]
+        w, receipts, finished = self._worker(script, ws, decisions=fake)
+        w.run()
+        self.assertEqual(w.client.calls, 2)
+        self.assertTrue(any("FZI 25" in r and r.endswith("VERIFIED")
+                            for r in receipts if r.startswith("SKRIBE")))
+        self.assertTrue(finished)
+
+    def test_decisions_lane_grades_despite_a_non_roster_session_model(self):
+        # The seat check guards a MODEL grading; no model grades on
+        # this lane (the endpoint measures, the shell decides), so
+        # the lane runs ahead of it. A non-roster session model
+        # still gets its files graded here — and still gets the seat
+        # refusal on the local pass when the lane fails or is off.
+        from forge.worker import AgentWorker
+        ws = Path(tempfile.mkdtemp())
+        fake = _FakeDecisionsClient([80])
+        script = [self.WRITE, {"content": "written"}]
+        worker = AgentWorker(_ScriptedClient(script), "llama3.1:8b",
+                             [{"role": "user", "content": "go"}], {},
+                             str(ws), skribe_decisions=True,
+                             decisions_client=fake)
+        worker.approval_needed.connect(lambda *a: worker.resolve_approval(True))
+        receipts, finished = [], []
+        worker.receipt.connect(receipts.append)
+        worker.finished_text.connect(lambda text, msgs: finished.append(text))
+        worker.run()
+        self.assertEqual(worker.client.calls, 2)
+        self.assertEqual(fake.calls, ["x = 1"])
+        self.assertTrue(any("FZI 80" in r and r.endswith("VERIFIED")
                             for r in receipts if r.startswith("SKRIBE")))
         self.assertTrue(finished)
 
@@ -7658,10 +7872,10 @@ class _GateWorker:
         self.started = False
         for name in ("token", "status", "approval_needed", "receipt",
                      "finished_text", "failed",
-                     "plan_ready", "plan_goldfish", "plan_document",
+                     "plan_ready", "plan_gofish", "plan_document",
                      "plan_revised", "plan_active",
                      "plan_step_done", "plan_turn_done", "turn_changes",
-                     # Manus study M10 added the skill_drafted
+                     # Study item M10 added the skill_drafted
                      # connection in _start_turn; the stand-in
                      # must carry the signal or every _start_turn
                      # test through it errors (M10 leftover, fixed
@@ -8484,7 +8698,7 @@ class DeckPlanActionTests(unittest.TestCase):
 
 
 class DeckFanOutTests(unittest.TestCase):
-    """Manus fix F5: fan-out from the phone. The bench screen
+    """Fix F5: fan-out from the phone. The bench screen
     carries a [11] FAN-OUT card — one item per line, an
     independence checkbox, a Fan out button — and POST /fanout
     round-trips like /plan (200 + JSON from a synchronous
@@ -8656,7 +8870,7 @@ class DeckFanOutTests(unittest.TestCase):
 
 
 class DeckProposalTests(unittest.TestCase):
-    """Manus fix F6: proposals from the phone. The plan screen
+    """Fix F6: proposals from the phone. The plan screen
     carries a [12] PROPOSALS card rendering the snapshot's
     "proposals" field — each pending proposal with Accept /
     Decline buttons — and POST /proposal round-trips like /plan
@@ -9535,7 +9749,7 @@ class PlanningWorkerTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         # Item #58 adaptation: the first generation is the HOMEWORK
         # pass now (the no-tools rule moved to the drafting
-        # generations). Manus study M5: the pass offers the mode's
+        # generations). Study item M5: the pass offers the mode's
         # full surface, not a read-only cut — the plan text arrived
         # in that same generation and was taken as the draft; the
         # smuggled call dropped unread, exactly as the old no-tools
@@ -9605,7 +9819,7 @@ class PlanningWorkerTests(unittest.TestCase):
         self.assertEqual(client.calls, 2)                 # unusable pass + the draft
         # Item #58 adaptation: both generations are HOMEWORK
         # generations now (the no-tools rule moved to the
-        # clarify/section drafting generations). Manus study M5:
+        # clarify/section drafting generations). Study item M5:
         # each offers the mode's full surface, not a read-only cut.
         # The markup generation's parsed call was refused inside
         # the pass; the second generation's plan text became the
@@ -10002,7 +10216,7 @@ class TextToolCallParsingTests(unittest.TestCase):
         self.assertEqual(seen["ready"][0], ["Write the file", "Verify it"])
         # Item #58 adaptation: the draft now arrives in the HOMEWORK
         # generation — the no-tools rule moved to the drafting
-        # generations. Manus study M5: the pass offers the mode's
+        # generations. Study item M5: the pass offers the mode's
         # full surface, not a read-only cut. The text call was
         # still discarded unread (the reply was taken as the
         # draft), exactly as the old capture discarded it.
@@ -10110,7 +10324,7 @@ class PlanningWindowTests(unittest.TestCase):
         self.assertFalse(self.win.plan_approve_btn.isEnabled())
 
     def test_approve_supersedes_previous_trajectory(self):
-        # Manus fix F4: approving a new plan ends the previous
+        # Fix F4: approving a new plan ends the previous
         # one. A live trajectory from the old plan is marked
         # superseded in memory, in the stored conversation, and
         # in the trajectory.json copy — so a later resume never
@@ -14031,7 +14245,7 @@ class _RecordingApprovalDialog:
         self.description = description
         self.diff = diff
         self.workspace = workspace
-        # Manus study M13: record whether the gate offered
+        # Study item M13: record whether the gate offered
         # Remember, so a proposal-driven gate can be pinned as
         # never minting a remembered rule.
         self.show_remember = show_remember
@@ -14656,7 +14870,7 @@ class PaletteWindowTests(unittest.TestCase):
                 self.assertIn(entry["id"], bindings)
 
     def test_palette_has_fan_out_entry(self):
-        # Manus fix F5: the M12 fan-out entry point is in the
+        # Fix F5: the M12 fan-out entry point is in the
         # catalog and bound to the dialog opener.
         entries, bindings = self.win.palette_actions()
         by_id = {e["id"]: e for e in entries}
@@ -14668,7 +14882,7 @@ class PaletteWindowTests(unittest.TestCase):
                          self.win.open_fan_out_dialog)
 
     def test_palette_has_proposals_entry(self):
-        # Manus fix F6: the M13 proposals room is in the catalog
+        # Fix F6: the M13 proposals room is in the catalog
         # and bound to its opener.
         entries, bindings = self.win.palette_actions()
         by_id = {e["id"]: e for e in entries}
@@ -15865,9 +16079,9 @@ class DeckPageScriptTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[:400])
 
 
-    def test_plan_card_renders_goldfish_findings(self):
+    def test_plan_card_renders_gofish_findings(self):
         # Item #56 follow-through: the deck /state snapshot carries
-        # goldfish + goldfish_text (planning.deck_plan); the Plan
+        # gofish + gofish_text (planning.deck_plan); the Plan
         # screen must actually render them — the summary line joins
         # the plan block and the full findings fill a collapsible
         # block that hides again when no review is on record.
@@ -15875,8 +16089,8 @@ class DeckPageScriptTests(unittest.TestCase):
         self.assertIn('id="planfish"', PAGE)
         self.assertIn('id="planfishtext"', PAGE)
         script = self._served_script()
-        self.assertIn("p.goldfish", script)
-        self.assertIn("p.goldfish_text", script)
+        self.assertIn("p.gofish", script)
+        self.assertIn("p.gofish_text", script)
         self.assertIn("planfishtext", script)
 
 
@@ -16325,10 +16539,10 @@ class DeckTokenTests(unittest.TestCase):
         # lineage deck's 3 OK + 6 error lines in text_muted): this
         # deck's OK color is text_amber_light, and it carries more
         # status lines — plan, plan-comment, project, prompt,
-        # attach-remove and attach-upload actions, (Manus fix F5)
+        # attach-remove and attach-upload actions, (Fix F5)
         # the fan-out action: one more OK assignment and four
         # more error ones (empty batch, unasserted independence,
-        # refused fan-out, failed request), and (Manus fix F6)
+        # refused fan-out, failed request), and (Fix F6)
         # the proposal decision: one more OK and two more error
         # (refused decision, failed request). The invariant is
         # U1's: every status color on the page is either the
@@ -18076,7 +18290,7 @@ class _OptionsRecordingWorker:
         self.started = False
         for name in ("token", "status", "approval_needed", "receipt",
                      "finished_text", "failed",
-                     "plan_ready", "plan_goldfish", "plan_document",
+                     "plan_ready", "plan_gofish", "plan_document",
                      "plan_revised", "plan_active",
                      "plan_step_done", "plan_turn_done", "turn_changes",
                      # See _GateWorker: _start_turn connects
@@ -22250,95 +22464,95 @@ class TokensTests(unittest.TestCase):
 
 
 # ------------------------------------------------------------------
-# Item #56 — Goldfish spec review
+# Item #56 — GoFish spec review
 # ------------------------------------------------------------------
 
-class GoldfishParseTests(unittest.TestCase):
-    """forge/goldfish.py pure helpers: path/symbol extraction, the
+class GoFishParseTests(unittest.TestCase):
+    """forge/gofish.py pure helpers: path/symbol extraction, the
     finding-line parser (machine lines only, like SKRIBE verdicts),
     the paraphrase block, and the #53 budget fallback pattern."""
 
     def test_named_paths_extracts_and_dedupes(self):
-        from forge import goldfish
+        from forge import gofish
         text = ("1. Edit forge/worker.py and forge/worker.py again\n"
                 "2. Read `forge/planning.py`, then update README.md\n"
                 "3. Check https://example.com/a.py is not a file")
-        self.assertEqual(goldfish.named_paths(text),
+        self.assertEqual(gofish.named_paths(text),
                          ["forge/worker.py", "forge/planning.py",
                           "README.md"])
 
     def test_named_paths_ignores_versions_and_prose(self):
-        from forge import goldfish
-        self.assertEqual(goldfish.named_paths(
+        from forge import gofish
+        self.assertEqual(gofish.named_paths(
             "Use version 2.5 of the thing, then answer in prose."), [])
-        self.assertEqual(goldfish.named_paths(""), [])
+        self.assertEqual(gofish.named_paths(""), [])
 
     def test_parse_findings_machine_lines_only(self):
-        from forge import goldfish
+        from forge import gofish
         text = ("This plan looks mostly fine to me.\n"
                 "BLOCKER: Step 2 runs before its input exists\n"
                 "- major: The verification step names no command\n"
                 "Nit: Step 1 could be shorter\n"
                 "MAJORLY: not a finding line\n"
                 "Praise: none of this counts")
-        found = goldfish.parse_findings(text, "zoom")
+        found = gofish.parse_findings(text, "zoom")
         self.assertEqual(
             [(f["severity"], f["stage"]) for f in found],
             [("Blocker", "zoom"), ("Major", "zoom"), ("Nit", "zoom")])
         self.assertEqual(found[0]["text"],
                          "Step 2 runs before its input exists")
-        self.assertEqual(goldfish.parse_findings("NO FINDINGS", "zoom"), [])
+        self.assertEqual(gofish.parse_findings("NO FINDINGS", "zoom"), [])
 
     def test_format_result_ranks_blocker_first(self):
-        from forge import goldfish
-        result = goldfish.new_result("rev")
+        from forge import gofish
+        result = gofish.new_result("rev")
         result["findings"] = [
             {"severity": "Nit", "stage": "zoom", "text": "tiny"},
             {"severity": "Blocker", "stage": "zoom", "text": "fatal"},
             {"severity": "Major", "stage": "readiness", "text": "mid"}]
-        text = goldfish.format_result(result)
+        text = gofish.format_result(result)
         self.assertLess(text.index("fatal"), text.index("mid"))
         self.assertLess(text.index("mid"), text.index("tiny"))
         self.assertIn("advisory", text)
 
     def test_parse_paraphrase_block_stops_at_findings(self):
-        from forge import goldfish
+        from forge import gofish
         text = ("PARAPHRASE: First the file is edited,\n"
                 "then a summary is written.\n"
                 "MAJOR: Step 2 is ambiguous")
-        self.assertEqual(goldfish.parse_paraphrase(text),
+        self.assertEqual(gofish.parse_paraphrase(text),
                          "First the file is edited,\n"
                          "then a summary is written.")
-        self.assertEqual(goldfish.parse_paraphrase("no block here"), "")
+        self.assertEqual(gofish.parse_paraphrase("no block here"), "")
 
     def test_resolve_budget_fallbacks(self):
-        from forge import goldfish
-        self.assertEqual(goldfish.resolve_budget(2), 2)
-        self.assertEqual(goldfish.resolve_budget(None),
-                         goldfish.MAX_GENERATIONS)
-        self.assertEqual(goldfish.resolve_budget(0),
-                         goldfish.MAX_GENERATIONS)
-        self.assertEqual(goldfish.resolve_budget("junk"),
-                         goldfish.MAX_GENERATIONS)
+        from forge import gofish
+        self.assertEqual(gofish.resolve_budget(2), 2)
+        self.assertEqual(gofish.resolve_budget(None),
+                         gofish.MAX_GENERATIONS)
+        self.assertEqual(gofish.resolve_budget(0),
+                         gofish.MAX_GENERATIONS)
+        self.assertEqual(gofish.resolve_budget("junk"),
+                         gofish.MAX_GENERATIONS)
 
     def test_needs_revision_only_blocker_or_major(self):
-        from forge import goldfish
-        self.assertFalse(goldfish.needs_revision(
+        from forge import gofish
+        self.assertFalse(gofish.needs_revision(
             [{"severity": "Nit", "stage": "zoom", "text": "x"}]))
-        self.assertFalse(goldfish.needs_revision([]))
-        self.assertTrue(goldfish.needs_revision(
+        self.assertFalse(gofish.needs_revision([]))
+        self.assertTrue(gofish.needs_revision(
             [{"severity": "Major", "stage": "zoom", "text": "x"}]))
-        self.assertTrue(goldfish.needs_revision(
+        self.assertTrue(gofish.needs_revision(
             [{"severity": "Blocker", "stage": "zoom", "text": "x"}]))
 
-    def test_goldfish_skill_scans_with_the_others(self):
+    def test_gofish_skill_scans_with_the_others(self):
         import forge.main as main_mod
         found = {s.name for s in scan_skills(main_mod.SKILLS_DIR)}
-        self.assertIn("goldfish", found)
+        self.assertIn("gofish", found)
         self.assertIn("skribe", found)
 
 
-class GoldfishReadinessTests(unittest.TestCase):
+class GoFishReadinessTests(unittest.TestCase):
     """Stage 3 is MECHANICAL: existence and definitions checked
     against a real temp workspace, never model opinion."""
 
@@ -22353,16 +22567,16 @@ class GoldfishReadinessTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_existing_file_and_symbol_pass_clean(self):
-        from forge import goldfish
-        findings, checks = goldfish.check_readiness(
+        from forge import gofish
+        findings, checks = gofish.check_readiness(
             str(self.root),
             "1. Edit src/demo.py to extend `existing_fn`\n2. Report")
         self.assertEqual(findings, [])
         self.assertEqual(checks, [{"path": "src/demo.py", "exists": True}])
 
     def test_missing_file_with_existing_intent_is_major(self):
-        from forge import goldfish
-        findings, checks = goldfish.check_readiness(
+        from forge import gofish
+        findings, checks = gofish.check_readiness(
             str(self.root), "1. Edit src/ghost.py to fix the bug")
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["severity"], "Major")
@@ -22370,22 +22584,22 @@ class GoldfishReadinessTests(unittest.TestCase):
         self.assertFalse(checks[0]["exists"])
 
     def test_missing_file_with_create_intent_is_quiet(self):
-        from forge import goldfish
-        findings, checks = goldfish.check_readiness(
+        from forge import gofish
+        findings, checks = gofish.check_readiness(
             str(self.root), "1. Create src/newmod.py with the helper")
         self.assertEqual(findings, [])
         self.assertEqual(checks[0]["note"], "to be created by the plan")
 
     def test_missing_file_without_intent_is_nit(self):
-        from forge import goldfish
-        findings, _checks = goldfish.check_readiness(
+        from forge import gofish
+        findings, _checks = gofish.check_readiness(
             str(self.root), "1. Look at src/mystery.py\n2. Report back")
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["severity"], "Nit")
 
     def test_missing_symbol_in_named_file_is_major(self):
-        from forge import goldfish
-        findings, _checks = goldfish.check_readiness(
+        from forge import gofish
+        findings, _checks = gofish.check_readiness(
             str(self.root),
             "1. Edit src/demo.py so `missing_fn` handles the input")
         self.assertEqual(len(findings), 1)
@@ -22393,7 +22607,7 @@ class GoldfishReadinessTests(unittest.TestCase):
         self.assertIn("missing_fn", findings[0]["text"])
 
 
-class _GoldfishClient:
+class _GoFishClient:
     """Scripted dual-seat client: the driver model and the reviewer
     model draw from separate scripts, and EVERY call is recorded
     (model, deep-copied messages, schemas) so the isolation test can
@@ -22443,7 +22657,7 @@ _GF_PLAN_V2 = ("Plan:\n"
                "2. Write the summary and verify it")
 
 
-class GoldfishWorkerTests(unittest.TestCase):
+class GoFishWorkerTests(unittest.TestCase):
     """The pass at the worker level: the firewall, the one-revision
     cap, the budget trim, the toggle, and failure honesty."""
 
@@ -22471,11 +22685,11 @@ class GoldfishWorkerTests(unittest.TestCase):
         kw.setdefault("permissions",
                       {"rules": [], "mode": "plan", "classes": {}})
         kw.setdefault("planning", True)
-        kw.setdefault("goldfish", True)
+        kw.setdefault("gofish", True)
         worker = AgentWorker(client, "fake-driver", messages, {}, ws, **kw)
-        seen = {"ready": [], "goldfish": [], "finished": []}
+        seen = {"ready": [], "gofish": [], "finished": []}
         worker.plan_ready.connect(seen["ready"].append)
-        worker.plan_goldfish.connect(seen["goldfish"].append)
+        worker.plan_gofish.connect(seen["gofish"].append)
         worker.finished_text.connect(
             lambda text, msgs: seen["finished"].append(text))
         return worker, seen
@@ -22497,7 +22711,7 @@ class GoldfishWorkerTests(unittest.TestCase):
 
     def test_reviewer_context_is_firewalled(self):
         ws = self._workspace()
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": _GF_PLAN_V1},
                            {"content": "STEP 1 DONE\nSTEP 2 DONE"}],
             reviewer_script=[{"content": "NO FINDINGS"},
@@ -22520,7 +22734,7 @@ class GoldfishWorkerTests(unittest.TestCase):
             self.assertNotIn("EARLIER-SECRET-TURN", joined)
             self.assertNotIn("secret answer waltz", joined)
             self.assertNotIn("now plan the demo change", joined)
-        result = seen["goldfish"][0]
+        result = seen["gofish"][0]
         self.assertEqual(result["findings"], [])
         self.assertEqual(result["paraphrase"],
                          "Edit demo, then write a summary.")
@@ -22530,7 +22744,7 @@ class GoldfishWorkerTests(unittest.TestCase):
 
     def test_blocker_earns_one_revision_and_rereview_then_gate(self):
         ws = self._workspace()
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": _GF_PLAN_V1},
                            {"content": _GF_PLAN_V2},
                            {"content": "STEP 1 DONE\nSTEP 2 DONE"}],
@@ -22549,7 +22763,7 @@ class GoldfishWorkerTests(unittest.TestCase):
                          ["Edit src/demo.py to extend `existing_fn` "
                           "carefully",
                           "Write the summary and verify it"])
-        result = seen["goldfish"][0]
+        result = seen["gofish"][0]
         self.assertEqual(result["rounds"], 2)
         self.assertTrue(result["revised"])
         self.assertEqual(result["findings"], [])
@@ -22565,7 +22779,7 @@ class GoldfishWorkerTests(unittest.TestCase):
 
     def test_second_round_blocker_still_reaches_gate_no_third_round(self):
         ws = self._workspace()
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": _GF_PLAN_V1},
                            {"content": _GF_PLAN_V2},
                            {"content": "STEP 1 DONE\nSTEP 2 DONE"}],
@@ -22576,7 +22790,7 @@ class GoldfishWorkerTests(unittest.TestCase):
                 {"content": "PARAPHRASE: v2 reading."}])
         worker, seen = self._worker(client, ws)
         self._drive_to_gate(worker, seen)
-        result = seen["goldfish"][0]
+        result = seen["gofish"][0]
         self.assertEqual(result["rounds"], 2)
         self.assertEqual([f["text"] for f in result["findings"]],
                          ["Still a problem."])
@@ -22589,16 +22803,16 @@ class GoldfishWorkerTests(unittest.TestCase):
 
     def test_budget_trims_stages_and_blocks_revision(self):
         ws = self._workspace()
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": _GF_PLAN_V1}],
             reviewer_script=[{"content": "BLOCKER: No budget left."}])
-        worker, seen = self._worker(client, ws, goldfish_budget=1)
+        worker, seen = self._worker(client, ws, gofish_budget=1)
         self._drive_to_gate(worker, seen)
         self.assertEqual(len(client.reviewer_calls()), 1)
         self.assertEqual(len(client.driver_calls()), 1)  # capture only
         self.assertEqual(seen["ready"][0][0],
                          "Edit src/demo.py to extend `existing_fn`")
-        result = seen["goldfish"][0]
+        result = seen["gofish"][0]
         self.assertEqual(result["rounds"], 1)
         self.assertFalse(result["revised"])
         self.assertEqual(result["findings"][0]["severity"], "Blocker")
@@ -22608,13 +22822,13 @@ class GoldfishWorkerTests(unittest.TestCase):
 
     def test_toggle_off_runs_no_pass_and_gate_is_as_before(self):
         ws = self._workspace()
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": _GF_PLAN_V1}],
             reviewer_script=[])
-        worker, seen = self._worker(client, ws, goldfish=False)
+        worker, seen = self._worker(client, ws, gofish=False)
         self._drive_to_gate(worker, seen)
         self.assertEqual(client.reviewer_calls(), [])
-        self.assertEqual(seen["goldfish"], [])
+        self.assertEqual(seen["gofish"], [])
         self.assertEqual(seen["ready"][0],
                          ["Edit src/demo.py to extend `existing_fn`",
                           "Write the summary"])
@@ -22624,12 +22838,12 @@ class GoldfishWorkerTests(unittest.TestCase):
 
     def test_reviewer_unavailable_plan_stands_and_gate_opens(self):
         ws = self._workspace()
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": _GF_PLAN_V1}],
             reviewer_script=[], reviewer_raises=True)
         worker, seen = self._worker(client, ws)
         self._drive_to_gate(worker, seen)
-        result = seen["goldfish"][0]
+        result = seen["gofish"][0]
         self.assertEqual(result["skipped"], "reviewer unavailable")
         self.assertEqual(seen["ready"][0][1], "Write the summary")
         worker.resolve_plan("kill")
@@ -22637,9 +22851,9 @@ class GoldfishWorkerTests(unittest.TestCase):
         worker.wait(3000)
 
 
-class GoldfishGateWindowTests(unittest.TestCase):
+class GoFishGateWindowTests(unittest.TestCase):
     """The gate surface: the result folds into the plan state, shows
-    in the Plan window's goldfish view, persists in the sidecar, and
+    in the Plan window's gofish view, persists in the sidecar, and
     rides the deck projection — with the Customize toggle beside
     SKRIBE's, following its conventions."""
 
@@ -22666,19 +22880,19 @@ class GoldfishGateWindowTests(unittest.TestCase):
         self.app_dir = root / "app"
         self.win.conversation_id = None
         self.win.plan_state = None
-        self.win._pending_goldfish = None
+        self.win._pending_gofish = None
         self.win._plan_render()
 
     def tearDown(self):
         from forge import main as main_mod
         main_mod.APP_DIR = self._real_app_dir
         self.win.plan_state = None
-        self.win._pending_goldfish = None
+        self.win._pending_gofish = None
         self.temp.cleanup()
 
     def _result(self):
-        from forge import goldfish
-        result = goldfish.new_result("dolphinlabs/qwen3.5-uncensored")
+        from forge import gofish
+        result = gofish.new_result("dolphinlabs/qwen3.5-uncensored")
         result["rounds"] = 1
         result["findings"] = [{"severity": "Blocker", "stage": "zoom",
                                "text": "Step 2 has no verification."}]
@@ -22692,71 +22906,137 @@ class GoldfishGateWindowTests(unittest.TestCase):
             model=None, project=None)
         self.win.load_conversation(cid)
         self.win._pending_plan_request = "build the thing"
-        self.win.on_plan_goldfish(self._result())
+        self.win.on_plan_gofish(self._result())
         self.win.on_plan_ready(["Write the file", "Verify it"])
         plan = self.win.plan_state
-        self.assertEqual(plan["goldfish"]["findings"][0]["severity"],
+        self.assertEqual(plan["gofish"]["findings"][0]["severity"],
                          "Blocker")
         # The checklist rows are untouched: 2 steps + SKRIBE line.
         self.assertEqual(self.win.plan_list.count(), 3)
-        view = self.win.goldfish_view.toPlainText()
+        view = self.win.gofish_view.toPlainText()
         self.assertIn("Blocker", view)
         self.assertIn("Step 2 has no verification.", view)
         self.assertIn("Edit a file, then write a summary.", view)
         saved = planning.load_plan(self.app_dir, cid)
-        self.assertEqual(saved["goldfish"]["rounds"], 1)
-        self.assertEqual(saved["goldfish"]["findings"][0]["text"],
+        self.assertEqual(saved["gofish"]["rounds"], 1)
+        self.assertEqual(saved["gofish"]["findings"][0]["text"],
                          "Step 2 has no verification.")
         snap = self.win.deck.snapshot()
-        self.assertIn("1 blocker(s)", snap["plan"]["goldfish"])
+        self.assertIn("1 blocker(s)", snap["plan"]["gofish"])
         self.assertIn("Step 2 has no verification.",
-                      snap["plan"]["goldfish_text"])
+                      snap["plan"]["gofish_text"])
 
-    def test_goldfish_enabled_needs_toggle_and_skill(self):
+    def test_gofish_enabled_needs_toggle_and_skill(self):
         win = self.win
         old_settings = dict(win.settings)
         old_skills = win.skills
         try:
-            win.settings.pop("goldfish_review", None)
-            self.assertTrue(win._goldfish_enabled())  # default on
-            win.settings["goldfish_review"] = False
-            self.assertFalse(win._goldfish_enabled())
-            win.settings["goldfish_review"] = True
-            win.skills = [s for s in old_skills if s.name != "goldfish"]
-            self.assertFalse(win._goldfish_enabled())
+            win.settings.pop("gofish_review", None)
+            self.assertTrue(win._gofish_enabled())  # default on
+            win.settings["gofish_review"] = False
+            self.assertFalse(win._gofish_enabled())
+            win.settings["gofish_review"] = True
+            win.skills = [s for s in old_skills if s.name != "gofish"]
+            self.assertFalse(win._gofish_enabled())
         finally:
             win.settings = old_settings
             win.skills = old_skills
+
+    def test_old_goldfish_review_setting_still_applies(self):
+        # GoFish rename (2026-11-12): the toggle's settings key
+        # moved to "gofish_review", but a setting saved under the
+        # old "goldfish_review" key still applies until the owner
+        # saves Customize again.
+        win = self.win
+        old_settings = dict(win.settings)
+        try:
+            win.settings.pop("gofish_review", None)
+            win.settings.pop("goldfish_review", None)
+            self.assertTrue(win._gofish_enabled())  # default on
+            win.settings["goldfish_review"] = False
+            self.assertFalse(win._gofish_enabled())
+            win.settings["gofish_review"] = True
+            self.assertTrue(win._gofish_enabled())  # new key wins
+        finally:
+            win.settings = old_settings
+
+    def test_old_goldfish_plan_key_loads_as_gofish(self):
+        # GoFish rename (2026-11-12): a plan sidecar saved before
+        # the rename carries the review under "goldfish" — it loads
+        # as "gofish" and the old key is never written again.
+        from forge import planning
+        from forge import gofish as gofish_mod
+        result = gofish_mod.new_result(reviewer="reviewer")
+        result["findings"] = [{"severity": "Major", "stage": "zoom",
+                               "text": "Step 2 has no verification."}]
+        data = {"steps": [{"text": "One", "state": "pending"}],
+                "status": "draft", "goldfish": result}
+        loaded = planning.sanitize_plan(data)
+        self.assertIsNotNone(loaded["gofish"])
+        self.assertEqual(loaded["gofish"]["findings"][0]["text"],
+                         "Step 2 has no verification.")
+        self.assertNotIn("goldfish", loaded)
+
+    def test_gofish_skill_inherits_goldfish_known_state(self):
+        # GoFish rename (2026-11-12): the renamed skill is NOT a
+        # new skill — it inherits the old name's known/disabled
+        # state, so an existing install keeps the pass on (or off,
+        # if the owner had it off) instead of the new-skill rule
+        # disabling it.
+        win = self.win
+        old_settings = dict(win.settings)
+        try:
+            win.settings["known_skills"] = [
+                "goldfish", "skribe", "skill-creator",
+                "project-security-scan", "reference-driven-build"]
+            win.settings["disabled_skills"] = []
+            win.reload_extensions()
+            self.assertIn("gofish", [s.name for s in win.skills])
+            self.assertIn("gofish", win.settings["known_skills"])
+            self.assertNotIn("gofish",
+                             win.settings["disabled_skills"])
+            win.settings["known_skills"] = [
+                "goldfish", "skribe", "skill-creator",
+                "project-security-scan", "reference-driven-build"]
+            win.settings["disabled_skills"] = ["goldfish"]
+            win.reload_extensions()
+            self.assertNotIn("gofish", [s.name for s in win.skills])
+            self.assertIn("gofish",
+                          win.settings["disabled_skills"])
+        finally:
+            win.settings = old_settings
+            win.save_settings()
+            win.reload_extensions()
 
     def test_customize_toggle_defaults_on_and_values_shape_holds(self):
         import forge.main as main_mod
         dlg = main_mod.CustomizeDialog(None, [], [], set(), set(), {})
         try:
-            self.assertTrue(dlg._goldfish_box.isChecked())
-            self.assertTrue(dlg.goldfish_on())
-            dlg._goldfish_box.setChecked(False)
-            self.assertFalse(dlg.goldfish_on())
+            self.assertTrue(dlg._gofish_box.isChecked())
+            self.assertTrue(dlg.gofish_on())
+            dlg._gofish_box.setChecked(False)
+            self.assertFalse(dlg.gofish_on())
             self.assertEqual(len(dlg.values()), 6)
         finally:
             dlg.close()
         dlg2 = main_mod.CustomizeDialog(
-            None, [], [], set(), set(), {}, goldfish_review=False)
+            None, [], [], set(), set(), {}, gofish_review=False)
         try:
-            self.assertFalse(dlg2._goldfish_box.isChecked())
+            self.assertFalse(dlg2._gofish_box.isChecked())
         finally:
             dlg2.close()
 
-    def test_plan_sidecar_round_trip_without_goldfish_is_none(self):
+    def test_plan_sidecar_round_trip_without_gofish_is_none(self):
         from forge import planning
         with tempfile.TemporaryDirectory() as td:
             plan = planning.new_plan(["One", "Two"], request="build")
-            self.assertIsNone(plan["goldfish"])
+            self.assertIsNone(plan["gofish"])
             planning.save_plan(td, 7, plan)
             loaded = planning.load_plan(td, 7)
-            self.assertIsNone(loaded["goldfish"])
+            self.assertIsNone(loaded["gofish"])
             shape = planning.deck_plan(loaded)
-            self.assertEqual(shape["goldfish"], "")
-            self.assertEqual(shape["goldfish_text"], "")
+            self.assertEqual(shape["gofish"], "")
+            self.assertEqual(shape["gofish_text"], "")
 
 
 # ---------------------------------------------------------------------------
@@ -22964,7 +23244,7 @@ class PlanDocumentExtractionTests(unittest.TestCase):
         old = {"version": 1, "status": "draft", "request": "build",
                "steps": [{"text": "One", "state": "pending",
                           "resource": ""}],
-               "skribe": "", "goldfish": None,
+               "skribe": "", "gofish": None,
                "created": "", "updated": ""}
         loaded = planning.sanitize_plan(old)
         self.assertIsNotNone(loaded)
@@ -23063,7 +23343,7 @@ class HomeworkPhaseWorkerTests(unittest.TestCase):
         w.start()
         self.assertTrue(self._wait_ready(w, seen))
         # The FIRST generation — homework — is offered the mode's
-        # full surface (Manus study M5: the offer no longer shrinks
+        # full surface (Study item M5: the offer no longer shrinks
         # to read-class for the pass; the read-only discipline is
         # enforced at execution, pinned in StableToolSurfaceTests),
         # and the drafting generations offer no tools at all.
@@ -23210,7 +23490,7 @@ class HomeworkPhaseWorkerTests(unittest.TestCase):
     def _wait_ready(self, w, seen, timeout=10.0):
         return self._pump_until(lambda: bool(seen["ready"]), timeout)
 
-    def test_goldfish_revision_rebuilds_the_document_steps(self):
+    def test_gofish_revision_rebuilds_the_document_steps(self):
         sections = [
             {"content": "Summarise src/demo.py for the owner."},
             {"content": "src/demo.py exists with existing_fn."},
@@ -23227,7 +23507,7 @@ class HomeworkPhaseWorkerTests(unittest.TestCase):
         revision = ("Plan:\n"
                     "1. Write the summary carefully in two passes\n"
                     "2. Verify the summary against the source")
-        client = _GoldfishClient(
+        client = _GoFishClient(
             driver_script=[{"content": "READY"}, {"content": "PROCEED"}]
             + sections + [{"content": revision}],
             reviewer_script=[
@@ -23240,7 +23520,7 @@ class HomeworkPhaseWorkerTests(unittest.TestCase):
             ])
         w, seen = self._worker(
             client, [{"role": "user", "content": "summarise the demo"}],
-            goldfish=True)
+            gofish=True)
         w.start()
         self.assertTrue(self._wait_ready(w, seen))
         self.assertEqual(seen["ready"], [[
@@ -23311,7 +23591,7 @@ class InLoopHomeworkWorkerTests(unittest.TestCase):
         self._run_to_finish(w, seen)
         first = [s["function"]["name"] for s in client.schemas_seen[0]]
         self.assertIn("read_file", first)
-        # Manus study M5: homework no longer shrinks the offer to
+        # Study item M5: homework no longer shrinks the offer to
         # read-class — the first generation carries the mode's full
         # surface, byte-identical to the drafting generation's
         # (the pass's read-only discipline is enforced at
@@ -23374,14 +23654,14 @@ class PlanDocumentWindowTests(unittest.TestCase):
         self.win.conversation_id = None
         self.win.plan_state = None
         self.win._pending_plan_document = None
-        self.win._pending_goldfish = None
+        self.win._pending_gofish = None
         self.win._plan_render()
 
     def tearDown(self):
         self.win.worker = None
         self.win.plan_state = None
         self.win._pending_plan_document = None
-        self.win._pending_goldfish = None
+        self.win._pending_gofish = None
         self.win._plan_render()
         self.temp.cleanup()
 
@@ -23420,7 +23700,7 @@ class PlanDocumentWindowTests(unittest.TestCase):
         old = {"version": 1, "status": "draft", "request": "old ask",
                "steps": [{"text": "Legacy step", "state": "pending",
                           "resource": ""}],
-               "skribe": "", "goldfish": None,
+               "skribe": "", "gofish": None,
                "created": "", "updated": ""}
         (app_dir / "plans" / f"{cid}.json").write_text(
             json.dumps(old), encoding="utf-8")
@@ -24467,7 +24747,7 @@ class _SnapshotReplyClient:
 class InlineCommentTests(unittest.TestCase):
     """Item #66 — inline comments. The plan gate gains a fourth
     action: a comment settles the gate as a REVISION (the driver
-    rewrites the draft against the owner's words — the Goldfish
+    rewrites the draft against the owner's words — the GoFish
     revision's shape, owner-driven — and the plan returns to the
     same gate), recorded on the plan sidecar; the deck's PLAN card
     sends the same comment through the same slot. And an artifact
@@ -31578,7 +31858,7 @@ class ResearchGateWorkerTests(unittest.TestCase):
     """Research mode's gate at the worker level: homework, the
     section-drafted plan document filed into .forge/research/,
     nothing browsed before approval (the browse verbs stay in the
-    offered surface all session — Manus study M5 — and a call
+    offered surface all session — Study item M5 — and a call
     before approval is refused at execution), the run's budget
     enforced by the shell, and the report's Sources consulted
     section maintained by the shell from the pages actually
@@ -31662,7 +31942,7 @@ class ResearchGateWorkerTests(unittest.TestCase):
         worker.start()
         self.assertTrue(self._wait_for(lambda: seen["ready"]),
                         "research gate never opened")
-        # Parked at the gate: nothing browsed — and (Manus study
+        # Parked at the gate: nothing browsed — and (study item
         # M5) every non-empty offer so far DID carry the browse
         # verbs: the gate is enforced at execution now, not by
         # withholding the definitions, so the surface never moved.
@@ -31731,7 +32011,7 @@ class ResearchGateWorkerTests(unittest.TestCase):
         self.assertIn("budget reached", refusal)
 
     def test_browse_schemas_stable_across_approval(self):
-        # Manus study M5 (was test_browse_schemas_gated_by_approval):
+        # Study item M5 (was test_browse_schemas_gated_by_approval):
         # approval no longer changes the offered surface — the
         # browse verbs are in the definitions before AND after the
         # gate, byte-identical; what approval changes is whether a
@@ -38174,7 +38454,7 @@ class PlanCardFieldsTests(unittest.TestCase):
     of scope sections — drafted with the rest of the skeleton,
     extracted from the document the sidecar already stores, and
     surfaced where plans are judged (the desktop document view is
-    the document text itself; the deck card and the Goldfish
+    the document text itself; the deck card and the GoFish
     review consume them as below). A pre-C7 document has neither
     section: the fields read as absent and nothing changes."""
 
@@ -38301,20 +38581,20 @@ class PlanCardFieldsTests(unittest.TestCase):
 
     def test_deck_card_renders_the_fields(self):
         # The deck page's plan card reads the two payload keys the
-        # same way it reads the Goldfish summary (Item #56 pattern).
+        # same way it reads the GoFish summary (Item #56 pattern).
         from forge.deck import PAGE
         self.assertIn("p.success_criteria", PAGE)
         self.assertIn("p.out_of_scope", PAGE)
         self.assertIn("Success criteria:", PAGE)
         self.assertIn("Out of scope:", PAGE)
 
-    def test_goldfish_stage_input_contains_the_criteria(self):
+    def test_gofish_stage_input_contains_the_criteria(self):
         # build_stage_messages embeds the plan text whole — the
         # document IS the input, so the new sections ride along
-        # with no Goldfish change. Both model stages are checked.
-        from forge import goldfish
+        # with no GoFish change. Both model stages are checked.
+        from forge import gofish
         for stage in ("zoom", "comprehension"):
-            messages = goldfish.build_stage_messages(stage, self.DOC)
+            messages = gofish.build_stage_messages(stage, self.DOC)
             user = messages[-1]["content"]
             self.assertIn("THE PLAN UNDER REVIEW:", user)
             self.assertIn("## Success criteria", user)
@@ -38322,7 +38602,7 @@ class PlanCardFieldsTests(unittest.TestCase):
             self.assertIn("## Out of scope", user)
             self.assertIn(self.SCOPE, user)
         # A pre-C7 document reaches the reviewer exactly as before.
-        messages = goldfish.build_stage_messages("zoom", self.OLD_DOC)
+        messages = gofish.build_stage_messages("zoom", self.OLD_DOC)
         user = messages[-1]["content"]
         self.assertIn("## Goal", user)
         self.assertNotIn("Success criteria", user)
@@ -39708,6 +39988,12 @@ class DesignCanvasWindowTests(unittest.TestCase):
             "<html>landing</html>", encoding="utf-8")
         frame = self._add("artifact", title="Home", file="home.html")
         win = self.win
+        # The no-model refusal sits behind the Plan-mode guard,
+        # so pin the mode to Code first — another test in the
+        # same process may have left it on Plan (full-suite
+        # order-dependence, 2026-11-12).
+        saved_mode = win.mode_combo.currentText()
+        win.mode_combo.setCurrentText("Code")
         # No model on the bench: a plain-words refusal, no turn.
         saved_items = [win.model_combo.itemText(i)
                        for i in range(win.model_combo.count())]
@@ -39745,6 +40031,7 @@ class DesignCanvasWindowTests(unittest.TestCase):
         self.assertIn("Home", captured["text"])
         self.assertIn("home.html", captured["text"])
         self.assertIn("<html>landing</html>", captured["text"])
+        win.mode_combo.setCurrentText(saved_mode)
 
     def test_file_summary_as_design_artifact(self):
         from forge import artifacts as artifacts_mod
@@ -41020,7 +41307,7 @@ class FoldCapTests(unittest.TestCase):
 
 
 class FindingFormatTests(unittest.TestCase):
-    """CR2 (CodeRabbit Tier 1 #2, 2026-11-11): every Review finding
+    """CR2 (Review Tier 1 #2, 2026-11-11): every Review finding
     carries a severity, a type and a Source line. One shared parser
     (forge.modes.parse_finding) reads the new bracket format and
     the pre-format BLOCKER / SHOULD-FIX / NIT lines; the Review
@@ -41258,7 +41545,7 @@ class FindingFormatTests(unittest.TestCase):
 
 
 class WalkthroughTests(unittest.TestCase):
-    """CR3 (CodeRabbit Tier 1 #3, 2026-11-11): every Review report
+    """CR3 (Review Tier 1 #3, 2026-11-11): every Review report
     opens with a Walkthrough — what changed, the changes in
     dependency order grouped by layer, an Effort line and a Risk
     line — before its Findings. The skeleton declares it first,
@@ -41462,7 +41749,7 @@ class WalkthroughTests(unittest.TestCase):
 
 
 class GuidelineTests(unittest.TestCase):
-    """CR4 (CodeRabbit Tier 1 #4, 2026-11-11): a project's standard
+    """CR4 (Review Tier 1 #4, 2026-11-11): a project's standard
     instruction files (AGENTS.md, CLAUDE.md, .cursorrules,
     .github/copilot-instructions.md) are detected — at the root or
     up to two levels down — but apply ONLY once the owner approves
@@ -41687,7 +41974,7 @@ class GuidelineTests(unittest.TestCase):
 
 
 class ReviewProfileTests(unittest.TestCase):
-    """CR5 (CodeRabbit Tier 1 #5, 2026-11-11): Review turns have
+    """CR5 (Review Tier 1 #5, 2026-11-11): Review turns have
     three voices — Quiet, Chill, Assertive — picked in Settings
     or in the Review room's Voice switch, both writing the one
     "review_profile" setting. The finding format, the Walkthrough
@@ -41866,7 +42153,7 @@ class ReviewProfileTests(unittest.TestCase):
 
 
 class IncrementalReviewTests(unittest.TestCase):
-    """CR6 (CodeRabbit Tier 1 #6, 2026-11-11): reviews go
+    """CR6 (Review Tier 1 #6, 2026-11-11): reviews go
     incremental. The Review room remembers what was reviewed —
     "Mark reviewed" snapshots the project's file fingerprints,
     "Review what's new" loads only what changed since then into
@@ -42061,7 +42348,7 @@ class IncrementalReviewTests(unittest.TestCase):
 
 
 class DriverPromptTests(unittest.TestCase):
-    """CR7 (CodeRabbit Tier 1 #7, 2026-11-11): every finding in a
+    """CR7 (Review Tier 1 #7, 2026-11-11): every finding in a
     review carries a "Prompt for the Driver" — one indented line
     starting "Driver:" under the finding, a self-contained
     instruction for Code mode to fix exactly that finding (file,
@@ -42274,7 +42561,7 @@ class DriverPromptTests(unittest.TestCase):
 
 
 class GateChecksTests(unittest.TestCase):
-    """CR8 (CodeRabbit Tier 1 #8, 2026-11-11): natural-language
+    """CR8 (Review Tier 1 #8, 2026-11-11): natural-language
     pre-merge checks in the plan gate. The owner writes checks in
     plain words in .forge/gate-checks.md; the gate shows each as
     PASS / FAIL / CAN'T CHECK before Approve. Forge evaluates
@@ -42494,7 +42781,7 @@ class GateChecksTests(unittest.TestCase):
 
 
 class FixWithDriverTests(unittest.TestCase):
-    """CR9 (CodeRabbit Tier 1 #9, 2026-11-11): the per-finding
+    """CR9 (Review Tier 1 #9, 2026-11-11): the per-finding
     "Fix with Driver" action. The Review room's Fix button (and
     double-clicking a finding) runs a Code turn on that one
     finding, using its Prompt for the Driver — and the request is
@@ -42697,7 +42984,7 @@ class FixWithDriverTests(unittest.TestCase):
 
 
 class ContextRankCompressTests(unittest.TestCase):
-    """CR10 (CodeRabbit Tier 1 #10, 2026-11-11): context rank +
+    """CR10 (Review Tier 1 #10, 2026-11-11): context rank +
     compress before the model. The system prompt is built as
     named parts with a tier each (0 core — never dropped; 1 the
     owner's words; 2 project state; 3 generated indexes — first
@@ -42833,7 +43120,7 @@ class ContextRankCompressTests(unittest.TestCase):
 
 
 class LearningsTests(unittest.TestCase):
-    """CR1 (CodeRabbit Learnings loop, 2026-11-11): the owner's
+    """CR1 (Learnings loop, 2026-11-11): the owner's
     plain-language dismissal of a review finding persists as a
     learning — project (.forge/learnings.md) or global (a path
     parameter standing in for the app-data file) — and rides in
@@ -43391,7 +43678,7 @@ class CouncilLearningsTests(unittest.TestCase):
 
 
 class StablePrefixTests(unittest.TestCase):
-    """Manus study M1 — stable-prefix discipline.
+    """Study item M1 — stable-prefix discipline.
 
     The prompt prefix (system prompt + tool definitions) is the
     part of every request the engine can reuse across turns; on a
@@ -43409,7 +43696,7 @@ class StablePrefixTests(unittest.TestCase):
         creation date in brief.md — is NOT a volatile timestamp:
         it never changes while a session sits open, so it does
         not break prefix reuse, and the test must pass with the
-        real scaffold date (Manus fix F1: the old test banned
+        real scaffold date (Fix F1: the old test banned
         today's date string outright and the fixture had to pin
         the scaffold date to 2026-01-15 to pass — the pin papered
         over the test's own overreach);
@@ -43436,7 +43723,7 @@ class StablePrefixTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         proj.ensure_project(self.root)
-        # Manus fix F1: the scaffold's real creation date stays
+        # Fix F1: the scaffold's real creation date stays
         # in brief.md — it is a frozen project fact, not a
         # volatile timestamp, and the (b) test must pass with it.
         # (The old fixture pinned it to 2026-01-15 so the old
@@ -43472,7 +43759,7 @@ class StablePrefixTests(unittest.TestCase):
         self.assertIn("app.py", first)
 
     # -- (b) no turn-volatile timestamp in the prefix ---------------
-    # Manus fix F1: the freeze. The clock the prompt-build path
+    # Fix F1: the freeze. The clock the prompt-build path
     # can see is frozen at a given moment — the datetime symbols
     # in every module on the path (main, knowledge, learnings,
     # self_maintenance, projects' date) plus the shared time
@@ -43672,7 +43959,7 @@ class StablePrefixTests(unittest.TestCase):
 
 
 class FilesystemContextTests(unittest.TestCase):
-    """Manus study M2 — restorable folds: filesystem as context.
+    """Study item M2 — restorable folds: filesystem as context.
 
     The fold's summary replaces a span of the conversation, and the
     summarizer only ever sees that span clipped (tool results to 800
@@ -43867,14 +44154,14 @@ class FilesystemContextTests(unittest.TestCase):
 
 
 class RecitationTests(unittest.TestCase):
-    """Manus study M3 — programmatic recitation: while an approved
+    """Study item M3 — programmatic recitation: while an approved
     plan executes, EVERY main-loop generation request ends with a
     compact plan-state block the PROGRAM builds fresh from the live
     checklist state (_plan_steps / _plan_done). The block rides the
     outgoing request copy only — it is never written into the stored
     conversation — and no other generation (homework, drafting,
     non-plan turns) carries one. The D39 stored reminder
-    ("[Plan progress …", every three cycles) is RETIRED (Manus fix
+    ("[Plan progress …", every three cycles) is RETIRED (Fix
     F3): recitation is the only reminder now, and the test below
     pins that no stored reminder is ever appended again."""
 
@@ -44010,7 +44297,7 @@ class RecitationTests(unittest.TestCase):
                          [(0, 3), (1, 3), (1, 3), (2, 3)])
 
     def test_no_stored_plan_progress_reminder_on_long_execution(self):
-        # Manus fix F3: the D39 stored reminder is retired. A long
+        # Fix F3: the D39 stored reminder is retired. A long
         # execution — seven work cycles, past both of the old
         # three-cycle boundaries — appends NO "[Plan progress"
         # message to the stored conversation and logs NO
@@ -44162,7 +44449,7 @@ class _M4RecordingClient(_ScriptedClient):
 
 
 class KeepErrorsInTests(unittest.TestCase):
-    """Manus study M4 — keep the wrong stuff in. The audit found the
+    """Study item M4 — keep the wrong stuff in. The audit found the
     error plumbing mostly honest already (authored ToolError
     messages, run_command's exit code + output, the verify loop's
     appended failures, Item 11's failure-streak notice); the one
@@ -44449,7 +44736,7 @@ class KeepErrorsInTests(unittest.TestCase):
 
 
 class StableToolSurfaceTests(unittest.TestCase):
-    """Manus study M5 — mask, don't remove. The offered tool
+    """Study item M5 — mask, don't remove. The offered tool
     surface is fixed by the session's configuration: Forge-internal
     state (phase, budget) never rebuilds or shrinks it. The phase
     gates that used to subset the offer — the homework pass's
@@ -44795,7 +45082,7 @@ class StableToolSurfaceTests(unittest.TestCase):
 
 
 class AntiRutTests(unittest.TestCase):
-    """Manus study M6 — anti-rut. The pre-M6 guards covered a repeat
+    """Study item M6 — anti-rut. The pre-M6 guards covered a repeat
     whose RESULT stays byte-identical (Note 17 refusal) and a repeat
     that keeps FAILING (Item 11 streak), but a call that SUCCEEDS
     with a fresh result every time reset the identical-result count
@@ -44803,7 +45090,7 @@ class AntiRutTests(unittest.TestCase):
     nothing until the 40-cycle soft prompt. The rut guard counts
     identical successes per turn regardless of digest: notice from
     the 3rd success, refusal once 5 successes are on record. Half B:
-    the Goldfish stages carry one deterministic per-stage framing
+    the GoFish stages carry one deterministic per-stage framing
     line.
     """
 
@@ -44955,34 +45242,34 @@ class AntiRutTests(unittest.TestCase):
         results = self._run([call] * 3 + [{"content": "done"}], handler)
         self.assertEqual(results[2], "recovered")
 
-    # -- (e) Goldfish stage diversity: one rotated framing line --
+    # -- (e) GoFish stage diversity: one rotated framing line --
 
-    def test_goldfish_framing_rotates_by_stage_and_is_deterministic(self):
-        from forge import goldfish
+    def test_gofish_framing_rotates_by_stage_and_is_deterministic(self):
+        from forge import gofish
         plan = "1. Write app.py — create the app.\n2. Test it."
         users = {}
-        for stage in goldfish.STAGES:
-            first = goldfish.build_stage_messages(stage, plan)
-            second = goldfish.build_stage_messages(stage, plan)
+        for stage in gofish.STAGES:
+            first = gofish.build_stage_messages(stage, plan)
+            second = gofish.build_stage_messages(stage, plan)
             self.assertEqual(first, second)  # deterministic
             users[stage] = first[-1]["content"]
             # The stage's own framing rides exactly once, and the
             # other stage's framing is absent.
             self.assertEqual(
-                users[stage].count(goldfish.stage_framing(stage)), 1)
-            for other in goldfish.STAGES:
+                users[stage].count(gofish.stage_framing(stage)), 1)
+            for other in gofish.STAGES:
                 if other != stage:
-                    self.assertNotIn(goldfish.stage_framing(other),
+                    self.assertNotIn(gofish.stage_framing(other),
                                      users[stage])
         # The two stages' framings actually differ…
-        framings = [goldfish.stage_framing(s) for s in goldfish.STAGES]
+        framings = [gofish.stage_framing(s) for s in gofish.STAGES]
         self.assertEqual(len(set(framings)), len(framings))
         # …and with the framing lines removed, the stages' user
         # content is byte-identical: task content untouched.
         stripped = []
-        for stage in goldfish.STAGES:
+        for stage in gofish.STAGES:
             lines = [ln for ln in users[stage].splitlines()
-                     if ln != goldfish.stage_framing(stage)]
+                     if ln != gofish.stage_framing(stage)]
             stripped.append("\n".join(lines))
         self.assertEqual(stripped[0], stripped[1])
         self.assertIn("THE PLAN UNDER REVIEW:", stripped[0])
@@ -44990,7 +45277,7 @@ class AntiRutTests(unittest.TestCase):
 
 
 class HandoffKeeperTests(unittest.TestCase):
-    """Manus study M7: seat returns close in a fixed five-field
+    """Study item M7: seat returns close in a fixed five-field
     schema (ASKED/DONE/FILES/EVIDENCE/OPEN), a missing-field return
     gets exactly one repair round, an unparseable return reaches
     its caller flagged with the raw text intact, and the keeper
@@ -45284,7 +45571,7 @@ class _TrajectoryCaptureClient:
 
 
 class TrajectorySummaryTests(unittest.TestCase):
-    """Manus study M8 — schema-based trajectory summary, the
+    """Study item M8 — schema-based trajectory summary, the
     compaction backstop. The builder is programmatic (no model):
     fixed fields only, extracted from the recorded history, and
     anything with nothing on record says so instead of inventing
@@ -45543,7 +45830,7 @@ class TrajectorySummaryTests(unittest.TestCase):
             self.assertIn("2 of 3 steps done",
                           latest["content"])
 
-    # -- Manus fix F4: a dead plan never re-arms ----------------
+    # -- Fix F4: a dead plan never re-arms ----------------
     def test_build_trajectory_marks_plan_active(self):
         from forge import context as context_mod
         data = context_mod.build_trajectory(
@@ -45667,7 +45954,7 @@ class TrajectorySummaryTests(unittest.TestCase):
 
 
 class SessionReplayTests(unittest.TestCase):
-    """Manus study M9 (Tier 2 #1): a finished session exports to
+    """Study item M9 (Tier 2 #1): a finished session exports to
     one self-contained local HTML file — C9 timeline + transcript,
     as it happened. No new recording machinery: the render reads
     the stored conversation and the timeline's own entries."""
@@ -45805,7 +46092,7 @@ class SessionReplayTests(unittest.TestCase):
 
 
 class SaveRunAsSkillTests(unittest.TestCase):
-    """Manus study M10 — "save this run as a skill": OFF by default
+    """Study item M10 — "save this run as a skill": OFF by default
     (settings `offer_save_run_as_skill`), so a finished task ends
     exactly as before; ON, a completed plan ends with the offer
     through the approval bridge, and accepting drafts a SKILL.md
@@ -46130,7 +46417,7 @@ class SaveRunAsSkillTests(unittest.TestCase):
 
 
 class AuthoritativeSourcesTests(unittest.TestCase):
-    """Manus study M11 — authoritative sources before scraping.
+    """Study item M11 — authoritative sources before scraping.
 
     The standing instruction lives in the two places a browsing
     turn actually reads — the Research mode guidance and the
@@ -46249,7 +46536,7 @@ class AuthoritativeSourcesTests(unittest.TestCase):
 
 
 class FanOutTests(unittest.TestCase):
-    """Manus study M12: fan-out for similar independent items.
+    """Study item M12: fan-out for similar independent items.
     The pure layer (forge/fanout.py) is driven with stub spawns;
     the window driver is proven with real workers on the #64
     blocking client, the same way ParallelTurnsMissionControlTests
@@ -46487,7 +46774,7 @@ class FanOutTests(unittest.TestCase):
 
 
 class FanOutWindowTests(unittest.TestCase):
-    """Manus study M12, window driver: real workers on the #64
+    """Study item M12, window driver: real workers on the #64
     blocking client. A batch of three independent items at cap 2
     runs two live at once, queues the third in order, and each
     turn's return is collected as a schema-valid handoff; a
@@ -46520,7 +46807,7 @@ class FanOutWindowTests(unittest.TestCase):
         self._old_client = self.win.client
         self.client = _RoutedBlockingClient()
         self.win.client = self.client
-        # Manus fix F2: the Knowledge distiller gets its OWN
+        # Fix F2: the Knowledge distiller gets its OWN
         # scripted client here, exactly as production gives it
         # its own ProviderClient — a distiller generation can
         # never consume a turn's scripted reply, whatever order
@@ -46580,7 +46867,7 @@ class FanOutWindowTests(unittest.TestCase):
         self.win._gate_queue = []
         self.win._fanout_run = None
         self.win.client = self._old_client
-        # Manus fix F2: drop the instance stub so the next test
+        # Fix F2: drop the instance stub so the next test
         # gets the class's real _distiller_client again.
         del self.win._distiller_client
         self.win.workspace = self._old_workspace
@@ -46679,7 +46966,7 @@ class FanOutWindowTests(unittest.TestCase):
         self.assertIn("check the widget wiring", learnings.read_text())
 
     def test_repair_round_runs_in_the_items_conversation(self):
-        # Manus fix F2: no order-dependent arming any more. The
+        # Fix F2: no order-dependent arming any more. The
         # Knowledge distiller runs through its OWN client (a
         # separate scripted client in this class, a fresh
         # ProviderClient in production), so it cannot consume the
@@ -46705,7 +46992,7 @@ class FanOutWindowTests(unittest.TestCase):
         self.assertIn("OPEN: nothing open", entry["raw"])
 
     def test_distiller_gets_its_own_client(self):
-        # Manus fix F2: isolation by construction. Each call to
+        # Fix F2: isolation by construction. Each call to
         # the real factory builds a FRESH client — never the turn
         # client, never the same instance twice — on the same
         # Ollama URL the window uses, so it serves the same
@@ -46727,7 +47014,7 @@ class FanOutWindowTests(unittest.TestCase):
         self.assertIs(self.win._distiller_client(),
                       self.distill_client)
 
-    # -- Manus fix F5: the UI entry point, end to end -------------
+    # -- Fix F5: the UI entry point, end to end -------------
     def test_submit_fan_out_fans_out_batch(self):
         # The UI path's core: text in, fanned turns out — the same
         # batch the dialog and the deck submit.
@@ -46801,7 +47088,7 @@ class FanOutWindowTests(unittest.TestCase):
 
 
 class EventTriggerTests(unittest.TestCase):
-    """Manus study M13, Tier 2 #5 (last): local events the shell
+    """Study item M13, Tier 2 #5 (last): local events the shell
     already observes may PROPOSE an action to the owner through
     the existing gates — never auto-apply, never run tools on
     their own, and each proposal is owner-approved or dies."""
@@ -46875,7 +47162,7 @@ class EventTriggerTests(unittest.TestCase):
         self.assertEqual(len(store.pending()), 1)
 
     def test_file_changed_kind_raises_and_dedupes(self):
-        # Manus fix F7: the watcher kind is a real kind — it
+        # Fix F7: the watcher kind is a real kind — it
         # raises, and the same changed file never stacks (the
         # dedupe the burst test relies on).
         store, _root = self._store()
@@ -46894,7 +47181,7 @@ class EventTriggerTests(unittest.TestCase):
         self.assertEqual(store.pending()[0]["kind"], "file_changed")
 
     def test_review_turn_task_quotes_the_file_and_changes_nothing(self):
-        # Manus fix F7: the accepted file_changed turn looks
+        # Fix F7: the accepted file_changed turn looks
         # and reports — the task names the file and forbids
         # edits unless the owner asks.
         from forge import proposals as proposals_mod
@@ -46965,7 +47252,7 @@ class EventTriggerTests(unittest.TestCase):
     def test_unknown_kind_is_refused(self):
         from forge import proposals as proposals_mod
         store, _root = self._store()
-        # Manus fix F7: file_changed used to be the example of an
+        # Fix F7: file_changed used to be the example of an
         # unknown kind — it is a real kind now, so the example is
         # build_finished, which stays unknown on purpose.
         with self.assertRaises(ValueError):
@@ -47046,7 +47333,7 @@ class EventTriggerTests(unittest.TestCase):
 
 
 class EventTriggerWindowTests(unittest.TestCase):
-    """Manus study M13 at the window: a crash alert raises a
+    """Study item M13 at the window: a crash alert raises a
     run proposal and nothing runs; decline kills it; accept
     drives the existing gates — the Watch fix gate for a run
     failure (Remember hidden, no rule minted), an ordinary Code
@@ -47217,7 +47504,7 @@ class EventTriggerWindowTests(unittest.TestCase):
         self.assertNotIn("proposal_raised", self._eventlog_kinds())
 
     def test_unknown_kind_is_refused_not_raised(self):
-        # Manus fix F7: file_changed used to be the example of an
+        # Fix F7: file_changed used to be the example of an
         # unknown kind — it is a real kind now, so the example is
         # build_finished, which stays unknown on purpose.
         self.assertIsNone(self.win.raise_event_proposal(
@@ -47330,7 +47617,7 @@ class EventTriggerWindowTests(unittest.TestCase):
         self.assertEqual(self.win.proposals_pending(), [])
         self.assertIsNone(self.win.worker)
 
-    # -- Manus fix F6: the proposals room ------------------------
+    # -- Fix F6: the proposals room ------------------------
     def _raise_tester_proposal(self):
         self.win._on_worker_event("tester_failed", {
             "files": "tests/test_foo.py",
@@ -47399,7 +47686,7 @@ class EventTriggerWindowTests(unittest.TestCase):
 
 
 class ProjectWatcherRulesTests(unittest.TestCase):
-    """Manus fix F7, pure rules: the watcher's ignore rules are
+    """Fix F7, pure rules: the watcher's ignore rules are
     functions, so they are tested without Qt — hidden
     components, tooling directories, compiled files and
     droppings are never watched; everything else under the root
@@ -47477,7 +47764,7 @@ class ProjectWatcherRulesTests(unittest.TestCase):
 
 
 class FileWatcherWindowTests(unittest.TestCase):
-    """Manus fix F7 at the window: OFF (the default) means no
+    """Fix F7 at the window: OFF (the default) means no
     watcher and no proposals; ON + a file change raises exactly
     one file_changed proposal and nothing runs; a burst of saves
     is still one proposal; ignored paths propose nothing;
@@ -47906,24 +48193,24 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(groups["working"], [])
         self.assertEqual(groups["attention"], [])
 
-    def test_plan_gate_sits_in_attention_with_goldfish_note(self):
+    def test_plan_gate_sits_in_attention_with_gofish_note(self):
         plan_stream = self._stream(
             1, self.cid_a, title="Plan turn", planning=True)
         plan = {"conversation_id": self.cid_a, "title": "Plan turn",
                 "request": "Build the widget", "steps": 2,
-                "goldfish": True, "started_at": 1000.0}
+                "gofish": True, "started_at": 1000.0}
         groups = self._group([plan_stream], plan=plan)
         # The plan turn's stream is the plan item, not a second row.
         self.assertEqual(self._keys(groups, "attention"),
                          [f"plan:{self.cid_a}"])
         self.assertEqual(groups["working"], [])
-        self.assertIn("Goldfish",
+        self.assertIn("GoFish",
                       groups["attention"][0]["detail"])
         plain = {"conversation_id": self.cid_a, "title": "Plan turn",
                  "request": "Build the widget", "steps": 2,
-                 "goldfish": False, "started_at": 1000.0}
+                 "gofish": False, "started_at": 1000.0}
         groups = self._group([plan_stream], plan=plain)
-        self.assertNotIn("Goldfish",
+        self.assertNotIn("GoFish",
                          groups["attention"][0]["detail"])
 
     def test_ready_group_only_lists_finished_turns_with_checkpoints(self):
@@ -48180,7 +48467,7 @@ class InboxTests(unittest.TestCase):
                       "View diff", "Open checkpoints", "Refresh"):
             self.assertIn(label, btns)
 class LinterLayerTests(unittest.TestCase):
-    """Tier 2 #1 (CodeRabbit Tier 2, 2026-11-11): linter layer,
+    """Tier 2 #1 (Review Tier 2, 2026-11-11): linter layer,
     light edition. Only the linters already installed on the
     project run (Ruff, ShellCheck, ESLint when present), on
     demand from the Review room; their findings load into the
@@ -48452,7 +48739,7 @@ class LinterLayerTests(unittest.TestCase):
             win.close()
 
 class CodeGraphTests(unittest.TestCase):
-    """Tier 2 #2 (CodeRabbit Tier 2, 2026-11-11): code graph,
+    """Tier 2 #2 (Review Tier 2, 2026-11-11): code graph,
     light edition. The repo map (repomap.py) already renders the
     static half — classes, functions, ranked by references. This
     is the queryable half: where a symbol is defined, who uses
@@ -48666,3 +48953,373 @@ class CodeGraphTests(unittest.TestCase):
             self.assertEqual(
                 cg_mod.related_files(graph, "b.py")["imported_by"],
                 ["f.py", "g.py"])
+
+
+class FinishingTouchesTests(unittest.TestCase):
+    """Tier 2 #3 (Review Tier 2, 2026-11-12): Finishing
+    Touches checklist. Docstrings and unit tests for the files
+    the shown review names, offered as checkboxes at the end of
+    the review and run as Code turns through the existing bench
+    wiring — the Tester seat has no write tools, so it verifies
+    the new tests on its normal run rather than writing them.
+    Both checked sends both (the second queues behind the first);
+    a refused touch is never recorded and stays checked. Each
+    sent run is recorded in the review under
+    ## Finishing touches."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _review_text(self, findings):
+        return ("# Review\n\n## Findings\n" + findings +
+                "\n\n## Coverage\nauth.py, store.py.\n")
+
+    def _finishing_review_window(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "finish-review.md").write_text(
+            self._review_text(
+                "- [Critical · Security · Source: Owner learning] "
+                "auth.py:12 — tokens compared with == — Fix: use "
+                "hmac.compare_digest\n"
+                "- [Minor · Bug · Source: Review] store.py:3 — "
+                "save truncates before writing — Fix: flush first\n"
+                "- [Trivial · Nitpick · Source: Review] auth.py:40 "
+                "— name shadows builtin — Fix: rename\n"),
+            encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index("finish-review.md")
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    # -- the file a finding names ----------------------------------------
+
+    def test_finding_file_reads_the_head_after_the_bracket(self):
+        from forge import modes as modes_mod
+        self.assertEqual(modes_mod.finding_file(
+            "- [Critical · Security · Source: Review] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest"), "auth.py")
+        # Legacy lines carry the same head without the bracket.
+        self.assertEqual(modes_mod.finding_file(
+            "- BLOCKER: store.py:3 — save truncates before "
+            "writing"), "store.py")
+        # A :line:col reference strips both numbers.
+        self.assertEqual(modes_mod.finding_file(
+            "forge/worker.py:12:4 — loop never exits"), "forge/worker.py")
+        # No " — " separator names no file — never guessed.
+        self.assertEqual(modes_mod.finding_file(
+            "General note with no file in it"), "")
+        self.assertEqual(modes_mod.finding_file(""), "")
+        self.assertEqual(modes_mod.finding_file(None), "")
+
+    def test_review_files_dedupe_in_order_and_cap(self):
+        from forge import modes as modes_mod
+        lines = [
+            "- [Major · Bug · Source: Review] a.py:1 — x — Fix: y",
+            "- [Minor · Bug · Source: Review] b.py:2 — x — Fix: y",
+            "- [Minor · Bug · Source: Review] a.py:9 — x — Fix: y",
+            "A line with no file at all",
+            "- [Minor · Bug · Source: Review] c.py:3 — x — Fix: y",
+        ]
+        self.assertEqual(modes_mod.review_files(lines),
+                         ["a.py", "b.py", "c.py"])
+        self.assertEqual(modes_mod.review_files(lines, cap=2),
+                         ["a.py", "b.py"])
+        self.assertEqual(modes_mod.review_files([]), [])
+        self.assertEqual(modes_mod.review_files(None), [])
+
+    # -- the record ----------------------------------------------------------
+
+    def test_record_creates_the_section_and_round_trips(self):
+        from forge import modes as modes_mod
+        text = self._review_text(
+            "- [Critical · Security · Source: Review] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest\n")
+        updated = modes_mod.record_finishing_touch(
+            text, "2026-11-12 12:30", "Docstrings",
+            ["auth.py", "store.py"], "Add docstrings to auth.py.")
+        touches = modes_mod.finishing_touches(updated)
+        self.assertEqual(len(touches), 1)
+        self.assertEqual(touches[0]["when"], "2026-11-12 12:30")
+        self.assertEqual(touches[0]["kind"], "Docstrings")
+        self.assertEqual(touches[0]["files"],
+                         ["auth.py", "store.py"])
+        self.assertIn("Add docstrings", touches[0]["sent"])
+        self.assertIn("## Finishing touches", updated)
+        # The rest of the review is untouched.
+        self.assertIn("## Coverage\nauth.py, store.py.", updated)
+        self.assertEqual(
+            modes_mod.finishing_touched_for(updated, "Docstrings"),
+            "2026-11-12 12:30")
+        self.assertIsNone(
+            modes_mod.finishing_touched_for(updated, "Unit tests"))
+        self.assertEqual(modes_mod.finishing_touches(text), [])
+
+    def test_second_touch_appends_after_the_first(self):
+        from forge import modes as modes_mod
+        text = self._review_text("No findings.\n")
+        once = modes_mod.record_finishing_touch(
+            text, "2026-11-12 12:30", "Docstrings", ["a.py"],
+            "Add docstrings.")
+        twice = modes_mod.record_finishing_touch(
+            once, "2026-11-12 12:31", "Unit tests", ["a.py"],
+            "Write unit tests.")
+        touches = modes_mod.finishing_touches(twice)
+        self.assertEqual([t["kind"] for t in touches],
+                         ["Docstrings", "Unit tests"])
+        self.assertEqual(twice.count("## Finishing touches"), 1)
+        # A re-run records a new entry; the latest when wins.
+        thrice = modes_mod.record_finishing_touch(
+            twice, "2026-11-12 13:00", "Docstrings", ["a.py"],
+            "Add docstrings again.")
+        self.assertEqual(
+            modes_mod.finishing_touched_for(thrice, "Docstrings"),
+            "2026-11-12 13:00")
+
+    def test_record_before_a_following_section_stays_inside_it(self):
+        from forge import modes as modes_mod
+        text = ("# Review\n\n## Finishing touches\n\n"
+                "- 2026-11-12 12:30 — Docstrings for a.py\n"
+                "\n## Coverage\nall files.\n")
+        updated = modes_mod.record_finishing_touch(
+            text, "2026-11-12 12:31", "Unit tests", ["a.py"],
+            "Write unit tests.")
+        # The new entry lands before ## Coverage, not after it.
+        self.assertLess(updated.index("Unit tests for a.py"),
+                        updated.index("## Coverage"))
+        self.assertEqual(len(modes_mod.finishing_touches(updated)), 2)
+
+    # -- the room ------------------------------------------------------------
+
+    def test_checkboxes_and_button_are_present(self):
+        win, _owner = self._finishing_review_window()
+        try:
+            self.assertEqual(win.finishing_label.text(),
+                             "Finishing touches")
+            self.assertEqual(win.docstrings_check.text(), "Docstrings")
+            self.assertEqual(win.unittests_check.text(), "Unit tests")
+            self.assertEqual(win.run_finishing_btn.text(),
+                             "Run finishing touches")
+            self.assertFalse(win.docstrings_check.isChecked())
+            self.assertFalse(win.unittests_check.isChecked())
+            self.assertEqual(win.findings_list.count(), 3)
+        finally:
+            win.close()
+
+    def test_run_sends_both_checked_and_records_both(self):
+        win, owner = self._finishing_review_window()
+        try:
+            win.docstrings_check.setChecked(True)
+            win.unittests_check.setChecked(True)
+            win.run_finishing_btn.click()
+            self.assertEqual(len(owner.send_calls), 2)
+            # Docstrings first, tests second — the tests are
+            # written against the final code.
+            self.assertIn("Add docstrings", owner.send_calls[0])
+            self.assertIn("auth.py", owner.send_calls[0])
+            self.assertIn("store.py", owner.send_calls[0])
+            self.assertIn("Write unit tests", owner.send_calls[1])
+            self.assertIn("auth.py", owner.send_calls[1])
+            # Both ran as Code turns.
+            self.assertEqual(owner.mode_combo.currentText(), "Code")
+            # Both boxes unchecked, both labels marked requested.
+            self.assertFalse(win.docstrings_check.isChecked())
+            self.assertFalse(win.unittests_check.isChecked())
+            self.assertIn("↻ requested",
+                          win.docstrings_check.text())
+            self.assertIn("↻ requested", win.unittests_check.text())
+            # Both recorded in the review.
+            recorded = (self.root / ".forge" / "reviews"
+                        / "finish-review.md").read_text(
+                            encoding="utf-8")
+            from forge import modes as modes_mod
+            touches = modes_mod.finishing_touches(recorded)
+            self.assertEqual([t["kind"] for t in touches],
+                             ["Docstrings", "Unit tests"])
+            self.assertEqual(touches[0]["files"],
+                             ["auth.py", "store.py"])
+            self.assertIn("sent as a Code turn",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_run_with_one_checked_sends_only_that_one(self):
+        win, owner = self._finishing_review_window()
+        try:
+            win.unittests_check.setChecked(True)
+            win.run_finishing_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            self.assertIn("Write unit tests", owner.send_calls[0])
+            self.assertFalse(win.unittests_check.isChecked())
+            recorded = (self.root / ".forge" / "reviews"
+                        / "finish-review.md").read_text(
+                            encoding="utf-8")
+            from forge import modes as modes_mod
+            self.assertEqual(
+                [t["kind"] for t in
+                 modes_mod.finishing_touches(recorded)],
+                ["Unit tests"])
+        finally:
+            win.close()
+
+    def test_run_with_nothing_checked_sends_nothing(self):
+        win, owner = self._finishing_review_window()
+        try:
+            win.run_finishing_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            self.assertIn("Check Docstrings and/or Unit tests",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_run_with_no_files_names_no_files(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "empty-review.md").write_text(
+            "# Review\n\n## Findings\nNothing to report.\n",
+            encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(["Code", "Review"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        try:
+            win.set_project(str(self.root))
+            listing, _viewer, paths = win._doc_tabs["Reviews"]
+            idx = [p.name for p in paths].index("empty-review.md")
+            listing.setCurrentRow(idx)
+            win.docstrings_check.setChecked(True)
+            win.run_finishing_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            self.assertIn("names no files",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_queued_send_counts_as_sent(self):
+        win, owner = self._finishing_review_window()
+        try:
+            # The bench queues the second send while the first
+            # turn runs: _send_queued set, no refusal.
+            def _send_queued():
+                owner.send_calls.append(
+                    owner.input.toPlainText())
+                owner._send_queued = True
+            owner.send_message = _send_queued
+            win.docstrings_check.setChecked(True)
+            win.run_finishing_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            self.assertFalse(win.docstrings_check.isChecked())
+            self.assertIn("queued", win.composer_status.text())
+            recorded = (self.root / ".forge" / "reviews"
+                        / "finish-review.md").read_text(
+                            encoding="utf-8")
+            from forge import modes as modes_mod
+            self.assertEqual(
+                [t["kind"] for t in
+                 modes_mod.finishing_touches(recorded)],
+                ["Docstrings"])
+        finally:
+            win.close()
+
+    def test_refused_send_is_not_recorded_and_stays_checked(self):
+        win, owner = self._finishing_review_window()
+        try:
+            # The parallel-turn cap refuses the send: the refusal
+            # lands in _send_refusal and nothing goes out.
+            def _send_refused():
+                owner._send_refusal = ("Parallel turn limit "
+                                       "reached (1).")
+            owner.send_message = _send_refused
+            win.docstrings_check.setChecked(True)
+            win.unittests_check.setChecked(True)
+            win.run_finishing_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            # Nothing recorded, both boxes still checked — the
+            # owner can try again when the bench is free.
+            self.assertTrue(win.docstrings_check.isChecked())
+            self.assertTrue(win.unittests_check.isChecked())
+            recorded = (self.root / ".forge" / "reviews"
+                        / "finish-review.md").read_text(
+                            encoding="utf-8")
+            from forge import modes as modes_mod
+            self.assertEqual(
+                modes_mod.finishing_touches(recorded), [])
+            self.assertIn("did not go out",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_labels_show_requested_state_for_the_shown_review(self):
+        win, _owner = self._finishing_review_window()
+        try:
+            win.docstrings_check.setChecked(True)
+            win.run_finishing_btn.click()
+            self.assertIn("↻ requested",
+                          win.docstrings_check.text())
+            self.assertNotIn("↻ requested",
+                             win.unittests_check.text())
+            # Re-showing the same review keeps the marks.
+            win._on_doc_shown(
+                "Reviews",
+                self.root / ".forge" / "reviews" / "finish-review.md")
+            self.assertIn("↻ requested",
+                          win.docstrings_check.text())
+            self.assertNotIn("↻ requested",
+                             win.unittests_check.text())
+        finally:
+            win.close()
+
+    def test_reviews_prompt_names_the_finishing_touches_section(self):
+        from forge import projects as proj_mod
+        prompt = proj_mod.FOLDER_PROMPTS["reviews"]
+        self.assertIn("Finishing touches", prompt)
+        self.assertIn("## Finishing touches", prompt)
+        # The Fix requests sentence still stands beside it.
+        self.assertIn("## Fix requests", prompt)

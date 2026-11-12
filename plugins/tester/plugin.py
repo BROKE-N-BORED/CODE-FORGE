@@ -67,7 +67,7 @@ MAX_SECONDS = 600
 
 def _finalize_report(client, messages, options, model, report,
                      remaining, cancelled):
-    """Manus study M7: close a completed tester report in the
+    """Study item M7: close a completed tester report in the
     handoff schema. One repair generation when the report
     attempted the schema but missed sections — and only while
     the wall clock and Stop allow it. A handoff still incomplete
@@ -250,7 +250,7 @@ def run_tester(args, ctx):
                                             cancel_event, containment)
             except Exception as exc:
                 result = f"Tool error: {exc}"
-                # Manus study M4: the same rule as the driver's
+                # Study item M4: the same rule as the driver's
                 # loop — an UNEXPECTED inner failure keeps its type
                 # and raising frame in the result the tester model
                 # reads, not just the flattened message. Authored

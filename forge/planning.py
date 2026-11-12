@@ -26,7 +26,7 @@ rides the sidecar as `document`; the checklist below is EXTRACTED
 from the document's Steps section (extract_steps) and the gate,
 STEP DONE ticks, and progress re-injection consume it exactly as
 before. Bare-list drafts — pre-#58 sidecars, a model that answers
-with a plain list, a Goldfish revision — keep working through
+with a plain list, a GoFish revision — keep working through
 parse_plan untouched.
 
 Item C7: the document skeleton also carries Success criteria and
@@ -44,7 +44,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from . import goldfish as goldfish_mod
+from . import gofish as gofish_mod
 
 STEP_STATES = ("pending", "active", "done", "interrupted")
 PLAN_STATUSES = ("draft", "running", "done", "killed", "interrupted")
@@ -213,7 +213,7 @@ def extract_steps(text: str) -> list[str] | None:
     """Checklist extraction for a plan draft of either era: a
     sectioned document yields the steps of its Steps section
     (detail joined in); anything else falls back to parse_plan,
-    so a bare numbered list — an older draft, a Goldfish
+    so a bare numbered list — an older draft, a GoFish
     revision — parses exactly as before."""
     section = steps_section(text)
     if section is not None:
@@ -225,7 +225,7 @@ def extract_steps(text: str) -> list[str] | None:
 
 def replace_steps_section(document: str, steps: list[str]) -> str:
     """Swap a document's Steps section body for the given steps
-    (the Goldfish revision path: the reviewer-driven revision
+    (the GoFish revision path: the reviewer-driven revision
     comes back as a bare list, and the document keeps its other
     sections with the revised steps laid in). A document with no
     Steps section is returned unchanged."""
@@ -295,7 +295,7 @@ def work_instruction(steps: list[str], document: str = "") -> str:
             "not announce a step you have not finished.\n\n" + lines)
 
 
-# Manus fix F3: the D39 stored plan-progress reminder
+# Fix F3: the D39 stored plan-progress reminder
 # (plan_progress_text, re-injected into the stored conversation
 # every three cycles) is retired — M3's programmatic recitation
 # below supersedes it, and keeping both double-nagged the model
@@ -303,10 +303,10 @@ def work_instruction(steps: list[str], document: str = "") -> str:
 # remains anywhere; recitation is the only reminder now.
 
 
-# --- Manus study M3: programmatic recitation ------------------------
-# Manus keeps its plan in recent attention by constantly rewriting a
-# todo.md — and later found its executor spent ~1/3 of all actions on
-# that rewriting, so planning moved off the executor. Forge's version:
+# --- Study item M3: programmatic recitation ------------------------
+# Keeping a plan in recent attention by constantly rewriting a
+# todo.md costs the executor ~1/3 of all actions on that rewriting,
+# so planning moved off the executor. Forge's version:
 # the PROGRAM recites. While an approved plan executes, the worker
 # appends this block to the OUTGOING request copy on every cycle —
 # built fresh from the live checklist state, at request time only,
@@ -331,7 +331,7 @@ def _recitation_clip(text: str, cap: int) -> str:
 def plan_recitation_text(steps: list[str], done: set[int],
                          title: str = "", success: str = "") -> str:
     """The compact plan-state block for one outgoing request
-    (Manus study M3). Pure: same state in, same text out. `done`
+    (Study item M3). Pure: same state in, same text out. `done`
     holds zero-based indices, matching find_step_done's world; the
     rendered indices are 1-based. Marks match the live checklist
     and the D39 reminder: ✓ done, → current (the first undone
@@ -374,11 +374,11 @@ def new_plan(steps: list[str], request: str = "", document: str = "") -> dict:
             # "" for a bare-list draft and for every pre-#58
             # sidecar — the checklist alone is the plan there.
             "document": str(document or ""),
-            # Item #56: the Goldfish review result dict (forge/
-            # goldfish.py) or None — no review on record. Advisory
+            # Item #56: the GoFish review result dict (forge/
+            # gofish.py) or None — no review on record. Advisory
             # only: it rides the state so the gate can show it; it
             # never influences status transitions.
-            "goldfish": None,
+            "gofish": None,
             # Item #66: the owner's gate comments, oldest first —
             # {"text", "at"} dicts appended by record_comment. The
             # sidecar is the record of what was asked; each comment
@@ -421,7 +421,11 @@ def sanitize_plan(data) -> dict | None:
             "skribe": str(data.get("skribe", "")),
             # Item #58: absent in pre-#58 sidecars — reads as "".
             "document": str(data.get("document", ""))[:200_000],
-            "goldfish": goldfish_mod.sanitize_result(data.get("goldfish")),
+            # GoFish rename (2026-11-12): sidecars saved before the
+            # rename carry the review under "goldfish" — read it
+            # once here; the new key is the only one ever written.
+            "gofish": gofish_mod.sanitize_result(
+                data.get("gofish", data.get("goldfish"))),
             "comments": comments,
             "created": str(data.get("created", "")),
             "updated": str(data.get("updated", ""))}
@@ -439,7 +443,7 @@ def record_comment(plan: dict, text: str) -> None:
 
 def owner_revision_instruction(comment: str) -> str:
     """The user-role message handed to the DRIVER (in its own main
-    context — the forge/worker.py _goldfish_revision pattern) when
+    context — the forge/worker.py _gofish_revision pattern) when
     the owner comments at the gate (Item #66): revise the draft
     once, against the owner's own words. The draft itself already
     rides the conversation, so the instruction carries the comment
@@ -462,7 +466,7 @@ def deck_plan(plan: dict | None) -> dict | None:
     """The read-only shape that rides the phone deck's snapshot."""
     if not plan:
         return None
-    goldfish = plan.get("goldfish")
+    gofish = plan.get("gofish")
     document = plan.get("document", "")
     return {"status": plan.get("status", ""),
             "steps": [{"text": s.get("text", ""), "state": s.get("state", "pending")}
@@ -474,12 +478,12 @@ def deck_plan(plan: dict | None) -> dict | None:
             # before when they are empty.
             "success_criteria": success_criteria(document),
             "out_of_scope": out_of_scope(document),
-            # Item #56: the Goldfish review rides the same plumbing —
+            # Item #56: the GoFish review rides the same plumbing —
             # a one-line summary plus the full gate rendering, so the
             # phone snapshot carries the findings even though the
             # deck page itself is unchanged.
-            "goldfish": goldfish_mod.summary_line(goldfish),
-            "goldfish_text": goldfish_mod.format_result(goldfish)}
+            "gofish": gofish_mod.summary_line(gofish),
+            "gofish_text": gofish_mod.format_result(gofish)}
 
 
 def _plan_path(app_dir, conversation_id) -> Path:

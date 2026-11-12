@@ -69,7 +69,7 @@ draft against the words and the plan returns to the gate). An
 empty comment is refused in the /plan handler itself, in words,
 without bothering the GUI thread.
 
-Fan-out from the phone (Manus fix F5): the bench screen carries
+Fan-out from the phone (Fix F5): the bench screen carries
 a [11] FAN-OUT card — one item per line, an independence
 checkbox, a Fan out button. POST /fanout makes the same
 synchronous round trip as /plan and answers 200 + JSON, and the
@@ -78,7 +78,7 @@ dialog calls. Only a real JSON true asserts independence; an
 empty batch or an unasserted one is refused in the /fanout
 handler itself, in words, without bothering the GUI thread.
 
-Proposals from the phone (Manus fix F6): the plan screen
+Proposals from the phone (Fix F6): the plan screen
 carries a [12] PROPOSALS card rendering the snapshot's
 "proposals" field — each pending proposal with Accept /
 Decline buttons. POST /proposal makes the same synchronous
@@ -277,7 +277,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <button onclick="planComment()">💬 Comment</button>
 </div>
 <div id="planmsg" style="margin-top:8px;font-size:13px"></div>
-<details id="planfish" style="display:none;margin-top:8px"><summary class="dim" style="cursor:pointer">Goldfish review — tap to read the findings</summary><pre id="planfishtext"></pre></details>
+<details id="planfish" style="display:none;margin-top:8px"><summary class="dim" style="cursor:pointer">GoFish review — tap to read the findings</summary><pre id="planfishtext"></pre></details>
 <div class="dim">Approve, comment, or kill from here — editing the steps happens at the PC.</div></div>
 
 <div class="card"><div class="sec">[ 12 ] PROPOSALS</div><div id="proposals"><span class="dim">No proposals.</span></div>
@@ -469,9 +469,9 @@ function renderPlan(s){
   if(p.success_criteria) lines.push('Success criteria:\\n' + p.success_criteria);
   if(p.out_of_scope) lines.push('Out of scope:\\n' + p.out_of_scope);
   if(p.skribe) lines.push('SKRIBE: ' + p.skribe);
-  if(p.goldfish) lines.push(p.goldfish);
+  if(p.gofish) lines.push(p.gofish);
   el.textContent = lines.join('\\n');
-  if(p.goldfish_text){ document.getElementById('planfishtext').textContent = p.goldfish_text; fish.style.display = ''; }
+  if(p.gofish_text){ document.getElementById('planfishtext').textContent = p.gofish_text; fish.style.display = ''; }
   else { fish.style.display = 'none'; }
   btns.style.display = (p.status === 'draft') ? '' : 'none';
   crow.style.display = (p.status === 'draft') ? '' : 'none';
@@ -820,12 +820,12 @@ class DeckServer(QObject):
     # parked plan's approve/kill and fills holder["result"] with
     # (ok, message), so the phone shows whether its decision landed.
     plan_action_requested = Signal(str, object)
-    # Same shape for /fanout (Manus fix F5): (payload, holder) —
+    # Same shape for /fanout (Fix F5): (payload, holder) —
     # the GUI thread fans the batch through submit_fan_out and
     # fills holder["result"] with (ok, message), so the phone
     # shows whether its batch fanned or was refused, and why.
     fan_out_requested = Signal(object, object)
-    # Same shape for /proposal (Manus fix F6): (payload, holder) —
+    # Same shape for /proposal (Fix F6): (payload, holder) —
     # the GUI thread decides the proposal through decide_proposal
     # and fills holder["result"] with (ok, message), so the phone
     # shows whether its decision landed.
@@ -996,7 +996,7 @@ class DeckServer(QObject):
         return bool(ok), str(message)
 
     def request_fan_out(self, items, independent) -> tuple[bool, str]:
-        """Ask the GUI thread to fan a batch out (Manus fix F5)
+        """Ask the GUI thread to fan a batch out (Fix F5)
         and wait for its answer: (True, what fanned) or (False,
         why not). The 15s ceiling only guards a wedged GUI loop,
         exactly like the plan action's."""
@@ -1013,7 +1013,7 @@ class DeckServer(QObject):
     def request_proposal_decision(self, proposal_id,
                                   accept) -> tuple[bool, str]:
         """Ask the GUI thread to decide one pending proposal
-        (Manus fix F6) and wait for its answer: (True, what
+        (Fix F6) and wait for its answer: (True, what
         happened) or (False, why not). The 15s ceiling only
         guards a wedged GUI loop, exactly like the plan action's."""
         holder = {"event": threading.Event(), "result": None}
@@ -1271,7 +1271,7 @@ class DeckServer(QObject):
                     self.wfile.write(body)
                     return
                 if path == "/fanout":
-                    # Manus fix F5: like /plan, a synchronous round
+                    # Fix F5: like /plan, a synchronous round
                     # trip, answered 200 + JSON — the phone must be
                     # able to show whether its batch fanned or was
                     # refused, and why. Only a real JSON true
@@ -1303,7 +1303,7 @@ class DeckServer(QObject):
                     self.wfile.write(body)
                     return
                 if path == "/proposal":
-                    # Manus fix F6: like /plan, a synchronous round
+                    # Fix F6: like /plan, a synchronous round
                     # trip, answered 200 + JSON — the phone must be
                     # able to show whether its decision landed.
                     # Only a real JSON bool decides (Sweep R103's

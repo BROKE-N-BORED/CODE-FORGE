@@ -1,5 +1,5 @@
 """Mode workflow machinery — Item #58 (pure stdlib, no Qt, like
-planning.py and goldfish.py).
+planning.py and gofish.py).
 
 The fault this module answers (verified 2026-11-08): every mode's
 entire instruction was one MODE_GUIDANCE paragraph — no homework
@@ -268,7 +268,7 @@ def section_body(text: str, name: str) -> str | None:
 
 # ---------- Review findings (CR2 — severity + type + Source) ----------
 #
-# One documented shape for a Review finding (CodeRabbit study,
+# One documented shape for a Review finding (the review study,
 # Tier 1 #2): every finding in a review's ## Findings section is
 # one line —
 #
@@ -554,9 +554,169 @@ def fix_requested_for(review_text: str, finding_text: str):
         return None
 
 
+# ---------- Finishing Touches (Tier 2 #3 — docstrings + unit tests) ----------
+#
+# The finishing moves, offered as checkboxes at the end of a
+# Review artifact: docstrings and unit tests for the files the review
+# names. Both run as Code turns (the Tester seat has no write tools —
+# it verifies the new tests on its normal run, it cannot write them).
+# The file a finding names is read from the finding line itself, and
+# every run is recorded in the review under ## Finishing touches, the
+# way fix requests are recorded under ## Fix requests.
+
+_FINISHING_TOUCH_RE = re.compile(
+    r"^-\s+(\S+(?:\s+\S+)?)\s+—\s+(Docstrings|Unit tests) for\s+(.*)$")
+
+
+def finding_file(line: str) -> str:
+    """The file a finding line names, or "" when it names none.
+
+    The CR2 format puts FILE:PLACE right after the bracket header,
+    before the " — " that introduces the problem; legacy lines carry
+    the same head without the bracket. A trailing :line or :line:col
+    reference is stripped. A line without the " — " separator names
+    no file — the file is never guessed from the prose. Never
+    raises."""
+    try:
+        text = _FINDING_BULLET_RE.sub(
+            "", str(line or "").strip()).strip()
+        if not text:
+            return ""
+        bracket = _FINDING_BRACKET_RE.match(text)
+        if bracket:
+            text = bracket.group(2).strip()
+        else:
+            # Legacy lines lead with the old severity word
+            # ("BLOCKER: store.py:3 — ...") — the same strip
+            # finding_display applies, so the word never reads
+            # as part of the file.
+            legacy = _FINDING_LEGACY_RE.match(text)
+            if legacy:
+                text = legacy.group(2).strip()
+        if " — " not in text:
+            return ""
+        head = text.split(" — ", 1)[0].strip()
+        head = re.sub(r"(?::\d+)+$", "", head).strip()
+        return head
+    except Exception:
+        return ""
+
+
+def review_files(lines, cap=10) -> list[str]:
+    """The distinct files a review's finding lines name, in first
+    appearance order, capped at `cap` (10 by default — a finishing
+    touch covers the review's files, not the whole tree). Lines
+    naming no file are skipped. Never raises."""
+    out: list[str] = []
+    try:
+        limit = max(1, int(cap))
+    except Exception:
+        limit = 10
+    try:
+        for line in lines or []:
+            found = finding_file(line)
+            if found and found not in out:
+                out.append(found)
+                if len(out) >= limit:
+                    break
+    except Exception:
+        return out
+    return out
+
+
+def record_finishing_touch(review_text: str, when: str, kind: str,
+                           files, sent: str) -> str:
+    """The review text with one finishing-touch entry recorded
+    under ## Finishing touches at the end (the section is created
+    when the review has none). The entry is "- <when> — <Kind> for
+    <file, file>" plus an indented "Sent: <the prompt that went to
+    Code mode>". The original text is otherwise untouched. Never
+    raises."""
+    try:
+        text = review_text or ""
+        when = (when or "").strip() or "unknown time"
+        kind = (kind or "").strip() or "Finishing touch"
+        file_list = ", ".join(str(f) for f in (files or [])) or "(no files)"
+        entry = (f"- {when} — {kind} for "
+                 f"{_flatten_one_line(file_list)}\n"
+                 f"  Sent: {_flatten_one_line(sent)}\n")
+        body = section_body(text, "Finishing touches")
+        if body is None:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            return text + f"\n## Finishing touches\n\n{entry}"
+        # The section exists: append the entry after its last
+        # line. section_body cannot say where the section ends,
+        # so the append point is found by re-scanning the lines.
+        lines = text.splitlines(keepends=True)
+        in_section = False
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                if in_section:
+                    insert_at = i
+                    break
+                if stripped == "## Finishing touches":
+                    in_section = True
+                continue
+        if insert_at == len(lines) and lines \
+                and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.insert(insert_at, entry)
+        return "".join(lines)
+    except Exception:
+        return review_text or ""
+
+
+def finishing_touches(review_text: str) -> list[dict]:
+    """The recorded finishing touches from a review's
+    ## Finishing touches section, in file order: {when, kind,
+    files, sent}. A Sent line belongs to the entry above it; an
+    entry without one records sent as "". No section reads as [].
+    Never raises."""
+    out: list[dict] = []
+    try:
+        body = section_body(review_text or "", "Finishing touches")
+    except Exception:
+        return out
+    if not body:
+        return out
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = _FINISHING_TOUCH_RE.match(line)
+        if match:
+            files = [f.strip() for f in match.group(3).split(",")
+                     if f.strip()]
+            out.append({"when": match.group(1).strip(),
+                        "kind": match.group(2).strip(),
+                        "files": files, "sent": ""})
+            continue
+        sent = _FIX_SENT_RE.match(line)
+        if sent and out:
+            out[-1]["sent"] = sent.group(1).strip()
+    return out
+
+
+def finishing_touched_for(review_text: str, kind: str):
+    """The latest "when" a finishing touch of this kind was
+    requested, or None when none was recorded. Never raises."""
+    try:
+        wanted = (kind or "").strip()
+        latest = None
+        for touch in finishing_touches(review_text):
+            if touch.get("kind") == wanted:
+                latest = touch.get("when")
+        return latest
+    except Exception:
+        return None
+
+
 # ---------- Review walkthrough (CR3 — orientation first) ----------
 #
-# A Review report opens with a ## Walkthrough section (CodeRabbit
+# A Review report opens with a ## Walkthrough section (the review
 # study, Tier 1 #3): what changed, the changes in dependency order
 # grouped by layer, an Effort line and a Risk line — the 30-second
 # orientation before the findings. The shape is instructed by the
@@ -862,7 +1022,7 @@ def research_plan_steps(document: str) -> list[str]:
     return steps
 
 
-# Manus study M11 — authoritative sources: the one mechanical
+# Study item M11 — authoritative sources: the one mechanical
 # rule in this item. "Authoritative" has no clean general
 # definition in code (the shell cannot know the docs domain of
 # an arbitrary subject), so the definition is narrow and
@@ -925,7 +1085,7 @@ def research_work_instruction(document: str, steps: list[str],
     at the named path against the report skeleton."""
     lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     skeleton = "\n".join(f"## {s}" for s in SKELETONS["research"])
-    # Manus study M11: the plan's own named sources, opened first.
+    # Study item M11: the plan's own named sources, opened first.
     named = authoritative_urls(document)
     named_line = ""
     if named:
@@ -945,7 +1105,7 @@ def research_work_instruction(document: str, steps: list[str],
         f"so on. This run's budget is {page_cap} page operations "
         f"({depth} depth) and one hour; the shell stops browsing "
         "at the budget, so spend it on the best sources first. "
-        "AUTHORITATIVE SOURCES FIRST (Manus study M11): open the "
+        "AUTHORITATIVE SOURCES FIRST: open the "
         "official docs, the official API reference, or the "
         "project's own repository before any copy, mirror, or "
         "summary. A scraped copy is second-class — cite it as a "

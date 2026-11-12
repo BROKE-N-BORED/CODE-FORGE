@@ -11,10 +11,10 @@ Needs attention first; he can flip it with one word):
               parallel jobs queued/running.
   attention — live turns parked at a gate (stream["gate"] set, the
               _ws_gate queue) and the plan gate: plan_state with
-              status "draft". The Goldfish review rides the plan
-              draft (plan_state["goldfish"]), so a plan gate with
+              status "draft". The GoFish review rides the plan
+              draft (plan_state["gofish"]), so a plan gate with
               findings says so in its detail — there is no separate
-              Goldfish queue in the real machinery.
+              GoFish queue in the real machinery.
   ready     — finished turns whose project has shadow checkpoints
               (list_checkpoints, via the owner's cached checker),
               and finished code jobs waiting on the gated Approve
@@ -207,7 +207,7 @@ def group_items(streams, plan_gate, job_rows, triage, now,
                 has_checkpoints):
     """Group every inbox item. `streams` are the raw _streams
     records, `plan_gate` is None or {conversation_id, title,
-    request, steps, goldfish, started_at}, `job_rows` are
+    request, steps, gofish, started_at}, `job_rows` are
     parallel_job_rows() dicts, `triage` is an InboxStore,
     `has_checkpoints` maps a workspace path to bool.
 
@@ -281,8 +281,8 @@ def group_items(streams, plan_gate, job_rows, triage, now,
 
     if plan_gate is not None:
         detail = "Plan awaiting your call"
-        if plan_gate.get("goldfish"):
-            detail += " · Goldfish findings to read"
+        if plan_gate.get("gofish"):
+            detail += " · GoFish findings to read"
         items.append({
             "key": f"plan:{plan_cid}", "kind": "plan",
             "title": plan_gate.get("title") or "Plan",

@@ -58,7 +58,7 @@ plain workflow runs instead; nothing about this skill applies.
 - In Plan mode, an opted-in project's plan document carries
   two extra sections — ## Reference lock and ## Breakdown —
   drafted from the stage 1–2 files (forge/reference_build.py
-  owns the skeleton; the gate, Goldfish, and checklist work
+  owns the skeleton; the gate, GoFish, and checklist work
   exactly as for any plan).
 - Seats are the ordinary ones: the vision seat reads image /
   video references, Design drafts visual specs, Architect owns
