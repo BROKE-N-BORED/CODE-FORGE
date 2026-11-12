@@ -16,10 +16,13 @@ decided within PROPOSAL_TTL_SECONDS dies on its own — it never
 queues forever and can never execute late.
 
 What is NOT covered, on purpose:
-- File-changed events: this base has no file watcher (no
-  QFileSystemWatcher, no polling loop, no background daemon),
-  so there is nothing honest to trigger on. A watcher is a
-  named remainder, not a silent invention.
+- File-changed events (Manus fix F7, the M11 remainder):
+  forge/project_watcher.py watches the project tree when the
+  owner enables it (Settings → File watcher, default OFF) and
+  raises a file_changed proposal through the existing path —
+  propose-only, never auto-applied. The watcher is the only
+  observation this module trusts; there is still no polling
+  loop and no background daemon.
 - Build-finished (a run that exited 0): observed, but it
   proposes nothing — a success leaves the owner nothing to
   decide.
@@ -50,7 +53,10 @@ PROPOSAL_TTL_SECONDS = 24 * 60 * 60
 MAX_PROPOSALS = 50
 STORE_NAME = "proposals.json"
 
-PROPOSAL_KINDS = ("tester_failed", "run_failed")
+# Manus fix F7: file_changed joins the two M13 kinds — a file
+# the owner (or another tool) changed outside the Forge, raised
+# by the owner-enabled watcher only.
+PROPOSAL_KINDS = ("tester_failed", "run_failed", "file_changed")
 
 # Fixed keys in fixed order — the record is a file the owner can
 # read, and a later version must still parse an old one.
@@ -132,6 +138,23 @@ def fix_turn_task(proposal: dict) -> str:
         lines.append(f"Failing evidence:\n{evidence[:1000]}")
     lines.append("Run the tests again when the fix is in, and say "
                  "plainly what changed.")
+    return "\n".join(lines)
+
+
+def review_turn_task(proposal: dict) -> str:
+    """The task text an accepted file_changed proposal starts
+    as an ordinary Code turn (Manus fix F7). Built from the
+    record only — the file the watcher saw change. The turn
+    looks and reports; it changes nothing unless the owner
+    asks, because the change came from outside the Forge and
+    the owner may have meant exactly what they did."""
+    touches = str(proposal.get("touches") or "").strip()
+    lines = ["A file changed outside the Forge — look at what "
+             "changed and say whether anything needs doing."]
+    if touches:
+        lines.append(f"File: {touches}")
+    lines.append("Change nothing unless I ask — this turn only "
+                 "looks and reports.")
     return "\n".join(lines)
 
 

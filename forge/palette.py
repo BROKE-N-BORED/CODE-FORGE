@@ -84,6 +84,12 @@ def base_catalog() -> list:
         _entry("test_now", "Test now — tester seat", "test",
                ["test", "tester", "run", "tests", "verify", "cadence",
                 "untested"], "Run"),
+        # Manus fix F5: the M12 fan-out entry point — the owner
+        # supplies the batch (one item per line) and asserts the
+        # items are independent; the dialog fans them out.
+        _entry("fan_out", "Fan out a batch…", "",
+               ["fan", "fan out", "fan-out", "batch", "parallel",
+                "independent", "items", "run"], "Run"),
         _entry("testing_window", "Testing window", "window",
                ["testing", "tests", "test", "verify", "watch", "live"], "Windows"),
         _entry("debug_window", "Debug window", "window",
@@ -118,6 +124,11 @@ def base_catalog() -> list:
         _entry("mission_control", "Mission control", "window",
                ["mission", "control", "parallel", "agents", "streams",
                 "running", "background", "turns"], "Windows"),
+        # Manus fix F6: the M13 proposals room.
+        _entry("proposals", "Proposals…", "",
+               ["proposals", "proposal", "events", "tester",
+                "failed", "run", "fix", "decide", "window"],
+               "Windows"),
         _entry("inbox", "Inbox", "window",
                ["inbox", "attention", "triage", "dismiss", "snooze",
                 "hold", "merge", "ready", "sessions", "needs",

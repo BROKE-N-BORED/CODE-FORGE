@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-12 — Chat streaming glitch fix
+- Fixed: the chat window could show duplicated or overlapping text when scrolled to the bottom during a streaming turn. The streaming anchor had been dead since the Reply links landed — it read the second-to-last block as the bubble header, but the tail bubble is three blocks now (header, body, Reply links), so the anchor never established and every tick rebuilt the whole chat. It now checks the third-to-last block first, with the two-block shape as fallback, and a parked turn at an approval gate no longer repaints at all.
+
+## 2026-11-12 — CodeRabbit review improvements, Tier 2 #1 (linter layer)
+- New "Run linters" button in the Review window: runs the project's own installed linters (Ruff, ShellCheck, ESLint) on demand and loads their findings into the composer, in the review format with the tool as the Source. Nothing is installed, nothing auto-runs, nothing auto-fixes. When no linter is installed it says so plainly.
+
+## 2026-11-12 — Widget styling token pass (GUIFX T3)
+- Tooltips, tab bars, checkboxes, radio buttons, and list items are now styled from the bench tokens, matching the rest of the window.
+
+## 2026-11-12 — Manus proper fixes F1–F7
+- The "[Plan progress]" reminder is retired; plan abandonment is now a real signal (a plan's trajectory records active, superseded, or abandoned, and approving a new plan supersedes the old one).
+- Fan-out and Proposals get their own windows (palette entries plus deck items), so the Manus features are reachable from the bench instead of existing only in code.
+- New file-change watcher (forge/project_watcher.py): proposes when project files change on disk. Off by default, propose-only, and watches every file — no cap.
+- The Knowledge distiller gets its own client instead of sharing the driver's, and the stable-prefix test now proves determinism by time travel instead of pinning a date.
+
 ## 2026-11-11 — LOADED MODEL label fix
 - The bench header stamp that read LOADED MODEL now reads IN RAM (LOCAL). It names the local models sitting in this PC's RAM (from Ollama), not the model running the turn — hovering it says so plainly, and names the dropdown as the model doing the work. Same data, same refresh, same MODELS row.
 

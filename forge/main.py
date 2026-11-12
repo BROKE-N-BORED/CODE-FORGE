@@ -63,6 +63,7 @@ from . import exporting as export_mod
 from . import converting as convert_mod
 from . import goldfish as goldfish_mod
 from . import context as context_mod
+from . import project_watcher as pwatch_mod
 from . import notes as notes_mod
 from . import runwindow as run_mod
 from . import runfiles as runfiles_mod
@@ -74,6 +75,7 @@ from . import learnings as learnings_mod
 from . import guidelines as guidelines_mod
 from . import review_state as review_state_mod
 from . import gate_checks as gate_checks_mod
+from . import linters as linters_mod
 from . import diffview as diff_mod
 from . import snapshots as snap_mod
 from . import checkpoints as ckpt_mod
@@ -244,6 +246,16 @@ TOKENS = {
 # existing tokens — 10px thin bars, dark track, warm thumb with
 # hover/pressed states, arrow buttons hidden (zero-sized). No new
 # tokens; dimensions stay literal px like the splitter handle.
+# T3 (GUIFX task list, 2026-11-11): four widget families had zero
+# template rules and rendered platform-default — tooltips, tabs,
+# checkbox/radio indicators, list-item states — even though the app
+# leans on all of them (143 tooltips, Settings' tabbed QTabWidget
+# full of checkboxes, ~78 QListWidgets). The rule families below
+# style them all from existing tokens. No new tokens; dimensions
+# stay literal px (TOKENS' key set is pinned by TokensTests, so no
+# new token may be added for a padding here). Checked indicators
+# use the amber primary token so the state reads unambiguously;
+# disabled indicators follow the T1 pattern (flattened, muted).
 _STYLE_TEMPLATE = Template("""
 QWidget { background:$surface_base; color:$text_base; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }
 QMainWindow { background:$surface_base; }
@@ -295,6 +307,24 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; backg
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }
 QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }
 QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }
+QToolTip { background:$surface_menu; border:1px solid $border_menu; color:$text_base; padding:4px 8px; }
+QTabWidget::pane { border:1px solid $rim_soft; background:$surface_glass_bottom; }
+QTabBar::tab { background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; color:$text_nav; }
+QTabBar::tab:hover { background:$surface_nav_hover; color:$text_white; }
+QTabBar::tab:selected { background:$surface_glass_mid; border-bottom:2px solid $accent_primary_top; color:$text_amber_light; }
+QCheckBox:disabled { color:$text_muted; }
+QCheckBox::indicator { width:16px; height:16px; border:1px solid $border_button; border-radius:3px; background:$surface_input; }
+QCheckBox::indicator:hover { border-color:$rim_hover; }
+QCheckBox::indicator:checked { background:$accent_primary_top; border-color:$accent_primary_top; }
+QCheckBox::indicator:disabled { background:$surface_input; border-color:$border_input; }
+QRadioButton:disabled { color:$text_muted; }
+QRadioButton::indicator { width:16px; height:16px; border:1px solid $border_button; border-radius:8px; background:$surface_input; }
+QRadioButton::indicator:hover { border-color:$rim_hover; }
+QRadioButton::indicator:checked { background:$accent_primary_top; border-color:$accent_primary_top; }
+QRadioButton::indicator:disabled { background:$surface_input; border-color:$border_input; }
+QListWidget::item { padding:4px 8px; color:$text_base; }
+QListWidget::item:hover { background:$surface_nav_hover; }
+QListWidget::item:selected { background:$surface_menu_selected; }
 QPushButton#accordion { text-align:left; background:transparent; border:0; padding:$padding_accordion; color:$text_section; font-size:10px; font-weight:700; letter-spacing:1.6px; }
 QPushButton#accordion:hover { color:$text_accordion_hover; background:transparent; }
 QPushButton#accordion:pressed { background:$surface_nav_hover; }
@@ -2699,6 +2729,17 @@ class SettingsDialog(QDialog):
         self.light_machine.setChecked(
             bool(settings.get("light_machine", False)))
         form.addRow("Light machine", self.light_machine)
+        # File watcher (Manus fix F7, M11 remainder): the owner
+        # enables a QFileSystemWatcher on the project tree; a
+        # changed file raises a proposal through the existing
+        # path only — it never auto-applies, never runs tools,
+        # never edits. Default OFF — today's behavior exactly.
+        self.watch_project_files = QCheckBox(
+            "Watch project files for changes (proposes a review, "
+            "never edits)")
+        self.watch_project_files.setChecked(
+            bool(settings.get("watch_project_files", False)))
+        form.addRow("File watcher", self.watch_project_files)
         # Review voice (CR5, 2026-11-11): how much a Review turn
         # says and how hard it pushes. Default Chill — today's
         # review exactly. Quiet reports Critical/Major only;
@@ -2819,6 +2860,8 @@ class SettingsDialog(QDialog):
                 "forge_browser_engine": str(
                     self.forge_browser_engine.currentData() or "auto"),
                 "light_machine": self.light_machine.isChecked(),
+                "watch_project_files":
+                    self.watch_project_files.isChecked(),
                 "review_profile": str(
                     self.review_profile.currentData() or "chill"),
                 "design_shell_path": self.design_shell_path.text().strip(),
@@ -4948,6 +4991,60 @@ class PaletteDialog(QDialog):
             self._on_run(entry["id"])
 
 
+class FanOutDialog(QDialog):
+    """Manus fix F5: the M12 fan-out entry point on the desktop.
+    The owner types the batch — one item per line — and asserts
+    independence with the checkbox: the batch fans ONLY when the
+    owner says none of the items waits on another. The checkbox
+    starts UNCHECKED: independence is asserted, never assumed,
+    and the dialog refuses to fan without it (the refusal stays
+    on the dialog's message line, the dialog stays open). The
+    actual fan-out runs through the window's submit_fan_out —
+    the same core the phone deck calls — so both doors fan
+    identically."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._owner = parent
+        self.setWindowTitle("Fan out a batch")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "One item per line — similar jobs, each on its own.\n"
+            "Every item runs as its own fresh-context turn, in "
+            "parallel under the parallel-turns cap."))
+        self.items_edit = QPlainTextEdit()
+        self.items_edit.setPlaceholderText(
+            "Write the test for login.py\nWrite the test for billing.py\n…")
+        layout.addWidget(self.items_edit)
+        self.indep_check = QCheckBox(
+            "These items are independent — none of them waits on "
+            "another")
+        layout.addWidget(self.indep_check)
+        self.message = QLabel("")
+        self.message.setWordWrap(True)
+        layout.addWidget(self.message)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        fan = QPushButton("Fan out")
+        fan.clicked.connect(self._accept)
+        fan.setDefault(True)
+        buttons.addWidget(fan)
+        layout.addLayout(buttons)
+
+    def _accept(self):
+        ok, message = self._owner.submit_fan_out(
+            self.items_edit.toPlainText(),
+            self.indep_check.isChecked())
+        if ok:
+            self.accept()
+            return
+        self.message.setText(message)
+
+
 def format_duration(seconds):
     """G6: a run's elapsed time as its block header shows it —
     sub-minute runs keep a decimal ('0.4s', '3.2s'); a minute and
@@ -6415,6 +6512,48 @@ class ModeWindow(QWidget):
         scanning."""
         return paths
 
+    def _run_linters(self):
+        # Tier 2 #1 (linter layer, light edition): run only the
+        # linters already installed on the project and load their
+        # findings into the composer, in the review format with
+        # the tool as the Source — the next Review turn writes
+        # them up as findings. A missing tool is a plain note;
+        # nothing is installed, nothing auto-fixes.
+        ws = self._review_workspace()
+        if not ws:
+            self.review_state_status.setText(
+                "No project open — open one first.")
+            return
+        try:
+            result = linters_mod.run_linters(ws)
+        except Exception:
+            self.review_state_status.setText(
+                "The linters could not run — try again, or run "
+                "them directly.")
+            return
+        tools = result.get("tools") or {}
+        ran = [name for name, status in tools.items()
+               if status.startswith("ran")]
+        missing = [name for name, status in tools.items()
+                   if status == "not installed"]
+        findings = result.get("findings") or []
+        if not ran:
+            self.review_state_status.setText(
+                "No linters installed — Ruff, ShellCheck and "
+                "ESLint were all missing; install one to use this.")
+            return
+        header = ("Linter findings — write each one up as a "
+                  "finding in your review, with the tool as its "
+                  "Source; do not re-derive them:\n")
+        self.composer.setPlainText(
+            header + linters_mod.format_findings(findings))
+        self.composer.setFocus()
+        parts = [f"{len(findings)} finding(s) from "
+                 f"{', '.join(ran)} — loaded into the composer."]
+        if missing:
+            parts.append(f"{', '.join(missing)} not installed.")
+        self.review_state_status.setText(" ".join(parts))
+
     def _on_doc_shown(self, tab_label, path):
         """A document was just shown in a doc tab's viewer.
         Subclasses hang their per-document views off this
@@ -7746,6 +7885,22 @@ class ReviewWindow(ModeWindow):
             self.mark_reviewed_btn.clicked.connect(
                 self._mark_reviewed)
             col_lay.addWidget(self.mark_reviewed_btn)
+            # Tier 2 #1 (linter layer, light edition): run only
+            # the linters already installed on the project and
+            # load their findings into the composer, in the
+            # review format with the tool as the Source — the
+            # next Review turn writes them up as findings.
+            # On demand only; nothing runs on its own, nothing
+            # is installed, nothing auto-fixes.
+            self.run_linters_btn = QPushButton("Run linters")
+            self.run_linters_btn.setToolTip(
+                "Run the project's installed linters (Ruff, "
+                "ShellCheck, ESLint when present) and load their "
+                "findings into the composer for the next Review "
+                "turn — nothing is installed or auto-fixed.")
+            self.run_linters_btn.clicked.connect(
+                self._run_linters)
+            col_lay.addWidget(self.run_linters_btn)
             self.review_state_status = QLabel("")
             self.review_state_status.setObjectName("muted")
             self.review_state_status.setWordWrap(True)
@@ -9044,6 +9199,84 @@ class ResearchWindow(ModeWindow):
         if newest and newest[1] != self._report_seen_stamp:
             self._report_seen_stamp = newest[1]
             self.show_report(newest[0])
+
+
+class ProposalsWindow(QWidget):
+    """Manus fix F6: the proposals room — the M13 proposals the
+    owner can still decide, oldest first, each with Accept /
+    Decline wired to the window's decide_proposal (the one seam:
+    no new approval concept, no Remember option anywhere on this
+    surface). Single instance, refreshed on open and whenever a
+    proposal is raised or decided. Accept on a tester failure
+    starts an ordinary Code turn through the normal send path;
+    decline kills the proposal and nothing runs — exactly what
+    decide_proposal already does; this window only shows the
+    list and carries the decision."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.resize(640, 420)
+        self.setWindowTitle("Proposals — Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12)
+        lay.setSpacing(6)
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        self.list = QListWidget()
+        self.list.itemSelectionChanged.connect(self._sync_buttons)
+        lay.addWidget(self.list)
+        self.empty = QLabel(
+            "No proposals — when a test fails or a run crashes, "
+            "the proposal waits here. Nothing runs until you "
+            "accept it.")
+        self.empty.setWordWrap(True)
+        lay.addWidget(self.empty)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.decline_btn = QPushButton("Decline")
+        self.decline_btn.setToolTip(
+            "Decline the proposal — it dies and nothing runs")
+        self.decline_btn.clicked.connect(
+            lambda: self._decide(False))
+        buttons.addWidget(self.decline_btn)
+        self.accept_btn = QPushButton("✓ Accept")
+        self.accept_btn.setObjectName("primary")
+        self.accept_btn.setToolTip(
+            "Accept the proposal — it runs through the gate")
+        self.accept_btn.clicked.connect(lambda: self._decide(True))
+        buttons.addWidget(self.accept_btn)
+        lay.addLayout(buttons)
+        self._sync_buttons()
+
+    def _line(self, proposal):
+        return (f"{proposal.get('kind', '')} · "
+                f"{proposal.get('event', '')} — "
+                f"{proposal.get('action', '')} "
+                f"({proposal.get('touches', '')})")
+
+    def refresh(self):
+        """Rebuild the list from the pending proposals on record."""
+        pending = self._owner.proposals_pending()
+        self.list.clear()
+        for proposal in pending:
+            item = QListWidgetItem(self._line(proposal))
+            item.setData(Qt.UserRole, proposal.get("id"))
+            self.list.addItem(item)
+        self.empty.setVisible(not pending)
+        self._sync_buttons()
+
+    def _sync_buttons(self):
+        enabled = self.list.currentItem() is not None
+        self.accept_btn.setEnabled(enabled)
+        self.decline_btn.setEnabled(enabled)
+
+    def _decide(self, accept):
+        item = self.list.currentItem()
+        if item is None:
+            return
+        self._owner.decide_proposal(item.data(Qt.UserRole), accept)
+        self.refresh()
 
 
 class PlanWindow(QWidget):
@@ -14100,9 +14333,14 @@ class ForgeWindow(QMainWindow):
         # assistant message, how many messages before it the chat
         # document already shows, and the doc offset where its blocks
         # begin — so a repaint tick can replace just the bubble's tail.
+        # _stream_painted is the tail content the last repaint actually
+        # drew, so a tick with nothing new can skip the repaint
+        # entirely (a parked gate leaves the stream frozen while the
+        # 120 ms tick keeps firing).
         self._stream_bubble = None
         self._stream_prefix_len = 0
         self._stream_anchor = None
+        self._stream_painted = None
         self._transcriber = None
         self._fold_thread = None
         self._copy_thread = None
@@ -14119,6 +14357,10 @@ class ForgeWindow(QMainWindow):
         # watch tick drains them — a worker thread must never
         # touch the activity widget directly.
         self._proposal_log_queue: list[str] = []
+        # Manus fix F7: the file watcher — None until the owner
+        # enables it (default OFF) and _apply_file_watcher
+        # builds it. OFF means no watcher object exists at all.
+        self._file_watcher = None
         self._debug_session = None
         self._gauge_busy = False
         self.gauge_ready.connect(self._apply_gauges)
@@ -14175,6 +14417,9 @@ class ForgeWindow(QMainWindow):
         self.deck.project_switch_requested.connect(self._deck_project_switch)
         self.deck.prompt_delivery_requested.connect(self._deck_prompt_delivery)
         self.deck.plan_action_requested.connect(self._deck_plan_action)
+        self.deck.fan_out_requested.connect(self._deck_fan_out)
+        self.deck.proposal_decision_requested.connect(
+            self._deck_proposal_decision)
         self.deck.attachment_remove_requested.connect(self._deck_attachment_remove)
         self.deck.attachment_upload_requested.connect(self._deck_attachment_upload)
         self._gauge_snap = None
@@ -15816,6 +16061,7 @@ class ForgeWindow(QMainWindow):
         self.view_act_sees = menu.addAction("👁   What the AI sees window", self.open_sees_window)
         self.view_act_models = menu.addAction("🤖   Models window", self.open_models_window)
         self.view_act_mission = menu.addAction("🛰   Mission control", self.open_mission_control)
+        self.view_act_proposals = menu.addAction("📩   Proposals window", self.open_proposals_window)
         self.view_act_inbox = menu.addAction("📥   Inbox", self.open_inbox)
         self.view_act_templates = menu.addAction("🧰   Templates…", self.open_templates_window)
         self.view_act_testing = menu.addAction("🧪   Testing window", self.open_testing_window)
@@ -16049,6 +16295,31 @@ class ForgeWindow(QMainWindow):
             win.show()
         win.raise_()
         win.activateWindow()
+
+    def open_proposals_window(self):
+        """Manus fix F6: the proposals room: single instance,
+        refreshed on open so the pending proposals are the ones
+        right now."""
+        win = getattr(self, "proposals_win", None)
+        if win is None:
+            win = self.proposals_win = ProposalsWindow(self)
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _refresh_proposals_window(self):
+        """Refresh the proposals room if it exists — called on
+        the GUI thread whenever a proposal is raised or decided.
+        Never raises: a stale list is a cosmetic lag, never a
+        broken decision."""
+        win = getattr(self, "proposals_win", None)
+        if win is not None:
+            try:
+                win.refresh()
+            except Exception:
+                pass
 
     def open_artifacts_window(self):
         """The artifacts room: single instance, refreshed on open
@@ -16352,6 +16623,23 @@ class ForgeWindow(QMainWindow):
 
     # ---------- Project Knowledge: distillation after a turn ----------
 
+    def _distiller_client(self):
+        """Manus fix F2: the Knowledge distiller gets its OWN
+        client instance — never the turn client. A fresh
+        ProviderClient built from the same Ollama URL and
+        connector config as the turn client, so it serves the
+        same models (local and allowed provider seats alike) with
+        no shared state: the distiller runs on its own daemon
+        thread after a turn settles, and any shared scripted or
+        queued client lets a distiller generation consume a
+        turn's reply (it once ate a fan-out repair turn's
+        scripted reply). Isolated by construction, not by test
+        arming order. A seam tests stub to hand the distiller a
+        separate scripted client."""
+        return ProviderClient(
+            self.settings.get("ollama_url", "http://127.0.0.1:11434"),
+            self._connector_config)
+
     def _distill_knowledge_async(self, prompt, text, workspace=None):
         """Project Knowledge (2026-11-11): a settled turn with filed
         work gets distilled by the fast seat into a DRAFT knowledge
@@ -16363,7 +16651,9 @@ class ForgeWindow(QMainWindow):
         along the way is an event-log line (knowledge.distill itself
         never raises); the owner's finished work is never held
         hostage by a filing step. Seat resolution mirrors the bench's
-        own tester resolution, registry gate included."""
+        own tester resolution, registry gate included. The
+        distillation runs through the distiller's OWN client
+        (_distiller_client), never the turn client (Manus fix F2)."""
         ws = workspace or self.workspace
 
         def _run():
@@ -16379,6 +16669,11 @@ class ForgeWindow(QMainWindow):
                     model = seats_mod.SEAT_DEFAULTS["tester"]
                 _log = lambda msg: self.eventlog.record(  # noqa: E731
                     "knowledge", note=msg)
+                # Manus fix F2: the distiller's own client (see
+                # _distiller_client) — never the turn client, so
+                # a distiller generation can never consume a
+                # turn's reply.
+                client = self._distiller_client()
                 if bool(self.settings.get("light_machine", False)):
                     # Light Machine rule 3: the distiller waits out
                     # a busy machine (governor snapshot, the
@@ -16386,12 +16681,12 @@ class ForgeWindow(QMainWindow):
                     # past ~10 minutes the entry simply doesn't
                     # distill this turn (one event-log line).
                     knowledge_mod.distill_when_idle(
-                        self.client, model, ws, prompt, text,
+                        client, model, ws, prompt, text,
                         log=_log,
                         snapshot_fn=lambda: governor.snapshot())
                 else:
                     knowledge_mod.distill(
-                        self.client, model, ws, prompt, text, log=_log)
+                        client, model, ws, prompt, text, log=_log)
             except Exception:
                 pass
 
@@ -17098,6 +17393,8 @@ class ForgeWindow(QMainWindow):
             self.log(f"📩 Proposal raised · {kind} · {event} — "
                      f"{action}. Accept or decline it; nothing "
                      f"happens until you do.")
+        # Manus fix F6: the proposals room follows the record.
+        self._refresh_proposals_window()
         return proposal
 
     def proposals_pending(self):
@@ -17127,7 +17424,8 @@ class ForgeWindow(QMainWindow):
             self.log(f"📩 Proposal {proposal_id} cannot be decided "
                      f"— it is already decided or expired.")
             return False
-        if accept and target.get("kind") == "tester_failed" \
+        if accept and target.get("kind") in (
+                "tester_failed", "file_changed") \
                 and self.worker is not None \
                 and self.worker.isRunning():
             # The bench is busy: do not consume the decision on a
@@ -17146,6 +17444,8 @@ class ForgeWindow(QMainWindow):
                            for p in store.pending()])
         except Exception:
             pass
+        # Manus fix F6: the proposals room follows the record.
+        self._refresh_proposals_window()
         if not accept:
             self.log(f"📩 Proposal declined · {decided['kind']} · "
                      f"{decided['event']} — nothing runs.")
@@ -17158,10 +17458,16 @@ class ForgeWindow(QMainWindow):
             return True
         if decided["kind"] == "tester_failed":
             self._proposal_start_fix_turn(decided)
+        elif decided["kind"] == "file_changed":
+            # Manus fix F7: an accepted file-change proposal
+            # starts the review turn — the same ordinary Code
+            # turn shape as the tester fix, looking at what
+            # changed outside the Forge.
+            self._proposal_start_review_turn(decided)
         elif decided["kind"] == "run_failed":
             alert = (decided.get("detail") or {}).get("alert") or {}
             self.request_monitor_fix(alert)
-        else:  # pragma: no cover — the store only knows two kinds
+        else:  # pragma: no cover — the store only knows three kinds
             return False
         self.log(f"📩 Proposal accepted · {decided['kind']} · "
                  f"{decided['event']} — running through the gate.")
@@ -17173,26 +17479,76 @@ class ForgeWindow(QMainWindow):
             pass
         return True
 
-    def _proposal_start_fix_turn(self, proposal):
-        """An accepted tester_failed proposal starts an ordinary
-        Code turn in the current conversation: the fix task is
-        sent through the owner's normal send path, so the plan
-        gate, the approval gate, and every per-turn rule apply
-        exactly as if the owner had typed it. The mode is Code
-        for this turn only (the fan-out spawn's shape) and is
-        restored afterwards."""
+    def _proposal_start_turn(self, task, turn_label):
+        """An accepted proposal that starts an ordinary Code turn
+        in the current conversation: the task is sent through the
+        owner's normal send path, so the plan gate, the approval
+        gate, and every per-turn rule apply exactly as if the
+        owner had typed it. The mode is Code for this turn only
+        (the fan-out spawn's shape) and is restored afterwards."""
         previous_mode = self.mode_combo.currentText()
         try:
             self.mode_combo.setCurrentText("Code")
-            self.input.setPlainText(
-                proposals_mod.fix_turn_task(proposal))
+            self.input.setPlainText(task)
             self.send_message()
             if getattr(self, "_send_refusal", None):
-                self.log(f"📩 The fix turn could not start: "
+                self.log(f"📩 The {turn_label} turn could not start: "
                          f"{self._send_refusal}")
         finally:
             if self.mode_combo.currentText() != previous_mode:
                 self.mode_combo.setCurrentText(previous_mode)
+
+    def _proposal_start_fix_turn(self, proposal):
+        """An accepted tester_failed proposal starts the fix turn
+        — the task text is built from the proposal record only."""
+        self._proposal_start_turn(
+            proposals_mod.fix_turn_task(proposal), "fix")
+
+    def _proposal_start_review_turn(self, proposal):
+        """An accepted file_changed proposal starts the review
+        turn (Manus fix F7) — the task text is built from the
+        proposal record only, and the turn looks and reports
+        without changing anything."""
+        self._proposal_start_turn(
+            proposals_mod.review_turn_task(proposal), "review")
+
+    def _apply_file_watcher(self):
+        """The file watcher follows the setting and the project
+        (Manus fix F7): OFF (the default) means no watcher at
+        all — no thread, no watches, no proposals; ON starts
+        one on the current project tree. Called after a
+        settings save and on every project switch; a watcher
+        already running on this project is left alone."""
+        enabled = bool(self.settings.get("watch_project_files",
+                                         False))
+        if not enabled or not getattr(self, "workspace", None):
+            if self._file_watcher is not None:
+                self._file_watcher.stop()
+                self._file_watcher = None
+            return
+        if (self._file_watcher is not None
+                and self._file_watcher.root == self.workspace):
+            return
+        if self._file_watcher is None:
+            self._file_watcher = pwatch_mod.ProjectWatcher(self)
+            self._file_watcher.changed.connect(
+                self._on_watched_file_changed)
+        self._file_watcher.start(self.workspace)
+        self.log(f"📁 File watcher on — "
+                 f"{self._file_watcher.watched_count} files "
+                 f"watched.")
+
+    def _on_watched_file_changed(self, rel_path):
+        """The watcher's only act (Manus fix F7): raise a
+        proposal through the existing path. The watcher never
+        edits, never runs a tool, never starts a turn — the
+        proposal waits for the owner, and the store's
+        same-kind+event dedupe means a burst of saves to one
+        file is still one proposal."""
+        self.raise_event_proposal(
+            "file_changed", f"File changed: {rel_path}",
+            "Look at what changed and say whether anything "
+            "needs doing", rel_path)
 
     # ---------- Debug: ONE session, two drivers (window + agent) ----------
     def debug_session_live(self):
@@ -17412,6 +17768,8 @@ class ForgeWindow(QMainWindow):
             "what_ai_sees": self.open_sees_window,
             "models_window": self.open_models_window,
             "mission_control": self.open_mission_control,
+            "fan_out": self.open_fan_out_dialog,
+            "proposals": self.open_proposals_window,
             "inbox": self.open_inbox,
             "templates": self.open_templates_window,
             "testing_window": self.open_testing_window,
@@ -17654,6 +18012,9 @@ class ForgeWindow(QMainWindow):
             self.plan_win.set_project(self.workspace)
         for mode_win in getattr(self, "mode_windows", {}).values():
             mode_win.set_project(self.workspace)
+        # Manus fix F7: the watcher follows the project — it
+        # restarts on the new tree, or stays stopped while OFF.
+        self._apply_file_watcher()
         self.save_settings()
         self.refresh_projects()
         self.new_chat()
@@ -18022,6 +18383,16 @@ class ForgeWindow(QMainWindow):
         pinned = bar.value() >= bar.maximum() - 8
         place = bar.value()
         self.chat.setHtml(''.join(html))
+        # Chat-glitch fix: setHtml rebuilt the document — any stream
+        # anchor pointed into the OLD document and is garbage now.
+        # Clear the bookkeeping (not _stream_text: the in-flight text
+        # survives; the next tick re-anchors from the fresh document).
+        # Without this, a full render from any other caller — fold
+        # settle, side-chat, load — could leave a stale position
+        # behind for the next tick to trust.
+        self._stream_bubble = None
+        self._stream_prefix_len = 0
+        self._stream_anchor = None
         if pinned:
             bar.setValue(bar.maximum())
         else:
@@ -18082,6 +18453,16 @@ class ForgeWindow(QMainWindow):
         if not anchored:
             self.render()
             self._establish_stream_anchor()
+            # The full render just painted the tail as it stands.
+            self._stream_painted = bubble.get("content") if bubble else None
+            return
+        content = bubble.get("content")
+        if content == self._stream_painted:
+            # Chat-glitch fix: the tail already shows exactly this
+            # text — a parked gate leaves the stream frozen while the
+            # 120 ms tick keeps firing, and repainting identical HTML
+            # is churn the owner's machine feels. Skip it; the scroll
+            # discipline needs no touch either, nothing moved.
             return
         cursor = QTextCursor(self.chat.document())
         cursor.setPosition(self._stream_anchor)
@@ -18091,22 +18472,26 @@ class ForgeWindow(QMainWindow):
         # only when the reader is already riding the bottom.
         bar = self.chat.verticalScrollBar()
         pinned = bar.value() >= bar.maximum() - 8
-        cursor.insertHtml(self._assistant_bubble_html(bubble.get("content")))
+        cursor.insertHtml(self._assistant_bubble_html(content))
+        self._stream_painted = content
         if pinned:
             bar.setValue(bar.maximum())
 
     def _establish_stream_anchor(self):
         """(Re)point the streaming bookkeeping at the tail bubble
         after a full render. A full render lays a plain assistant
-        bubble out as exactly two blocks — header, then body — so the
-        bubble begins at the second-to-last block. When the tail is
-        not such a bubble (reviewer/summary/empty — shapes render()
-        draws differently or skips), the anchor stays unset and the
-        next tick falls back to a full render again, the old behavior.
+        bubble out as three blocks — header, body, Reply links —
+        so the bubble begins at the third-to-last block (the
+        second-to-last stays as the fallback for a linkless tail
+        shape). When the tail is not such a bubble (reviewer/
+        summary/empty — shapes render() draws differently or skips),
+        the anchor stays unset and the next tick falls back to a
+        full render again, the old behavior.
         """
         self._stream_bubble = None
         self._stream_prefix_len = 0
         self._stream_anchor = None
+        self._stream_painted = None
         if not self.messages:
             return
         bubble = self.messages[-1]
@@ -18116,10 +18501,25 @@ class ForgeWindow(QMainWindow):
         if not (bubble.get("content") or ""):
             return
         doc = self.chat.document()
-        if doc.blockCount() < 2:
-            return
-        header = doc.findBlockByNumber(doc.blockCount() - 2)
-        if not header.text().startswith("LINUX FORGE"):
+        # Chat-glitch fix: the old code read the second-to-last
+        # block as the header — the block count it was written
+        # against, before the Reply links div landed (2026-11-10).
+        # With the links block the tail is three blocks, so that
+        # read the BODY block, the header check failed, and the
+        # anchor never established: every 120 ms tick rebuilt the
+        # whole history with setHtml. The third-to-last block is
+        # the header now; check it first, so a body whose own text
+        # starts with "LINUX FORGE" can never be mistaken for it.
+        header = None
+        if doc.blockCount() >= 3:
+            cand = doc.findBlockByNumber(doc.blockCount() - 3)
+            if cand.text().startswith("LINUX FORGE"):
+                header = cand
+        if header is None and doc.blockCount() >= 2:
+            cand = doc.findBlockByNumber(doc.blockCount() - 2)
+            if cand.text().startswith("LINUX FORGE"):
+                header = cand
+        if header is None:
             return
         self._stream_bubble = bubble
         self._stream_prefix_len = len(self.messages) - 1
@@ -18754,6 +19154,36 @@ class ForgeWindow(QMainWindow):
         plan["status"] = "running"
         self._plan_render()
         self._plan_persist()
+        # Manus fix F4: approving a new plan ENDS the previous
+        # one — any trajectory on record from the old plan is
+        # superseded here, at the moment the owner actually ends
+        # it, so a later resume never re-arms it (the worker's
+        # restore skips superseded plans outright). The mark is
+        # persisted at once — the conversation save and the
+        # trajectory.json copy — so an app close before the new
+        # plan's first turn cannot resurrect the old plan. A
+        # failed persist never breaks the approval: the in-memory
+        # mark still protects this session, and the failure is
+        # logged.
+        superseded = context_mod.supersede_trajectory(self.messages)
+        if superseded is not None:
+            try:
+                context_mod.store_trajectory(self.workspace,
+                                             superseded)
+            except Exception as exc:
+                self.log("Could not store the superseded "
+                         f"trajectory: {exc}")
+            try:
+                self.conversation_id = self.store.save(
+                    self.conversation_id, self.messages,
+                    model=self.model_combo.currentText().strip()
+                    or None,
+                    project=self.workspace)
+            except Exception as exc:
+                self.log("Could not save the superseded "
+                         f"trajectory: {exc}")
+            self.log("Previous plan's trajectory superseded — "
+                     "the new plan replaces it.")
         self.log(f"Plan approved: {len(plan['steps'])} step(s). Working them in order.")
         # H5: the approval is a decision the fold must not eat —
         # it goes in the conversation's notes file.
@@ -19032,6 +19462,9 @@ class ForgeWindow(QMainWindow):
                 self._proposal_log_queue, []
             for line in queued:
                 self.log(line)
+            # Manus fix F6: a worker-raised proposal lands in the
+            # room on this same GUI-thread tick.
+            self._refresh_proposals_window()
         # C1: the Watch seat's stall check runs on EVERY tick, ahead
         # of the AI-comment gate below (watch_ai is the comment
         # feature's switch; the run monitor is not behind it).
@@ -19373,6 +19806,69 @@ class ForgeWindow(QMainWindow):
         finally:
             holder["event"].set()
 
+    def _deck_fan_out(self, payload, holder):
+        """GUI-thread slot for the deck's blocking /fanout round
+        trip (Manus fix F5): a phone batch fans through the very
+        same submit_fan_out the desktop dialog calls — the phone
+        is a second door to the same room. The payload carries
+        the items and the independence assertion; only a real
+        JSON true asserts independence (the HTTP layer enforces
+        that before this slot ever sees the payload)."""
+        if holder.get("expired"):
+            # Sweep R101: stale queued delivery — the phone was
+            # already told the bench didn't answer; a fan-out
+            # must never land late. See _deck_prompt_delivery.
+            holder["event"].set()
+            return
+        try:
+            payload = dict(payload or {})
+            holder["result"] = self.submit_fan_out(
+                payload.get("items") or [],
+                payload.get("independent") is True)
+        except Exception as exc:
+            holder["result"] = (False, f"Fan-out failed: {exc}")
+        finally:
+            holder["event"].set()
+
+    def _deck_proposal_decision(self, payload, holder):
+        """GUI-thread slot for the deck's blocking /proposal round
+        trip (Manus fix F6): a phone Accept/Decline lands on the
+        very same decide_proposal the desktop proposals room
+        calls — the phone is a second door to the same room. The
+        answer names the outcome: a decision that landed, a
+        proposal already decided or expired, or a bench too busy
+        to start the accepted fix turn (the proposal stays
+        pending, and the phone says so)."""
+        if holder.get("expired"):
+            # Sweep R101: stale queued delivery — the phone was
+            # already told the bench didn't answer; a proposal
+            # decision must never land late. See
+            # _deck_prompt_delivery.
+            holder["event"].set()
+            return
+        try:
+            payload = dict(payload or {})
+            proposal_id = str(payload.get("id") or "")
+            accept = payload.get("accept") is True
+            pending = [p.get("id") for p in self.proposals_pending()]
+            if proposal_id not in pending:
+                holder["result"] = (False,
+                    "That proposal is already decided or expired.")
+            elif self.decide_proposal(proposal_id, accept):
+                holder["result"] = (True,
+                    "Proposal accepted — running through the gate."
+                    if accept else
+                    "Proposal declined — nothing runs.")
+            else:
+                holder["result"] = (False,
+                    "A turn is already running — the proposal "
+                    "stays pending; accept it again when the "
+                    "bench is free.")
+        except Exception as exc:
+            holder["result"] = (False, f"Proposal decision failed: {exc}")
+        finally:
+            holder["event"].set()
+
     def _deck_sync(self):
         if not self.deck._server:
             return
@@ -19697,6 +20193,7 @@ class ForgeWindow(QMainWindow):
         self._stream_bubble = None
         self._stream_anchor = None
         self._stream_prefix_len = 0
+        self._stream_painted = None
         self._turn_mode = None
         self._turn_prompt = ""
         self._pending_plan_request = None
@@ -20904,6 +21401,54 @@ class ForgeWindow(QMainWindow):
         return self._max_parallel_turns() > 1
 
     # ---------- Manus study M12: fan-out ----------
+    def submit_fan_out(self, items, independent):
+        """Manus fix F5: the ONE core both fan-out doors call —
+        the desktop dialog and the phone deck. `items` is text
+        (one item per line) or a list of task strings;
+        `independent` is the owner's assertion that none of the
+        items waits on another. Returns (ok, message): the
+        refusal is plain words whenever nothing fans — empty
+        batch, independence NOT asserted (a dependent batch is
+        refused here, before fan_out_batch ever sees it), the
+        cap at 1, or a run already live. A refusal from
+        fan_out_batch itself (parallel cap full, no turn could
+        start) is already logged plainly there; the message
+        points at the activity log."""
+        if isinstance(items, str):
+            tasks = [line.strip() for line in items.splitlines()]
+        else:
+            tasks = [str(item).strip() for item in (items or [])]
+        tasks = [task for task in tasks if task]
+        if not tasks:
+            return False, ("Type at least one item — one per line.")
+        if not independent:
+            return False, (
+                "Fan-out needs independent items: confirm none of "
+                "these waits on another — dependent steps are "
+                "never fanned out.")
+        cap_refusal = fanout_mod.cap_refusal(
+            self._max_parallel_turns())
+        if cap_refusal is not None:
+            return False, cap_refusal
+        if getattr(self, "_fanout_run", None) is not None:
+            return False, ("Fan-out refused — a fan-out is already "
+                           "running. Wait for it to finish first.")
+        started = self.fan_out_batch(
+            [{"task": task, "independent": True}
+             for task in tasks])
+        if not started:
+            return False, ("Fan-out refused — the activity log "
+                           "says why.")
+        count = len(tasks)
+        return True, (f"Fanned out {count} item"
+                      f"{'s' if count != 1 else ''} — Mission "
+                      "Control tracks them.")
+
+    def open_fan_out_dialog(self):
+        """Manus fix F5: the desktop door — the palette's
+        'Fan out a batch…' entry opens the dialog."""
+        FanOutDialog(self).exec()
+
     def fan_out_batch(self, items):
         """Fan a batch of similar INDEPENDENT items out as fresh-
         context parallel turns under the #53 cap, each return
@@ -20913,15 +21458,16 @@ class ForgeWindow(QMainWindow):
         its `independent` flag says so — never inferred here.
         True when the run started; False with the plain refusal
         logged when nothing runs (bad batch, cap 1, a run already
-        live, or the parallel cap already full). No UI entry
-        point yet — this method is the seam a command or button
-        calls; the tests drive it directly. Each fanned turn is
-        a Code turn in its own fresh conversation (no history,
-        no plan slot — Plan turns never detach, so they never
-        fan), under the owner's approved plan and the ordinary
-        per-turn gates; the stage follows the newest fanned
-        turn, exactly as switching conversations does today,
-        and Mission Control tracks every stream."""
+        live, or the parallel cap already full). UI entry points
+        (Manus fix F5): the command palette's 'Fan out a batch…'
+        dialog and the phone deck's fan-out card, both through
+        submit_fan_out. Each fanned turn is a Code turn in its
+        own fresh conversation (no history, no plan slot — Plan
+        turns never detach, so they never fan), under the owner's
+        approved plan and the ordinary per-turn gates; the stage
+        follows the newest fanned turn, exactly as switching
+        conversations does today, and Mission Control tracks
+        every stream."""
         if getattr(self, "_fanout_run", None) is not None:
             message = ("Fan-out refused — a fan-out is already "
                        "running. Wait for it to finish first.")
@@ -22839,6 +23385,7 @@ class ForgeWindow(QMainWindow):
         self._stream_bubble = None
         self._stream_anchor = None
         self._stream_prefix_len = 0
+        self._stream_painted = None
         self.persist_conversation(); self.render()
         self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
         self.agent_state.setText("●  IDLE"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
@@ -22971,6 +23518,7 @@ class ForgeWindow(QMainWindow):
         self._stream_bubble = None
         self._stream_anchor = None
         self._stream_prefix_len = 0
+        self._stream_painted = None
         self.log("ERROR: " + error)
         # Sweep R23: the worker slot is cleared BEFORE the modal
         # dialog, not after it. The modal runs a nested event loop,
@@ -23033,6 +23581,9 @@ class ForgeWindow(QMainWindow):
             # Item #69: the URL may have changed — rebuild the
             # provider facade on it, with the saved connector config.
             self._rebuild_provider_client()
+            # Manus fix F7: the watcher toggle applies now, not
+            # at the next restart.
+            self._apply_file_watcher()
             self.log("Agent settings saved.")
             self.refresh_models_async()
             if self.messages and self.messages[0].get("role") == "system":
@@ -23046,6 +23597,11 @@ class ForgeWindow(QMainWindow):
         for timer in (self._render_timer, self._gauge_timer,
                       self._sched_timer, self._watch_timer):
             timer.stop()
+        # Manus fix F7: the file watcher's debounce timer stops
+        # with the rest — no proposal can land into a closing
+        # window.
+        if getattr(self, "_file_watcher", None) is not None:
+            self._file_watcher.stop()
         # Resizable panels: the splitter's debounce timer may hold
         # the owner's last drag unsaved — write the layout out now,
         # while every widget it reads still exists.

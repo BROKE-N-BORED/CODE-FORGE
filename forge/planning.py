@@ -295,28 +295,12 @@ def work_instruction(steps: list[str], document: str = "") -> str:
             "not announce a step you have not finished.\n\n" + lines)
 
 
-def plan_progress_text(steps: list[str], done: set[int]) -> str:
-    """The focus-chain reminder (audit D39): a compact, deterministic
-    restatement of where an approved plan stands, re-injected into the
-    conversation every few execution cycles so a long run cannot bury
-    the plan — far up the history, or inside a fold summary — and
-    drift off it. Pure: same steps + done set, same text. `done`
-    holds zero-based indices, matching find_step_done's world; the
-    rendered indices are 1-based, matching the plan the model saw."""
-    done = set(done or ())
-    next_idx = next((i for i in range(len(steps)) if i not in done), None)
-    lines = [f"[Plan progress — {len(done)} of {len(steps)} steps done.]"]
-    for i, step in enumerate(steps):
-        # Item #58: the step's FULL text rides — detail included.
-        # The old 80-char clip belonged to the one-line-plan era;
-        # a step now carries its substance, and clipping it out of
-        # the re-injection would starve exactly the detail the
-        # document exists to hold.
-        text = str(step)
-        mark = "✓" if i in done else ("→" if i == next_idx else "·")
-        lines.append(f"{mark} {i + 1}. {text}")
-    lines.append('Announce "STEP n DONE" as each step finishes.')
-    return "\n".join(lines)
+# Manus fix F3: the D39 stored plan-progress reminder
+# (plan_progress_text, re-injected into the stored conversation
+# every three cycles) is retired — M3's programmatic recitation
+# below supersedes it, and keeping both double-nagged the model
+# and polluted history with stale counts. No stored reminder
+# remains anywhere; recitation is the only reminder now.
 
 
 # --- Manus study M3: programmatic recitation ------------------------

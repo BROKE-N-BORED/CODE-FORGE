@@ -957,10 +957,10 @@ PLAN_FALLBACK_TEXT = (
     "so I stopped the turn: nothing was executed and no files were "
     "touched. Ask again and I'll draft the plan.")
 
-# Audit D39: the focus chain — during plan execution the checklist
-# state is re-stated to the model every PLAN_REMIND_EVERY cycles
-# (see planning.plan_progress_text).
-PLAN_REMIND_EVERY = 3
+# Manus fix F3: the D39 stored plan-progress reminder is retired
+# (its PLAN_REMIND_EVERY cadence and plan_progress_text are gone).
+# M3's programmatic recitation — a fresh block on the outgoing
+# request copy only, never stored — is the only reminder now.
 
 # S6 (audit S1-33): the soft long-turn prompt. There is NO cycle cap
 # (the owner's no-cap rule above stands — nothing here kills or
@@ -1298,7 +1298,6 @@ class AgentWorker(QThread):
         self._plan_event = None
         self._plan_steps: list[str] | None = None
         self._plan_done: set[int] = set()
-        self._plan_last_remind = 0
         # Manus study M3: programmatic recitation state, armed at
         # plan approval — the title is the turn request's first line
         # and the criteria the approved document's Success criteria
@@ -2384,11 +2383,6 @@ class AgentWorker(QThread):
         self._plan_success = (
             planning_mod.success_criteria(document or "")
             if approved == list(steps) else "")
-        # D39: the cadence counts from the approval cycle — the loop
-        # is about to start at cycle 0, and the gate exchange itself
-        # just presented the plan, so the first reminder lands
-        # PLAN_REMIND_EVERY cycles into execution, not immediately.
-        self._plan_last_remind = 0
         # The approval IS the owner's authorization to execute: the
         # turn's Plan-mode tool restrictions lift for the work phase.
         # (The window built this worker's permissions dict for this
@@ -3092,12 +3086,21 @@ class AgentWorker(QThread):
         with a fresh approval. The message is refreshed at every
         turn end (_refresh_trajectory), so the snapshot the next
         turn restores from is the latest known state, not the
-        state at saturation."""
+        state at saturation. Manus fix F4: a SUPERSEDED or
+        ABANDONED plan never re-arms — the owner ended it, and
+        the record says so; it stays dead until a fresh plan is
+        approved. A record written before F4 has no status key
+        and reads as active, so old trajectories resume exactly
+        as before."""
         latest = context_mod.latest_trajectory(self.messages)
         if latest is None:
             return
         data = latest.get("trajectory_data") or {}
         status = data.get("plan_status") or {}
+        standing = status.get("status") or "active"
+        if standing in ("superseded", "abandoned"):
+            self._log("trajectory_plan_skipped", status=standing)
+            return
         steps = status.get("steps") or []
         done = status.get("done") or []
         if not steps or len(done) >= len(steps):
@@ -3776,7 +3779,6 @@ class AgentWorker(QThread):
             self._tester_handoffs = []
             self._plan_steps = None
             self._plan_done = set()
-            self._plan_last_remind = 0
             # Manus study M3: recitation state resets with the plan
             # state — a fresh turn recites nothing until its own
             # plan is approved.
@@ -3941,24 +3943,11 @@ class AgentWorker(QThread):
                             schemas = []
                             self.status.emit(
                                 "Context nearly full — wrapping up without tools…")
-                # Audit D39: the focus chain. While an approved plan
-                # is executing, every PLAN_REMIND_EVERY cycles the
-                # checklist state is re-stated as an ordinary system
-                # message, so a long execution cannot bury the plan
-                # far up the conversation (or inside a fold summary)
-                # and drift off it. Never outside plan execution,
-                # never once every step has ticked.
-                if (self._plan_steps is not None
-                        and len(self._plan_done) < len(self._plan_steps)
-                        and cycle - self._plan_last_remind >= PLAN_REMIND_EVERY):
-                    self.messages.append({
-                        "role": "system",
-                        "content": planning_mod.plan_progress_text(
-                            self._plan_steps, self._plan_done)})
-                    self._plan_last_remind = cycle
-                    self._log("plan_progress_reminded",
-                              done=len(self._plan_done),
-                              total=len(self._plan_steps))
+                # Manus fix F3: no stored plan-progress reminder
+                # any more — the D39 re-injection is retired. The
+                # plan stays in attention through M3 recitation
+                # alone (a fresh block on the outgoing request
+                # copy, built in _generate, never stored).
                 # B19: when _skribe_awaiting is set, this generation IS
                 # the SKRIBE grading answer (verdict lines, right after
                 # the grading instruction was appended) — cap it like

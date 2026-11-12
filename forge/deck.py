@@ -69,6 +69,25 @@ draft against the words and the plan returns to the gate). An
 empty comment is refused in the /plan handler itself, in words,
 without bothering the GUI thread.
 
+Fan-out from the phone (Manus fix F5): the bench screen carries
+a [11] FAN-OUT card — one item per line, an independence
+checkbox, a Fan out button. POST /fanout makes the same
+synchronous round trip as /plan and answers 200 + JSON, and the
+window fans through the very same submit_fan_out the desktop
+dialog calls. Only a real JSON true asserts independence; an
+empty batch or an unasserted one is refused in the /fanout
+handler itself, in words, without bothering the GUI thread.
+
+Proposals from the phone (Manus fix F6): the plan screen
+carries a [12] PROPOSALS card rendering the snapshot's
+"proposals" field — each pending proposal with Accept /
+Decline buttons. POST /proposal makes the same synchronous
+round trip as /plan and answers 200 + JSON, and the window
+decides through the very same decide_proposal the desktop
+proposals room calls. Only a real JSON bool decides; a missing
+id or a non-bool answer is refused in the /proposal handler
+itself, in words, without bothering the GUI thread.
+
 Item 10: a Council chip in the [05] SEND card, beside the mode
 switcher — it shows the Reviewer Seat's state and flips it via
 POST /council, following /mode's shape exactly. The desktop's
@@ -260,6 +279,10 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <div id="planmsg" style="margin-top:8px;font-size:13px"></div>
 <details id="planfish" style="display:none;margin-top:8px"><summary class="dim" style="cursor:pointer">Goldfish review — tap to read the findings</summary><pre id="planfishtext"></pre></details>
 <div class="dim">Approve, comment, or kill from here — editing the steps happens at the PC.</div></div>
+
+<div class="card"><div class="sec">[ 12 ] PROPOSALS</div><div id="proposals"><span class="dim">No proposals.</span></div>
+<div id="proposalmsg" style="margin-top:8px;font-size:13px"></div>
+<div class="dim">When a test fails or a run crashes, the proposal waits here. Accept runs it through the gate; decline kills it and nothing runs.</div></div>
 </section>
 
 <section class="screen" id="scr-bench" style="display:none">
@@ -285,6 +308,16 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <div class="card collap closed" id="monitorbox">
 <button class="collaphead" onclick="toggleCollap('monitorbox')"><span class="sec">[ 10 ] WATCH — RUN ALERTS</span><span class="chev">▸</span></button>
 <div class="collapbody"><pre id="monitor">No alerts — the Watch seat is quiet.</pre></div>
+</div>
+<div class="card collap closed" id="fanoutbox">
+<button class="collaphead" onclick="toggleCollap('fanoutbox')"><span class="sec">[ 11 ] FAN-OUT — RUN ITEMS IN PARALLEL</span><span class="chev">▸</span></button>
+<div class="collapbody">
+<textarea id="fanoutitems" rows="4" placeholder="One item per line — similar jobs, each on its own" style="width:100%"></textarea>
+<div class="row" style="margin-top:8px"><label><input id="fanoutindep" type="checkbox"> These items are independent — none waits on another</label></div>
+<div class="row" style="margin-top:8px"><button class="ok" onclick="fanOut()">Fan out</button></div>
+<div id="fanoutmsg" style="margin-top:8px;font-size:13px"></div>
+<div class="dim">Each item runs as its own fresh-context turn, in parallel under the parallel-turns cap. Dependent steps are never fanned out.</div>
+</div>
 </div>
 </section>
 
@@ -382,6 +415,7 @@ async function tick(){
     document.getElementById('receipts').textContent = s.receipts.length ? s.receipts.join('\\n') : 'No tool calls yet — receipts appear here when the agent uses a tool.';
     document.getElementById('log').textContent = s.log.join('\\n');
     renderPlan(s);
+    renderProposals(s);
     renderDocs(s);
     renderAttach(s);
     renderMonitor(s);
@@ -449,6 +483,35 @@ async function planAction(action){
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
     else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Plan action failed'); }
+  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+  tick();
+}
+function renderProposals(s){
+  const box = document.getElementById('proposals'); if(!box) return;
+  const list = s.proposals || [];
+  box.innerHTML = '';
+  if(!list.length){ box.innerHTML = '<span class="dim">No proposals.</span>'; return; }
+  for(const p of list){
+    const row = document.createElement('div'); row.style.margin = '8px 0';
+    const text = document.createElement('div');
+    text.textContent = (p.kind || '') + ' · ' + (p.event || '') + ' — ' + (p.action || '') + ' (' + (p.touches || '') + ')';
+    row.appendChild(text);
+    const btns = document.createElement('div'); btns.className = 'row'; btns.style.marginTop = '4px';
+    const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '✓ Accept';
+    ok.onclick = function(){ proposalDecision(p.id, true); };
+    const no = document.createElement('button'); no.textContent = 'Decline';
+    no.onclick = function(){ proposalDecision(p.id, false); };
+    btns.appendChild(ok); btns.appendChild(no); row.appendChild(btns);
+    box.appendChild(row);
+  }
+}
+async function proposalDecision(id, accept){
+  const msg = document.getElementById('proposalmsg');
+  try{
+    const r = await fetch('/proposal?k='+K, {method:'POST', body: JSON.stringify({id: id, accept: accept})});
+    const d = await r.json();
+    if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
+    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Proposal decision failed'); }
   }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
@@ -553,6 +616,21 @@ async function postPrompt(text){
 }
 async function sendPrompt(){ const el = document.getElementById('prompt'); const v = el.value; if(!v.trim()) return; if(await postPrompt(v)) el.value=''; tick(); }
 async function chip(t){ await postPrompt(t); tick(); }
+async function fanOut(){
+  const msg = document.getElementById('fanoutmsg');
+  const box = document.getElementById('fanoutitems');
+  const items = (box.value || '').split('\\n').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+  if(!items.length){ msg.style.color = '#e5534b'; msg.textContent = '✗ Type at least one item — one per line.'; return; }
+  const indep = document.getElementById('fanoutindep').checked;
+  if(!indep){ msg.style.color = '#e5534b'; msg.textContent = '✗ Fan-out needs independent items — tick the box to confirm none of these waits on another.'; return; }
+  try{
+    const r = await fetch('/fanout?k='+K, {method:'POST', body: JSON.stringify({items: items, independent: indep})});
+    const d = await r.json();
+    if(d.ok){ box.value = ''; msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
+    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Fan-out failed'); }
+  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+  tick();
+}
 // ---- fire bar (Note 23): the bench ember's sim + palette, in JS ----
 const FIRE_PALETTE = ['#200d05','#400f03','#6e1704','#a52c06','#d95d0b','#f28c13','#ffc92e','#fff0a8'];
 const FIRE_COALS = [[0.08,0.0],[0.19,1.3],[0.30,2.6],[0.41,0.7],[0.52,3.9],[0.63,5.1],[0.74,4.4],[0.85,2.0],[0.94,5.8]];
@@ -742,6 +820,16 @@ class DeckServer(QObject):
     # parked plan's approve/kill and fills holder["result"] with
     # (ok, message), so the phone shows whether its decision landed.
     plan_action_requested = Signal(str, object)
+    # Same shape for /fanout (Manus fix F5): (payload, holder) —
+    # the GUI thread fans the batch through submit_fan_out and
+    # fills holder["result"] with (ok, message), so the phone
+    # shows whether its batch fanned or was refused, and why.
+    fan_out_requested = Signal(object, object)
+    # Same shape for /proposal (Manus fix F6): (payload, holder) —
+    # the GUI thread decides the proposal through decide_proposal
+    # and fills holder["result"] with (ok, message), so the phone
+    # shows whether its decision landed.
+    proposal_decision_requested = Signal(object, object)
     # Same shape for /attach-remove (item #71): the GUI thread
     # removes ONE pending attachment by strip index and fills
     # holder["result"] with (ok, message).
@@ -763,7 +851,7 @@ class DeckServer(QObject):
                        "council": False, "council_model": "",
                        "pending": None, "receipts": [], "log": [],
                        "conversation": [], "documents": [],
-                       "attachments": [],
+                       "attachments": [], "proposals": [],
                        "project": {"name": "", "path": ""}, "projects": [],
                        "turn": {"active": False, "started_at": 0, "last_activity": 0},
                        "gauges": {"ram_pct": 0, "ram_text": "", "cpu_pct": 0, "cpu_text": ""}}
@@ -905,6 +993,36 @@ class DeckServer(QObject):
         if not answered:
             return False, "The bench didn't answer — is the Forge window responsive?"
         ok, message = result or (False, "Plan action failed.")
+        return bool(ok), str(message)
+
+    def request_fan_out(self, items, independent) -> tuple[bool, str]:
+        """Ask the GUI thread to fan a batch out (Manus fix F5)
+        and wait for its answer: (True, what fanned) or (False,
+        why not). The 15s ceiling only guards a wedged GUI loop,
+        exactly like the plan action's."""
+        holder = {"event": threading.Event(), "result": None}
+        self.fan_out_requested.emit(
+            {"items": list(items or []), "independent": bool(independent)},
+            holder)
+        answered, result = self._await_result(holder)
+        if not answered:
+            return False, "The bench didn't answer — is the Forge window responsive?"
+        ok, message = result or (False, "Fan-out failed.")
+        return bool(ok), str(message)
+
+    def request_proposal_decision(self, proposal_id,
+                                  accept) -> tuple[bool, str]:
+        """Ask the GUI thread to decide one pending proposal
+        (Manus fix F6) and wait for its answer: (True, what
+        happened) or (False, why not). The 15s ceiling only
+        guards a wedged GUI loop, exactly like the plan action's."""
+        holder = {"event": threading.Event(), "result": None}
+        self.proposal_decision_requested.emit(
+            {"id": str(proposal_id), "accept": bool(accept)}, holder)
+        answered, result = self._await_result(holder)
+        if not answered:
+            return False, "The bench didn't answer — is the Forge window responsive?"
+        ok, message = result or (False, "Proposal decision failed.")
         return bool(ok), str(message)
 
     def request_attachment_remove(self, index) -> tuple[bool, str]:
@@ -1143,6 +1261,66 @@ class DeckServer(QObject):
                         ok, message = False, "Unknown plan action."
                     else:
                         ok, message = deck.request_plan_action(action)
+                    payload = {"ok": True, "message": message} if ok \
+                        else {"ok": False, "error": message}
+                    body = json.dumps(payload).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if path == "/fanout":
+                    # Manus fix F5: like /plan, a synchronous round
+                    # trip, answered 200 + JSON — the phone must be
+                    # able to show whether its batch fanned or was
+                    # refused, and why. Only a real JSON true
+                    # asserts independence (Sweep R103's shape: a
+                    # truthy string must never fan a dependent
+                    # batch); anything else is refused here, GUI
+                    # thread unbothered.
+                    items = data.get("items")
+                    if not isinstance(items, list) or not any(
+                            str(item).strip() for item in items):
+                        ok, message = False, (
+                            "Type at least one item — one per line.")
+                    elif data.get("independent") is not True:
+                        ok, message = False, (
+                            "Fan-out needs independent items: "
+                            "confirm none of these waits on "
+                            "another — dependent steps are never "
+                            "fanned out.")
+                    else:
+                        ok, message = deck.request_fan_out(
+                            items, True)
+                    payload = {"ok": True, "message": message} if ok \
+                        else {"ok": False, "error": message}
+                    body = json.dumps(payload).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if path == "/proposal":
+                    # Manus fix F6: like /plan, a synchronous round
+                    # trip, answered 200 + JSON — the phone must be
+                    # able to show whether its decision landed.
+                    # Only a real JSON bool decides (Sweep R103's
+                    # shape: a truthy string must never accept a
+                    # proposal); a missing id or a non-bool answer
+                    # is refused here, GUI thread unbothered.
+                    pid = str(data.get("id", "")).strip()
+                    accept = data.get("accept")
+                    if not pid:
+                        ok, message = False, "No proposal id."
+                    elif not isinstance(accept, bool):
+                        ok, message = False, (
+                            "Accept or decline — no decision was "
+                            "sent.")
+                    else:
+                        ok, message = deck.request_proposal_decision(
+                            pid, accept)
                     payload = {"ok": True, "message": message} if ok \
                         else {"ok": False, "error": message}
                     body = json.dumps(payload).encode()

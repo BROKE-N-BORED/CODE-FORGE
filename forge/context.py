@@ -679,6 +679,15 @@ def build_trajectory(messages, plan_steps=None, plan_done=None,
         plan_status = None
     else:
         done_idx = sorted(i + 1 for i in done if 0 <= i < len(steps))
+        # Manus fix F4: the plan's standing. A fresh build is for
+        # the LIVE plan, so it is always "active". The other values
+        # are written only by an explicit owner act, never inferred:
+        # "superseded" when the owner approves a newer plan (the
+        # window marks it — see supersede_trajectory), "abandoned"
+        # for a future explicit-abandon path. The worker's restore
+        # never re-arms a superseded or abandoned plan; a record
+        # written before F4 has no "status" key and reads as
+        # active, so old trajectories resume exactly as before.
         plan_status = {
             "title": _traj_clip(title, _TRAJ_GOAL_CLIP),
             "total": len(steps),
@@ -686,6 +695,7 @@ def build_trajectory(messages, plan_steps=None, plan_done=None,
             "steps": [_traj_clip(s, _TRAJ_STEP_CLIP) for s in steps],
             "open": [_traj_clip(steps[i], _TRAJ_STEP_CLIP)
                      for i in range(len(steps)) if i not in done],
+            "status": "active",
         }
     open_items: list[str] = []
     if plan_status is not None:
@@ -720,11 +730,22 @@ def render_trajectory(data: dict) -> str:
         total = status.get("total") or len(status.get("steps") or [])
         open_idx = [i + 1 for i in range(total)
                     if (i + 1) not in set(done)]
+        # Manus fix F4: a dead plan says so in its own text, so a
+        # model reading the record never mistakes it for live work.
+        standing = status.get("status") or "active"
+        marker = ""
+        if standing == "superseded":
+            marker = (" — SUPERSEDED: the owner approved a newer "
+                      "plan; do not resume this one.")
+        elif standing == "abandoned":
+            marker = (" — ABANDONED: the owner ended this plan; "
+                      "do not resume it.")
         lines.append(
             f"Plan: {status.get('title') or 'plan'} — "
             f"{len(done)} of {total} steps done; "
             f"open steps: "
-            f"{', '.join(str(i) for i in open_idx) or 'none'}")
+            f"{', '.join(str(i) for i in open_idx) or 'none'}"
+            f"{marker}")
         if status.get("open"):
             lines.append("Open steps: " + "; ".join(status["open"]))
     else:
@@ -770,6 +791,36 @@ def latest_trajectory(messages):
         if is_trajectory(m):
             return m
     return None
+
+
+def supersede_trajectory(messages):
+    """Manus fix F4: mark the newest trajectory's plan SUPERSEDED —
+    the owner approved a newer plan, so the old one is dead and a
+    later resume must never re-arm it. Only a LIVE plan is marked:
+    no trajectory, no plan on record, an already-finished plan
+    (re-arm is already a no-op for it), or an already-dead plan
+    all return None. The message is mutated in place (the window
+    owns its messages list) and its content re-rendered, so the
+    stored text says superseded too; the caller persists the
+    conversation and the trajectory.json copy. Returns the updated
+    data dict, or None when nothing was marked."""
+    latest = latest_trajectory(messages)
+    if latest is None:
+        return None
+    data = latest.get("trajectory_data") or {}
+    status = data.get("plan_status") or {}
+    if not status:
+        return None
+    if (status.get("status") or "active") in ("superseded",
+                                              "abandoned"):
+        return None
+    done = status.get("done") or []
+    total = status.get("total") or len(status.get("steps") or [])
+    if total and len(done) >= total:
+        return None
+    status["status"] = "superseded"
+    latest["content"] = TRAJECTORY_PREFIX + render_trajectory(data)
+    return data
 
 
 def store_trajectory(workspace, data: dict) -> str:
