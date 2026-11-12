@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-11 — EXAONE rate-limit message fix
+- The rate-limit dialog no longer claims Forge shrank its requests for every provider: that shrink exists only for Groq, whose requests are pre-sized to its recorded 8,000 tokens-per-minute cap. For EXAONE and Gemini the dialog now says plainly that Forge does not know the provider's limit and cannot size its requests to fit it.
+- The dialog names a time window (per-minute / per-day) only when the provider's own error text names it, or when a recorded cap says so. The provider's full error is still kept in the session log. No number is invented for EXAONE — LG publishes none.
+
 ## 2026-11-11 — Gemini thought signature fix
 - Gemini 3 models failed with HTTP 400 on the second tool call in a turn ("Function call is missing a thought_signature"). Forge now captures the thoughtSignature Gemini attaches to each functionCall part and sends it back verbatim on the same part in later requests, as Google requires. Parallel calls (only the first carries one) and multi-step calls (each carries its own) are both handled.
 - The signature never leaks into other providers: Groq and EXAONE payloads are rebuilt from name and arguments only, and the local Ollama client strips the key before sending.

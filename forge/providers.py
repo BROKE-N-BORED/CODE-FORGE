@@ -454,28 +454,59 @@ def _max_tokens_cap_from_error(text):
     return cap if cap > 0 else None
 
 
-def _rate_limit_message(label, text):
+def _rate_limit_message(label, text, provider=None):
     """The plain-language line for a provider HTTP 429 — a free-tier
     rate limit — or None when the text is not one. Detection follows
     the cap parser's law: plain string surgery on the text the
     clients already produce ("<Label> returned HTTP 429: ..."), plus
     the markers that survive key-scrubbing of the body itself
-    (Gemini's RESOURCE_EXHAUSTED status). Which limit was hit —
-    per-minute or per-day — is read from the provider's own words,
-    never assumed: Groq names "tokens per day (TPD)" when the daily
-    envelope is the one exhausted."""
+    (Gemini's RESOURCE_EXHAUSTED status). What the line claims is
+    read from sources Forge actually has, never assumed:
+
+    - The window (per-minute / per-day) is named only when the
+      provider's own words name it, or when the provider has a
+      recorded free per-minute envelope (PROVIDER_TPM_LIMITS).
+      Otherwise no window is named at all.
+    - The shrink claim ("Code Forge has shrunk the size of its
+      requests") is made only for a provider with a recorded
+      envelope, where resolve_context_budget really does pre-size
+      requests to fit it. For a provider with no recorded envelope
+      the line says plainly that Forge does not know the limit and
+      cannot size requests to fit it (EXAONE fix, 2026-11-11: the
+      old line claimed a shrink — and a per-minute window — for
+      every provider, true only for Groq)."""
     raw = str(text or "")
     low = raw.lower()
     if "http 429" not in low and "resource_exhausted" not in low \
             and not ("429" in raw and "rate" in low):
         return None
+    capped = bool(PROVIDER_TPM_LIMITS.get(
+        str(provider or "").strip().lower()))
     day = any(marker in low for marker in
               ("per day", "per_day", "perday", "daily", "tpd", "rpd"))
-    span = "per-day" if day else "per-minute"
-    return (f"{label} rate limit reached — the free {span} limit "
-            f"for this model was hit. Code Forge has shrunk the "
-            f"size of its requests to fit under that limit; the "
-            f"provider's full error is kept in the session log.")
+    minute = any(marker in low for marker in
+                 ("per minute", "per_minute", "perminute", "tpm"))
+    if day:
+        span = "per-day"
+    elif minute or capped:
+        span = "per-minute"
+    else:
+        span = None
+    if span is not None:
+        head = (f"{label} rate limit reached — the free {span} "
+                f"limit for this model was hit. ")
+    else:
+        head = (f"{label} rate limit reached — the free limit "
+                f"for this model was hit. ")
+    if capped:
+        tail = ("Code Forge has shrunk the size of its requests "
+                "to fit under that limit; the provider's full "
+                "error is kept in the session log.")
+    else:
+        tail = (f"Code Forge does not know {label}'s rate limit, "
+                "so it cannot size its requests to fit it; the "
+                "provider's full error is kept in the session log.")
+    return head + tail
 
 
 class _ProviderHTTP:
@@ -535,7 +566,8 @@ class _ProviderHTTP:
         exactly as before. ``detail`` arrives key-scrubbed."""
         text = f"{self.label} returned HTTP {status}: {detail}"
         if status == 429:
-            plain = _rate_limit_message(self.label, text)
+            plain = _rate_limit_message(self.label, text,
+                                        provider=self.provider)
             if plain is not None:
                 return OllamaError(plain, raw=text)
         return OllamaError(text)
@@ -1406,7 +1438,8 @@ class ProviderClient:
         # this string surface has no raw channel, so it gets the
         # same words the chat path shows).
         plain = _rate_limit_message(
-            PROVIDER_LABELS.get(provider, "Provider"), scrubbed)
+            PROVIDER_LABELS.get(provider, "Provider"), scrubbed,
+            provider=provider)
         if plain is not None:
             return plain
         # StartFix: the llama-server start timeout reads as the same

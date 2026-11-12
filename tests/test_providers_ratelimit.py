@@ -17,6 +17,16 @@ OllamaError.raw for the session log. Gemini and EXAONE budgets are
 untouched (no verified per-minute figure exists for either), and
 no retry/backoff was added — the sizing is the fix.
 
+EXAONE honesty fix (2026-11-11): the plain line claimed a shrink
+("Code Forge has shrunk the size of its requests") and a
+per-minute window for every provider — true only for Groq, whose
+requests really are pre-sized to the recorded envelope. The line
+now claims a shrink only where a cap exists, and names a window
+only when the provider's own words or a recorded envelope says
+which one. No EXAONE envelope was added: LG publishes no numeric
+limit and the owner's raw 429 text has not arrived, so no number
+is invented.
+
 Offline: scripted urlopen transports, like test_providers_clamp.py.
 """
 
@@ -30,8 +40,9 @@ import urllib.error
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from forge.ollama_client import OllamaError
-from forge.providers import (GeminiClient, GroqClient, ProviderClient,
-                             _rate_limit_message, resolve_context_budget)
+from forge.providers import (ExaoneClient, GeminiClient, GroqClient,
+                             ProviderClient, _rate_limit_message,
+                             resolve_context_budget)
 
 GROQ_429_MINUTE_BODY = json.dumps({"error": {
     "message": "Rate limit reached for model `openai/gpt-oss-120b` "
@@ -55,6 +66,28 @@ GEMINI_429_BODY = json.dumps({"error": {
                "requests per minute' of service "
                "'generativelanguage.googleapis.com'.",
     "status": "RESOURCE_EXHAUSTED"}}).encode()
+
+# EXAONE 429 fixtures: LG's real 429 body text has NOT arrived
+# (the owner's raw text was requested, 2026-11-11) — these are
+# generic OpenAI-style bodies, not LG's words. They pin Forge's
+# behavior for a 429 that names no window, names a per-day window,
+# and names a per-minute window, respectively.
+EXAONE_429_BODY = json.dumps({"error": {
+    "message": "Rate limit exceeded. Please try again later.",
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded"}}).encode()
+
+EXAONE_429_DAY_BODY = json.dumps({"error": {
+    "message": "Rate limit exceeded: daily request quota reached. "
+               "Please try again tomorrow.",
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded"}}).encode()
+
+EXAONE_429_MINUTE_BODY = json.dumps({"error": {
+    "message": "Rate limit exceeded: too many requests per minute. "
+               "Please try again in a few seconds.",
+    "type": "rate_limit_error",
+    "code": "rate_limit_exceeded"}}).encode()
 
 
 def _http_error(body, code, url):
@@ -262,10 +295,110 @@ class GeminiRateLimitSurfacingTests(unittest.TestCase):
                                     []))
         exc = caught.exception
         self.assertIn("Gemini rate limit reached", str(exc))
-        self.assertIn("shrunk", str(exc))
+        # Gemini's own text names "requests per minute", so the
+        # window IS named — but no shrink is claimed: Gemini has
+        # no recorded envelope and its requests are not pre-sized.
+        self.assertIn("per-minute", str(exc))
+        self.assertNotIn("shrunk", str(exc))
+        self.assertIn("does not know Gemini's rate limit", str(exc))
         self.assertIsNotNone(exc.raw)
         self.assertIn("RESOURCE_EXHAUSTED", exc.raw)
         self.assertEqual(len(transport.requests), 1)
+
+
+class ExaoneRateLimitSurfacingTests(unittest.TestCase):
+    """The owner's live find, 2026-11-11: a first-ever EXAONE turn
+    429'd and the dialog claimed a shrink that never happened for
+    EXAONE. The line must stay honest — no shrink, no window the
+    provider did not name."""
+
+    def _run(self, body):
+        transport = _AlwaysRefuse(_http_error(
+            body, 429, "https://api.exaone.ai/v1/chat/completions"))
+        client = ExaoneClient(api_key="test_key_value",
+                              urlopen=transport)
+        with self.assertRaises(OllamaError) as caught:
+            list(client.chat_stream("exaone:k-exaone_v2.5",
+                                    MESSAGES, {"num_predict": 2048},
+                                    []))
+        self.assertEqual(len(transport.requests), 1)
+        return caught.exception
+
+    def test_429_names_no_window_and_no_shrink(self):
+        exc = self._run(EXAONE_429_BODY)
+        self.assertIn("EXAONE rate limit reached", str(exc))
+        self.assertNotIn("per-minute", str(exc))
+        self.assertNotIn("per-day", str(exc))
+        self.assertNotIn("shrunk", str(exc))
+        self.assertIn("does not know EXAONE's rate limit", str(exc))
+        self.assertIsNotNone(exc.raw)
+        self.assertIn("HTTP 429", exc.raw)
+        self.assertIn("Rate limit exceeded", exc.raw)
+
+    def test_429_per_day_names_the_day_limit_only(self):
+        exc = self._run(EXAONE_429_DAY_BODY)
+        self.assertIn("per-day", str(exc))
+        self.assertNotIn("per-minute", str(exc))
+        self.assertNotIn("shrunk", str(exc))
+        self.assertIn("does not know EXAONE's rate limit", str(exc))
+
+    def test_429_per_minute_names_the_minute_limit_only(self):
+        exc = self._run(EXAONE_429_MINUTE_BODY)
+        self.assertIn("per-minute", str(exc))
+        self.assertNotIn("per-day", str(exc))
+        self.assertNotIn("shrunk", str(exc))
+        self.assertIn("does not know EXAONE's rate limit", str(exc))
+
+
+class RateLimitMessageHonestyTests(unittest.TestCase):
+    """The message builder itself: the shrink claim and the window
+    follow what Forge actually knows, per provider."""
+
+    def test_groq_claims_shrink_and_per_minute(self):
+        # Groq has a recorded 8,000 TPM envelope, so both claims
+        # hold even when the provider text names no window.
+        msg = _rate_limit_message(
+            "Groq", "Groq returned HTTP 429: rate limit exceeded",
+            provider="groq")
+        self.assertIn("per-minute", msg)
+        self.assertIn("shrunk", msg)
+
+    def test_exaone_claims_neither_without_a_named_window(self):
+        msg = _rate_limit_message(
+            "EXAONE", "EXAONE returned HTTP 429: rate limit exceeded",
+            provider="exaone")
+        self.assertIn("EXAONE rate limit reached", msg)
+        self.assertNotIn("per-minute", msg)
+        self.assertNotIn("per-day", msg)
+        self.assertNotIn("shrunk", msg)
+        self.assertIn("does not know EXAONE's rate limit", msg)
+
+    def test_gemini_per_day_text_names_day_not_shrink(self):
+        msg = _rate_limit_message(
+            "Gemini",
+            "Gemini returned HTTP 429: quota exceeded for today, "
+            "daily limit reached",
+            provider="gemini")
+        self.assertIn("per-day", msg)
+        self.assertNotIn("shrunk", msg)
+
+    def test_gemini_per_minute_text_names_minute_not_shrink(self):
+        msg = _rate_limit_message(
+            "Gemini",
+            "Gemini returned HTTP 429: quota exceeded, requests "
+            "per minute limit reached",
+            provider="gemini")
+        self.assertIn("per-minute", msg)
+        self.assertNotIn("shrunk", msg)
+
+    def test_unknown_provider_claims_nothing(self):
+        # No provider given: the defensive default — a window or a
+        # shrink is claimed only from a source that says so.
+        msg = _rate_limit_message(
+            "Provider", "Provider returned HTTP 429: rate limited")
+        self.assertNotIn("per-minute", msg)
+        self.assertNotIn("per-day", msg)
+        self.assertNotIn("shrunk", msg)
 
 
 class RateLimitMessageTests(unittest.TestCase):
@@ -288,9 +421,22 @@ class RateLimitMessageTests(unittest.TestCase):
             "groq", "Groq returned HTTP 429: "
                     "{\"error\": {\"message\": \"Rate limit reached\"}}")
         self.assertIn("Groq rate limit reached", plain)
+        self.assertIn("shrunk", plain)
         untouched = facade._scrub_provider_error(
             "groq", "Groq returned HTTP 400: bad request")
         self.assertEqual(untouched, "Groq returned HTTP 400: bad request")
+
+    def test_facade_scrub_exaone_429_claims_no_shrink(self):
+        # The test-connection surface gets the same honest words
+        # as the chat path — the provider rides through.
+        facade = ProviderClient("http://127.0.0.1:11434", {})
+        plain = facade._scrub_provider_error(
+            "exaone", "EXAONE returned HTTP 429: "
+                      "{\"error\": {\"message\": \"Rate limit exceeded\"}}")
+        self.assertIn("EXAONE rate limit reached", plain)
+        self.assertNotIn("shrunk", plain)
+        self.assertNotIn("per-minute", plain)
+        self.assertIn("does not know EXAONE's rate limit", plain)
 
 
 if __name__ == "__main__":
