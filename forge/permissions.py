@@ -62,6 +62,7 @@ import re
 from . import modes as modes_mod
 
 BUILTIN_CLASSES = {"list_directory": "read", "read_file": "read",
+                   "code_graph": "read",
                    "write_file": "write", "append_file": "write",
                    "copy_file": "write", "edit_file": "write",
                    "move_file": "write", "delete_file": "write",
@@ -106,7 +107,9 @@ _RESEARCH_SKELETON = " · ".join(f"## {s}" for s in modes_mod.SKELETONS["researc
 MODE_GUIDANCE = {
     "code": ("MODE: CODE (Item #58 discipline). Build from gathered context, "
              "not from the raw one-line request: read the files your change "
-             "touches (and check the repo map) BEFORE your first edit, and "
+             "touches (and check the repo map — use code_graph to find "
+             "where a symbol is defined and who uses it) BEFORE your "
+             "first edit, and "
              "state in your reply what you read before the first edit lands. "
              "When an approved plan document is in the conversation it is "
              "your working instruction — build from the document, not from "
@@ -255,7 +258,9 @@ MODE_GUIDANCE = {
                "\nITEM #58 DISCIPLINE: your turn opens with a HOMEWORK pass — "
                "the shell offers READ tools only until you end the pass with "
                "a reply whose first line starts with READY; review what the "
-               "pass actually read, never your memory of the code. Every "
+               "pass actually read, never your memory of the code. Use "
+               "code_graph to find where a symbol is defined and who uses "
+               "it before judging it. Every "
                "report ends with a COVERAGE line in exactly this shape: "
                "'COVERAGE — read: <the files you actually read>; NOT read: "
                "<what you did not read, and why>'. A review that cannot say "

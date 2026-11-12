@@ -49,6 +49,7 @@ import zlib
 from pathlib import Path
 
 from . import production as production_mod
+from . import codegraph as codegraph_mod
 
 # Runaway guard for run_command — NOT an execution limit. Owner's rule:
 # commands run to completion; the human's Stop button is the control.
@@ -90,6 +91,7 @@ DANGEROUS_WORKSPACE_ROOTS = {Path("/"), Path("/etc"), Path("/usr"),
 TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "list_directory", "description": "List files and folders in a directory inside the active workspace.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path; use . for workspace root"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "read_file", "description": "Read a UTF-8 text file inside the active workspace. Long files are paged: one call returns at most `limit` lines (default 2000) starting at line `offset` (default 1); when a file does not fit, a footer says how many lines it has and which offset continues it.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "description": "1-based line number to start reading at (default 1)"}, "limit": {"type": "integer", "description": "Maximum number of lines to return (default 2000)"}}, "required": ["path"]}}},
+    {"type": "function", "function": {"name": "code_graph", "description": "Ask the project's code graph (Python only): find where a symbol is defined, which files use it, or which files a file connects to through imports. Name matches only. Actions: find, used_by, related.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "description": "find, used_by, or related"}, "target": {"type": "string", "description": "A symbol name (find, used_by) or a file path inside the workspace (related)"}}, "required": ["action", "target"]}}},
     {"type": "function", "function": {"name": "write_file", "description": "Create or replace a UTF-8 text file inside the active workspace. Requires user approval. For a file too big for one call, write the first part here and continue it with append_file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "append_file", "description": "Append content to the end of a UTF-8 text file inside the active workspace, creating the file if it does not exist. Build a file too big for one write_file call by starting it with write_file, then continuing with append_file in chunks. Requires user approval.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
     {"type": "function", "function": {"name": "edit_file", "description": "Make a targeted change to an existing UTF-8 text file inside the active workspace: replace old_text with new_text. old_text must occur EXACTLY ONCE in the file — if it is missing or occurs more than once the edit is refused and nothing changes (add more surrounding context to make it unique, or pass replace_all=true to replace every occurrence). Prefer this over rewriting a whole file with write_file. Requires user approval.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string", "description": "The exact text to replace, copied from the file"}, "new_text": {"type": "string", "description": "The replacement text"}, "replace_all": {"type": "boolean", "description": "Replace every occurrence of old_text instead of requiring exactly one (default false)"}}, "required": ["path", "old_text", "new_text"]}}},
@@ -655,6 +657,22 @@ def validate_tool_args(name: str, args: dict) -> str | None:
         return "list_directory: no path given (use . for the workspace root)."
     if name == "run_command" and not str(args.get("command", "")).strip():
         return "run_command: command is empty."
+    if name == "code_graph":
+        # Tier 2 #2 (code graph, light edition): the action must be
+        # one of the three the graph answers, the target must be
+        # present, and a find/used_by target that looks like a file
+        # path is refused here — files belong to the related action.
+        action = str(args.get("action", "")).strip()
+        if action not in codegraph_mod.ACTIONS:
+            return (f"code_graph: unknown action '{action}' — use "
+                    f"find, used_by, or related.")
+        target = str(args.get("target", "")).strip()
+        if not target:
+            return "code_graph: target is empty."
+        if action in ("find", "used_by") and (
+                "/" in target or "\\" in target or ".." in target):
+            return (f"code_graph: '{target}' looks like a file path "
+                    f"— use action related for files.")
     return None
 
 
@@ -816,6 +834,9 @@ def describe_tool(name: str, args: dict, workspace: str) -> str:
         return f"Read {args.get('path')} from {workspace}?"
     if name == "list_directory":
         return f"List {args.get('path')} inside {workspace}?"
+    if name == "code_graph":
+        return (f"Ask the code graph: {args.get('action')} "
+                f"'{args.get('target')}' in {workspace}?")
     return f"Unknown tool request: {name}"
 
 
@@ -825,6 +846,8 @@ def describe_tool_short(name: str, args: dict) -> str:
         return str(args.get("command", ""))[:90]
     if name in ("copy_file", "move_file"):
         return f"{args.get('source', '')} -> {args.get('destination', '')}"[:90]
+    if name == "code_graph":
+        return f"{args.get('action', '')} {args.get('target', '')}"[:90]
     return str(args.get("path", args.get("name", "")))[:90]
 
 
@@ -1049,6 +1072,21 @@ def execute_tool(name: str, args: dict, workspace: str, cancel_event=None,
         return "\n".join(window) + (
             f"\n[read_file: showing lines {start + 1}–{end} of {total} "
             f"— call read_file with offset={end + 1} to continue]")
+    if name == "code_graph":
+        # Tier 2 #2 (code graph, light edition): ask the queryable
+        # half of the repo map — where a symbol is defined, who
+        # uses it, what a file is connected to. Read-only; the
+        # graph only ever reads inside the workspace root, and the
+        # related target is a path, so it is jailed with _inside
+        # like read_file's. No containment or production branch:
+        # a read tool judges no writes.
+        action = str(args.get("action", "")).strip()
+        target = str(args.get("target", "")).strip()
+        if action == "related":
+            resolved = _inside(root, target)
+            target = str(resolved.relative_to(root))
+        graph = codegraph_mod.build_graph(root)
+        return codegraph_mod.answer(graph, action, target)
     if name == "write_file":
         content = args.get("content", "")
         if not isinstance(content, str):

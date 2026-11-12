@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-12 — Code graph, message queue, and full-suite fixes
+
+- Code graph (CodeRabbit Tier 2 #2): a new read-only code_graph tool — Forge can find where a name is defined, what uses it, and which files are related, from an index of the project's Python files.
+- Message queue: sending a message while a turn or fold runs now queues it instead of disabling Send. Queued messages drain in order when the turn settles, and each can be edited or deleted while it waits. Sent messages can be edited (the full original is kept in history first). One fold attempt per send, then the send proceeds.
+- Fixed: settings could fail to save and crash on a cleanup line that referenced a name that no longer exists.
+- Fixed: Research with the web switched off still offered the browse tools to the model. The switch now removes them from the offer as well as refusing the call.
+- Fixed: the failure dialog could trip over the busy-check when the worker slot held a stand-in instead of a running thread.
+- Fixed: the reviews folder prompt lost the "findings by severity" line in the review rewrite. Restored.
+- Full test suite green: 2,435 tests, zero failures.
+
 ## 2026-11-12 — Double-click installer and app-menu entry (Release retrofit)
 - Code Forge now installs as a real program on Linux Mint: double-click "Install Code Forge" in the Release zip, answer the dialogs, and it lands in ~/.local/share/code-forge with a "Code Forge" entry in the app menu and its own icon. No terminal needed.
 - The installer backs up a previous install first (code only — the Python environment is rebuilt, and settings and keys live outside the program folder and are never touched), sets up the Python environment, and offers to launch Code Forge when it finishes. A previous install is upgraded in place.

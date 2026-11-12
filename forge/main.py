@@ -4652,9 +4652,10 @@ class RecipesDialog(QDialog):
     send_message() does the rest — macros, @mentions, the context
     fold and every approval gate apply exactly as if the owner had
     typed it. The dialog closes only when the send was accepted
-    (send_message clears the input box); a refused send — a turn
-    already running, a summary in flight — leaves the dialog open
-    with the reason in the status label. Load problems ride in as
+    (send_message clears the input box); a refused send leaves the
+    dialog open with the reason in the status label. A turn already
+    running no longer refuses — the recipe queues and runs when
+    the turn ends (message queue, 2026-11-11). Load problems ride in as
     data (the C30 pattern): the window logs each distinct one once
     via the log_problems callback, and they are also named in the
     note line at the bottom. Owner-launched only — nothing here is
@@ -4798,9 +4799,10 @@ class RecipesDialog(QDialog):
         if self.host.input.toPlainText() == "":
             self.accept()
         else:
+            reason = getattr(self.host, "_send_refusal", None)
             self.status_label.setText(
-                "Not sent — a turn is already running, or a summary "
-                "is in flight. Try again when the bench is idle.")
+                f"Not sent — {reason}" if reason else
+                "Not sent — see the bench log for why.")
 
 
 class PaletteDialog(QDialog):
@@ -14431,6 +14433,43 @@ class ForgeWindow(QMainWindow):
         # shape is pinned by the deck tests). A prompt queued in
         # one project must not fire into another after a switch.
         self._phone_queue_ws = []
+        # Message queue (2026-11-11): messages the owner sent while
+        # a turn or fold was running, held in arrival order until
+        # the bench settles. Entries are dicts {"id", "text",
+        # "conversation_id", "conversation_token", "images",
+        # "upload_note"} — the queue is per-conversation and
+        # in-memory for the session (no persistence across
+        # restarts, by design). Unlike the phone queue above,
+        # entries for other conversations are never dropped —
+        # they wait until their conversation is staged again. No
+        # cap (the no-unnecessary-limitations rule): the phone cap
+        # exists because a stuck remote sender could pile prompts
+        # for hours; the owner types these one by one and can
+        # delete any of them.
+        self._message_queue = []
+        self._message_queue_seq = 0
+        # The conversation token (2026-11-12): the queue's stable
+        # identity for the live conversation. It is NOT the store
+        # id — a fresh conversation has no id until its first send
+        # persists it, and matching by id orphaned queued entries
+        # the moment that first send minted one (the drain test
+        # caught it: the second drain found nothing). Persisted:
+        # ("store", id); fresh: ("fresh", N) from the counter.
+        # load_conversation / new_chat / the maintenance
+        # activation rotate it; persist_conversation deliberately
+        # never does.
+        self._conversation_token_seq = 0
+        self._conversation_token = ("fresh", 0)
+        self._queue_editing_id = None
+        self._queue_panel_signature = None
+        # Edit-a-sent-message (2026-11-11): the index into
+        # self.messages of the message being edited, or None.
+        # Armed by edit_message, spent by _apply_edit at send.
+        self._edit_target = None
+        # Set by send_message: True when the send was QUEUED
+        # instead of started (see _queue_message). The
+        # programmatic callers read it beside _send_refusal.
+        self._send_queued = False
         # Item #64: the workstream registry. EVERY turn registers a
         # stream record at _start_turn; the stage stream is the one
         # on the bench (self.worker), the rest run in the background
@@ -14792,6 +14831,9 @@ class ForgeWindow(QMainWindow):
                                      conversation_id=cid,
                                      repairs=repairs)
             self.conversation_id = cid
+            # Message queue (2026-11-12): the maintenance room's
+            # queue token, same shape as a loaded conversation's.
+            self._conversation_token = ("store", cid)
             self.messages = loaded
             if self.messages and self.messages[0].get("role") == "system":
                 self.messages[0]["content"] = self.build_system_prompt()
@@ -14804,6 +14846,9 @@ class ForgeWindow(QMainWindow):
             self._plan_restore()
         else:
             self.conversation_id = None
+            # Message queue (2026-11-12): a fresh maintenance room
+            # gets a fresh queue token.
+            self._rotate_fresh_conversation_token()
             self.messages = [{"role": "system",
                               "content": self.build_system_prompt()}]
             self.plan_state = None
@@ -15370,10 +15415,9 @@ class ForgeWindow(QMainWindow):
             fileperms.write_text_private(
                 DB_FILE, json.dumps(self.settings, indent=2))
         except Exception as exc:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # The private writer owns its temp file and removes it
+            # itself when the write fails — there is nothing left
+            # here to clean up, only the failure to log.
             log = getattr(self, "log", None)
             if callable(log):
                 log(f"Settings could not be saved: {exc}")
@@ -15814,10 +15858,78 @@ class ForgeWindow(QMainWindow):
         self.attach_strip_layout.setSpacing(8)
         self.attach_strip.setVisible(False)
         compose_layout.addWidget(self.attach_strip)
+        # Message queue build (2026-11-11): the edit banner — shown
+        # only while the owner is editing a sent message (see
+        # edit_message). It says what sending will do BEFORE he
+        # commits: the conversation re-runs from the edited
+        # message, later messages leave the active conversation
+        # (the full original is saved as a fork first), and files
+        # already written stay written.
+        self._edit_banner = QFrame()
+        self._edit_banner.setObjectName("editBanner")
+        self._edit_banner.setStyleSheet(
+            f"QFrame#editBanner{{background:{TOKENS['surface_base']};"
+            f"border:1px solid {TOKENS['rim']};"
+            f"border-radius:{TOKENS['radius_control']};}}")
+        _edit_layout = QHBoxLayout(self._edit_banner)
+        _edit_layout.setContentsMargins(10, 6, 10, 6)
+        _edit_layout.setSpacing(8)
+        self._edit_banner_label = QLabel(
+            "Editing your message — sending re-runs from here. Later "
+            "messages leave this conversation (the full original is "
+            "saved as a fork in your history). Files already written "
+            "stay written.")
+        self._edit_banner_label.setWordWrap(True)
+        self._edit_banner_label.setObjectName("muted")
+        _edit_layout.addWidget(self._edit_banner_label, 1)
+        self._edit_cancel_btn = QPushButton("Cancel edit")
+        self._edit_cancel_btn.clicked.connect(
+            self._on_cancel_edit_clicked)
+        _edit_layout.addWidget(self._edit_cancel_btn)
+        self._edit_banner.setVisible(False)
+        compose_layout.addWidget(self._edit_banner)
         self.input = QTextEdit()
         self.input.setPlaceholderText("Message your local agent…  (Enter to send · Shift+Enter for newline)")
         self.input.setFixedHeight(88); self.input.installEventFilter(self)
         compose_layout.addWidget(self.input)
+        # Message queue build (2026-11-11): the queue panel —
+        # messages the owner sent while a turn or fold was
+        # running, held in arrival order until the bench is idle.
+        # Hidden while this conversation has nothing queued;
+        # _refresh_queue_panel rebuilds it from _message_queue on
+        # every change (the attach strip's rebuild-on-change
+        # pattern). Each row carries its text plus Edit / Delete;
+        # the header carries Send next (fire the oldest now, when
+        # idle) and Clear all.
+        self._queue_panel = QFrame()
+        self._queue_panel.setObjectName("queuePanel")
+        self._queue_panel.setStyleSheet(
+            f"QFrame#queuePanel{{background:{TOKENS['surface_base']};"
+            f"border:1px solid {TOKENS['rim']};"
+            f"border-radius:{TOKENS['radius_control']};}}")
+        _queue_layout = QVBoxLayout(self._queue_panel)
+        _queue_layout.setContentsMargins(10, 8, 10, 8)
+        _queue_layout.setSpacing(6)
+        _queue_header = QHBoxLayout()
+        self._queue_header_label = QLabel("QUEUED")
+        self._queue_header_label.setObjectName("stamp")
+        _queue_header.addWidget(self._queue_header_label)
+        self._queue_count_label = QLabel("")
+        self._queue_count_label.setObjectName("muted")
+        _queue_header.addWidget(self._queue_count_label)
+        _queue_header.addStretch()
+        self._queue_send_next_btn = QPushButton("Send next")
+        self._queue_send_next_btn.clicked.connect(self._send_next_queued)
+        _queue_header.addWidget(self._queue_send_next_btn)
+        self._queue_clear_btn = QPushButton("Clear all")
+        self._queue_clear_btn.clicked.connect(self._queue_clear_all)
+        _queue_header.addWidget(self._queue_clear_btn)
+        _queue_layout.addLayout(_queue_header)
+        self._queue_rows = QVBoxLayout()
+        self._queue_rows.setSpacing(4)
+        _queue_layout.addLayout(self._queue_rows)
+        self._queue_panel.setVisible(False)
+        compose_layout.addWidget(self._queue_panel)
         self._setup_mention_completer()
         # Note 14 #3: the context gauge — how full the model's window
         # is, in the same gauge family as the header RAM/CPU bars
@@ -16777,6 +16889,16 @@ class ForgeWindow(QMainWindow):
             refusal = self._send_refusal
             self._pending_artifact_comment = None
             return False, refusal
+        if getattr(self, "_send_queued", False):
+            # Message queue (2026-11-11): the revision turn is held
+            # and fires when the bench settles — the marker stays
+            # armed so the claim at that turn's settle still files
+            # the revision.
+            self.log(f"Artifact comment queued on '{title}' — the "
+                     "revision turn runs when the current one ends.")
+            return True, (f"Revision turn queued — its reply files "
+                          f"as a new {kind} artifact when it runs "
+                          "and lands.")
         # Started = a NEW worker object is the bench's, or the
         # send is in the pre-send fold pipeline (the fold starts
         # the worker when it settles). Worker identity, not
@@ -16847,6 +16969,11 @@ class ForgeWindow(QMainWindow):
         self.send_message()
         if getattr(self, "_send_refusal", None):
             return False, self._send_refusal
+        if getattr(self, "_send_queued", False):
+            # Message queue (2026-11-11): the frame's turn is held
+            # and fires when the bench settles.
+            return True, ("Queued — the frame's turn runs when the "
+                          "current one ends.")
         folding = self._fold_thread is not None \
             and self._fold_thread.isRunning()
         if not folding and (self.worker is None
@@ -16859,10 +16986,10 @@ class ForgeWindow(QMainWindow):
 
     def _on_chat_anchor(self, url):
         """Route a chat-bubble link click. The per-message action
-        anchors (forge-resend:N / forge-reply:N, N = the message's
-        index in self.messages at render time) dispatch to
-        resend_message / reply_to_message and their plain-words
-        outcome lands in the log. Real web links keep the behaviour
+        anchors (forge-resend:N / forge-reply:N / forge-edit:N, N = the
+        message's index in self.messages at render time) dispatch to
+        resend_message / reply_to_message / edit_message and their
+        plain-words outcome lands in the log. Real web links keep the behaviour
         setOpenExternalLinks used to give them — the handler opens
         them in the browser itself, since openLinks is off. The
         index rides the URL's path, never the host: Qt parses a
@@ -16872,7 +16999,7 @@ class ForgeWindow(QMainWindow):
         if scheme in ("http", "https"):
             QDesktopServices.openUrl(url)
             return
-        if scheme not in ("forge-resend", "forge-reply"):
+        if scheme not in ("forge-resend", "forge-reply", "forge-edit"):
             return
         try:
             index = int(url.path())
@@ -16880,6 +17007,8 @@ class ForgeWindow(QMainWindow):
             return
         if scheme == "forge-resend":
             _ok, note = self.resend_message(index)
+        elif scheme == "forge-edit":
+            _ok, note = self.edit_message(index)
         else:
             _ok, note = self.reply_to_message(index)
         self.log(note)
@@ -16951,6 +17080,135 @@ class ForgeWindow(QMainWindow):
         self.input.setFocus()
         return True, ("Quoted into the message box — type your "
                       "reply after it.")
+
+    def edit_message(self, index):
+        """Edit a sent message (owner request, 2026-11-11) — the
+        truncate-and-rerun path. Unlike Resend (which only loads
+        the text back into the composer), Edit arms a re-run: the
+        message's text loads into the composer with the edit banner
+        above it, and sending truncates the ACTIVE conversation
+        after that message and re-runs from the edited text
+        (_apply_edit). The full original is forked into history
+        first, so nothing is silently destroyed; files already
+        written stay written — an edit never un-writes a file.
+        Idle-only: editing mid-turn would fight the worker, which
+        holds the same list and overwrites it at settle. A plan
+        draft waiting at the gate blocks it too (the open_side_chat
+        guard, same words) — the rerun would land under a draft
+        the owner hasn't settled."""
+        messages = getattr(self, "messages", None) or []
+        if not isinstance(index, int) or not 0 <= index < len(messages):
+            return False, ("That message is no longer there to "
+                           "edit.")
+        message = messages[index]
+        if message.get("role") != "user" or message.get("summary"):
+            return False, ("Edit is for your own sent messages — "
+                           "that block isn't one.")
+        text = message.get("content") or ""
+        if not text.strip():
+            return False, "That message has no text to edit."
+        if self._bench_busy():
+            return False, ("A turn is running — editing waits "
+                           "until it ends.")
+        if self.plan_state and self.plan_state.get("status") == "draft":
+            return False, ("A plan is waiting at the gate — approve "
+                           "or kill it first; editing waits.")
+        if self.input.toPlainText().strip():
+            return False, ("Your message box already holds a draft "
+                           "— send or clear it first; edit won't "
+                           "overwrite it.")
+        self._edit_target = index
+        self.input.setPlainText(text)
+        cursor = self.input.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input.setTextCursor(cursor)
+        self.input.setFocus()
+        banner = getattr(self, "_edit_banner", None)
+        if banner is not None:
+            banner.setVisible(True)
+        return True, ("Editing — send to re-run from here, or "
+                      "cancel the edit.")
+
+    def _cancel_edit(self):
+        """Clear an armed edit (the Cancel edit button, a
+        conversation switch, a fresh chat). State + banner only —
+        the caller owns the input box (the button clears it; the
+        send path clears it in its own tail; a switch leaves the
+        text standing as an ordinary draft)."""
+        self._edit_target = None
+        banner = getattr(self, "_edit_banner", None)
+        if banner is not None:
+            banner.setVisible(False)
+
+    def _on_cancel_edit_clicked(self):
+        self._cancel_edit()
+        self.input.clear()
+        self.log("Edit cancelled — nothing changed.")
+
+    def _apply_edit(self, text):
+        """The truncate half of edit_message, run from send_message
+        AFTER every send guard has passed and just before the
+        message would be appended: preserve the original, then
+        replace the live list with everything up to the edited
+        message plus the edited message itself. Returns True when
+        the live list now ends with the edited message (the send
+        tail then runs as usual); False when nothing changed (the
+        refusal is in _send_refusal and the edit state is kept,
+        unless the target itself is gone). The edited message
+        keeps the original's other keys (images ride the spread),
+        so an edited message keeps its attachments. In a side
+        chat there is nothing stored to preserve from — the fork
+        is ephemeral and the main thread is untouched — so the
+        fork step is skipped there and only the fork's live list
+        is truncated. The plan sidecar is deliberately NOT
+        touched: a waiting draft is refused anyway, and an
+        approved plan's steps are project-grounded — the rerun's
+        settle kills any draft as usual."""
+        index = self._edit_target
+        messages = self.messages
+        if not isinstance(index, int) or not 0 <= index < len(messages):
+            self._cancel_edit()
+            self._send_refusal = ("That message is no longer there "
+                                  "to edit.")
+            return False
+        message = messages[index]
+        if message.get("role") != "user" or message.get("summary"):
+            self._cancel_edit()
+            self._send_refusal = ("Edit is for your own sent "
+                                  "messages — that block isn't one.")
+            return False
+        if self.plan_state and self.plan_state.get("status") == "draft":
+            # Re-checked at send time: a draft could have arrived
+            # between arming the edit and sending it. The edit
+            # state is KEPT — the owner settles the draft and
+            # sends again.
+            self._send_refusal = ("A plan is waiting at the gate — "
+                                  "approve or kill it first; "
+                                  "editing waits.")
+            self.log(self._send_refusal)
+            return False
+        if getattr(self, "_side_chat", None) is None:
+            # Preserve the original BEFORE touching the live list:
+            # persist the live list, then fork the full stored
+            # record (store.fork reads the store, not the list —
+            # the persist above is what makes the fork complete).
+            self.persist_conversation()
+            if self.conversation_id is not None:
+                fork_id = self.store.fork(self.conversation_id,
+                                          len(messages) - 1)
+                if fork_id is None:
+                    self._send_refusal = ("Couldn't save a copy of "
+                                          "the original first — "
+                                          "nothing changed.")
+                    self.log(self._send_refusal)
+                    return False
+                self.log("The full conversation before this edit "
+                         "is saved as a fork in your history.")
+        edited = dict(message)
+        edited["content"] = text
+        self.messages = messages[:index] + [edited]
+        self._cancel_edit()
+        return True
 
     def _file_artifact_revision(self, text, marker, workspace=None,
                                 conversation_id=None):
@@ -18354,7 +18612,7 @@ class ForgeWindow(QMainWindow):
                 continue
             visible += 1
             if role == "user":
-                html.append(f'<div style="margin:18px 0 18px auto;padding:13px 16px;background:#2a2620;border:1px solid #5a482e;border-radius:12px;max-width:78%;"><b style="color:#ddbb8f">YOU</b><br><span>{body}</span><div style="margin-top:8px;"><a href="forge-resend:{index}" style="color:#a39a8b;">Resend</a> · <a href="forge-reply:{index}" style="color:#a39a8b;">Reply</a></div></div>')
+                html.append(f'<div style="margin:18px 0 18px auto;padding:13px 16px;background:#2a2620;border:1px solid #5a482e;border-radius:12px;max-width:78%;"><b style="color:#ddbb8f">YOU</b><br><span>{body}</span><div style="margin-top:8px;"><a href="forge-resend:{index}" style="color:#a39a8b;">Resend</a> · <a href="forge-reply:{index}" style="color:#a39a8b;">Reply</a> · <a href="forge-edit:{index}" style="color:#a39a8b;">Edit</a></div></div>')
             elif m.get("reviewer"):
                 # Sweep R28: the reviewer NAME is data (a model tag
                 # the owner typed or a roster file carried) — the
@@ -18797,6 +19055,10 @@ class ForgeWindow(QMainWindow):
             self.close_side_chat()
         self._reset_turn_scoped_state()
         self.conversation_id = conversation_id
+        # Message queue (2026-11-12): the staged conversation's
+        # queue token — entries stamped with it drain and show
+        # again after a round-trip away and back.
+        self._conversation_token = ("store", conversation_id)
         self.messages = loaded
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = self.build_system_prompt()
@@ -18839,6 +19101,10 @@ class ForgeWindow(QMainWindow):
         # budget in the background is announced once, now that
         # it is the one on the bench.
         self._check_soft_budget(conversation_id)
+        # Message queue (2026-11-11): the panel shows this
+        # conversation's held messages — entries for the previous
+        # conversation stay queued, out of sight.
+        self._refresh_queue_panel()
 
     # ---------- Note 12: planning workflow ----------
     def _plan_restore(self):
@@ -19446,7 +19712,13 @@ class ForgeWindow(QMainWindow):
             self.log(f"⏰ Scheduled job '{name}' could not start — it will retry on the next tick. ({exc})")
             _rollback()
             return
-        if self.worker is not None and self.worker.isRunning():
+        if getattr(self, "_send_queued", False) or \
+                (self.worker is not None and self.worker.isRunning()):
+            # Message queue (2026-11-11): a queued job runs when
+            # the bench settles — it counts as started, not as a
+            # miss. (Before the queue, a job fired during a running
+            # turn was marked run here while its prompt sat
+            # unsent in the input box — the mark was a lie.)
             sched.mark_run(job)
             self.settings["scheduled_jobs"] = jobs
             self.save_settings()
@@ -19502,8 +19774,15 @@ class ForgeWindow(QMainWindow):
         # forever — the task silently never ran.
         folding = self._fold_thread is not None \
             and self._fold_thread.isRunning()
-        started = folding or (self.worker is not None
-                              and self.worker is not before)
+        # Message queue (2026-11-11): a queued dispatch counts as
+        # started — the marker is consumed and the turn runs when
+        # the bench settles. (Before the queue, a send refused by
+        # a running fold still counted as started through the
+        # folding branch above, and the marker was consumed for a
+        # turn that never ran.)
+        started = getattr(self, "_send_queued", False) or folding \
+            or (self.worker is not None
+                and self.worker is not before)
         if not started:
             self.log(f"✎ AI-comment in {m['file']}:{m['line']} could not "
                      "start a turn — it stays in place and will be "
@@ -19516,7 +19795,10 @@ class ForgeWindow(QMainWindow):
         # while only the saved list was capped.
         self._watch_seen = set(self.settings["watch_seen"])
         self.save_settings()
-        self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}) — running it now.")
+        if getattr(self, "_send_queued", False):
+            self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}) — queued, it runs when the current turn ends.")
+        else:
+            self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}) — running it now.")
         if len(markers) > 1:
             self.log(f"✎ {len(markers) - 1} more AI marker(s) waiting — they run one per turn.")
         self.eventlog.record("watch_pickup", file=m["file"], line=m["line"], marker_kind=m["kind"])
@@ -19737,6 +20019,305 @@ class ForgeWindow(QMainWindow):
             # dies with it instead of firing into a destroyed bench.
             QTimer.singleShot(400, self, lambda: self._on_phone_prompt(queued))
             return
+
+    # ---------- Message queue (2026-11-11) ----------
+    def _bench_busy(self):
+        """True while a turn or a fold is running on the bench."""
+        # getattr, not a bare .isRunning(): the worker slot can
+        # briefly hold a bare stand-in (Sweep R23's modal
+        # simulation puts one there) — only a real running thread
+        # counts as busy.
+        def _running(thread):
+            return (thread is not None
+                    and getattr(thread, "isRunning", lambda: False)())
+        return _running(self.worker) or _running(self._fold_thread)
+
+    def _rotate_fresh_conversation_token(self):
+        """A fresh (never-persisted) conversation starts: mint its
+        queue token. Called by new_chat and the maintenance
+        activation's fresh branch — never by persist_conversation
+        (minting the store id must not orphan queued entries)."""
+        self._conversation_token_seq += 1
+        self._conversation_token = ("fresh",
+                                    self._conversation_token_seq)
+
+    def _queue_entries_for_current(self):
+        """The queued messages for the conversation on the bench,
+        in arrival order. Entries for other conversations wait
+        silently — they are never dropped (unlike the phone queue,
+        which drops cross-workspace prompts): the owner typed
+        these himself and can see and delete them. Matched by the
+        conversation TOKEN, not the store id: a fresh
+        conversation's id is minted by its first send, and
+        matching by id orphaned the entries still queued then."""
+        current = self._conversation_token
+        return [e for e in self._message_queue
+                if e.get("conversation_token") == current]
+
+    def _queue_message(self, text):
+        """Hold a message sent while a turn or fold is running: it
+        joins the queue in arrival order and fires when the bench
+        settles (one per settle, _drain_message_queue). The input
+        box clears so the next message can be typed; pending
+        images and the file-upload note ride the entry and
+        re-attach at fire time. No cap: the phone queue's cap
+        exists because a stuck remote sender could pile prompts
+        for hours — the owner types these one by one and can
+        delete any of them. Sets _send_queued (not _send_refusal):
+        queueing is a success, deferred — the programmatic
+        callers (artifact comment, design canvas, fan-out,
+        scheduled jobs, the watch tick) read it to tell queued
+        from started from refused."""
+        entry = {"id": self._message_queue_seq,
+                 "text": text,
+                 "conversation_id": self.conversation_id,
+                 "conversation_token": self._conversation_token,
+                 "images": list(self.pending_images),
+                 "upload_note": self.pending_upload_note or ""}
+        self._message_queue_seq += 1
+        self._message_queue.append(entry)
+        self._send_queued = True
+        self.input.clear()
+        self.pending_images = []
+        self.pending_attachments = []
+        self.pending_upload_note = ""
+        self.image_label.clear()
+        self._refresh_attach_strip()
+        self._push_deck_attachments()
+        self._refresh_queue_panel()
+        position = len(self._queue_entries_for_current())
+        self.log(f"Queued — it runs when the current turn ends "
+                 f"(#{position} in line).")
+        self.statusBar().showMessage(
+            "Queued — it runs when the current turn ends.")
+
+    def _drain_message_queue(self):
+        """Fire the oldest held message for THIS conversation, if
+        any — one per settle, so queued messages play back in the
+        order they arrived. Called from the stage settle paths
+        (on_finished when the turn was NOT stopped, on_failed, and
+        the manual-fold settles) — never from a background settle:
+        the owner stopped the stage turn on purpose, and a
+        background turn ending must not auto-start his held
+        message. Entries for other conversations are skipped, not
+        dropped — they fire when their conversation is staged
+        again. The fire itself is a singleShot (the phone drain's
+        shape, R55: the window is the context object), and the
+        callback re-checks idle before sending."""
+        if self._bench_busy():
+            return
+        for entry in list(self._message_queue):
+            if entry.get("conversation_token") != \
+                    self._conversation_token:
+                continue
+            self._message_queue.remove(entry)
+            self._refresh_queue_panel()
+            QTimer.singleShot(
+                400, self,
+                lambda e=entry: self._send_queued_message(e))
+            return
+
+    def _send_queued_message(self, entry):
+        """Fire one held message (the drain's singleShot callback).
+        A draft in the box is never clobbered — the entry goes
+        back to the FRONT of the line and waits for the next
+        settle. A turn that started in the 400 ms window, or a
+        send guard that refuses now, puts it back at the front
+        too: a refused queued message is never lost, and the
+        owner can see it in the panel and edit or delete it. (The
+        front, not the back: the phone drain re-queues at the
+        back, which would reorder a held message behind messages
+        that arrived after it.) On a refusal the input box and
+        the pending mirrors are restored to what they were before
+        the attempt — the text lives in the queue entry, not the
+        box, so it can never double-send."""
+        if self._bench_busy() or self.input.toPlainText().strip():
+            self._message_queue.insert(0, entry)
+            self._refresh_queue_panel()
+            return
+        saved_images = list(self.pending_images)
+        saved_note = self.pending_upload_note
+        images = list(entry.get("images") or [])
+        if images:
+            self.pending_images = images + list(self.pending_images)
+        note = entry.get("upload_note") or ""
+        if note:
+            self.pending_upload_note = (
+                (note + "\n" + self.pending_upload_note)
+                if self.pending_upload_note else note)
+        self.input.setPlainText(entry["text"])
+        self.send_message()
+        if getattr(self, "_send_refusal", None):
+            self.input.clear()
+            self.pending_images = saved_images
+            self.pending_upload_note = saved_note
+            self._message_queue.insert(0, entry)
+            self._refresh_queue_panel()
+            self.log(f"Queued message held — {self._send_refusal}")
+
+    def _send_next_queued(self):
+        """The queue panel's Send next: fire the oldest held
+        message for this conversation NOW, when the bench is idle
+        — the manual control after a stop (a stopped settle
+        deliberately does not drain). Disabled while busy; the
+        guard here is the second line."""
+        if self._bench_busy():
+            return
+        self._drain_message_queue()
+
+    def _queue_set_text(self, entry_id, new_text):
+        """Save an inline edit of a queued message. An empty save
+        keeps the old text — deleting is the Delete button's job,
+        not an empty edit's."""
+        for entry in self._message_queue:
+            if entry.get("id") == entry_id:
+                if (new_text or "").strip():
+                    entry["text"] = new_text.strip()
+                    self.log("Queued message edited.")
+                break
+        self._queue_editing_id = None
+        self._refresh_queue_panel()
+
+    def _queue_delete_entry(self, entry_id):
+        """Delete one queued message — it never sends."""
+        before = len(self._message_queue)
+        self._message_queue = [e for e in self._message_queue
+                               if e.get("id") != entry_id]
+        if len(self._message_queue) != before:
+            self.log("Queued message deleted — it will not send.")
+        self._queue_editing_id = None
+        self._refresh_queue_panel()
+
+    def _queue_clear_all(self):
+        """Drop every queued message for THIS conversation (other
+        conversations' entries are untouched). No confirmation
+        dialog: queued messages are session-only drafts, and the
+        log records how many were dropped."""
+        current = self._queue_entries_for_current()
+        if not current:
+            return
+        ids = {e.get("id") for e in current}
+        self._message_queue = [e for e in self._message_queue
+                               if e.get("id") not in ids]
+        self._queue_editing_id = None
+        self._refresh_queue_panel()
+        self.log(f"Cleared {len(current)} queued message(s) — "
+                 "none of them will send.")
+
+    def _refresh_queue_panel(self):
+        """Rebuild the queue panel from _message_queue (the attach
+        strip's rebuild-on-change pattern). Hidden while this
+        conversation has nothing queued. Skipped while a row is
+        being edited — rebuilding then would destroy the editor
+        and the owner's half-typed edit; the save/cancel clears
+        the editing id and refreshes. The header count is the
+        current conversation's entries only."""
+        panel = getattr(self, "_queue_panel", None)
+        if panel is None:
+            return
+        if getattr(self, "_queue_editing_id", None) is not None:
+            return
+        entries = self._queue_entries_for_current()
+        # R45's signature skip, same shape as the history list:
+        # this refresh runs on every send-button sync, and
+        # rebuilding the rows each time would deleteLater/recreate
+        # them for no change. The row shows the message's first
+        # line (tooltip: the full text) — id + text is everything
+        # it displays, so that pair is the signature. The count
+        # label and Send-next state still update below: they
+        # depend on busyness, which changes without the entries
+        # changing.
+        signature = tuple(
+            (e.get("id"), e.get("text")) for e in entries)
+        if signature != getattr(self, "_queue_panel_signature", None):
+            self._queue_panel_signature = signature
+            while self._queue_rows.count():
+                item = self._queue_rows.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    # Hide first: deleteLater only lands on the
+                    # next event-loop pass, and a row taken out of
+                    # the layout stays painted at its old spot
+                    # until then — a saved edit's Save/Cancel
+                    # buttons would flash below the panel for a
+                    # frame. Hidden widgets never paint.
+                    widget.hide()
+                    widget.deleteLater()
+            for entry in entries:
+                self._queue_rows.addWidget(
+                    self._build_queue_row(entry))
+        count = len(entries)
+        if count:
+            if self._bench_busy():
+                self._queue_count_label.setText(
+                    f"{count} waiting — sends when the current "
+                    "turn ends")
+            else:
+                self._queue_count_label.setText(
+                    f"{count} waiting — Send next runs the oldest")
+        else:
+            self._queue_count_label.setText("")
+        self._queue_send_next_btn.setEnabled(
+            bool(count) and not self._bench_busy())
+        panel.setVisible(bool(count))
+
+    def _build_queue_row(self, entry):
+        """One queue-panel row: the message's first line (the full
+        text is in the tooltip and in the editor), Edit / Delete.
+        Edit swaps the label for a small editor with Save /
+        Cancel; saving an empty edit keeps the old text."""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        text = entry.get("text") or ""
+        first = text.splitlines()[0] if text.strip() else ""
+        if len(first) > 120:
+            first = first[:117] + "…"
+        label = QLabel(first)
+        label.setToolTip(text)
+        label.setObjectName("muted")
+        layout.addWidget(label, 1)
+        editor = QPlainTextEdit()
+        editor.setPlainText(text)
+        editor.setFixedHeight(64)
+        editor.setVisible(False)
+        layout.addWidget(editor, 1)
+        edit_btn = QPushButton("Edit")
+        del_btn = QPushButton("Delete")
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        save_btn.setVisible(False)
+        cancel_btn.setVisible(False)
+        layout.addWidget(edit_btn)
+        layout.addWidget(del_btn)
+        layout.addWidget(save_btn)
+        layout.addWidget(cancel_btn)
+
+        def _start_edit():
+            self._queue_editing_id = entry.get("id")
+            label.setVisible(False)
+            edit_btn.setVisible(False)
+            del_btn.setVisible(False)
+            editor.setVisible(True)
+            save_btn.setVisible(True)
+            cancel_btn.setVisible(True)
+            editor.setFocus()
+
+        def _save_edit():
+            self._queue_set_text(entry.get("id"),
+                                 editor.toPlainText())
+
+        def _cancel_edit_row():
+            self._queue_editing_id = None
+            self._refresh_queue_panel()
+
+        edit_btn.clicked.connect(_start_edit)
+        del_btn.clicked.connect(
+            lambda: self._queue_delete_entry(entry.get("id")))
+        save_btn.clicked.connect(_save_edit)
+        cancel_btn.clicked.connect(_cancel_edit_row)
+        return row
 
     def _deck_prompt_delivery(self, text, holder):
         """GUI-thread slot for the deck's blocking /prompt round trip."""
@@ -20197,6 +20778,12 @@ class ForgeWindow(QMainWindow):
         self._turn_mode = None
         self._turn_prompt = ""
         self._pending_plan_request = None
+        # Message queue (2026-11-11): an armed edit belongs to the
+        # conversation it was armed in — a switch or a fresh chat
+        # clears it (the banner hides with it; the text stays in
+        # the box as an ordinary draft). The queue itself is NOT
+        # cleared: entries for other conversations wait.
+        self._cancel_edit()
 
     def new_chat(self):
         # Item #64: silent refusal, as always — but a detachable
@@ -20213,6 +20800,10 @@ class ForgeWindow(QMainWindow):
             self.close_side_chat()
         self._reset_turn_scoped_state()
         self.conversation_id = None
+        # Message queue (2026-11-12): a fresh conversation gets a
+        # fresh queue token — entries held for the old one wait
+        # under theirs, never dropped.
+        self._rotate_fresh_conversation_token()
         self.messages = [{"role": "system", "content": self.build_system_prompt()}]
         # Note 12: a new conversation has no plan yet.
         self.plan_state = None
@@ -20224,6 +20815,9 @@ class ForgeWindow(QMainWindow):
         self.log("Started a new conversation.")
         # H5: the notes/sees rooms follow the conversation.
         self._refresh_note_windows()
+        # Message queue (2026-11-11): a fresh conversation has no
+        # held messages of its own — the panel hides.
+        self._refresh_queue_panel()
 
     # ---------- models / gauges gate ----------
     def refresh_models(self):
@@ -20801,23 +21395,54 @@ class ForgeWindow(QMainWindow):
         cache[model] = accepts
         return accepts
 
+    def _sync_send_button(self):
+        """The Send button's state, derived from the bench — the
+        message queue build (2026-11-11) keeps it enabled ALWAYS
+        and changes what it does instead: idle it reads "Send ↗"
+        and sends; while a turn or fold runs it reads "Queue ↗"
+        and queues (send_message's busy branch). The stop button
+        still tracks busyness the old way. Called at every site
+        that used to enable/disable the button directly, and at
+        the end of _start_turn (every turn start funnels through
+        it). Also refreshes the queue panel, so the panel's
+        Send-next state never goes stale."""
+        busy = self._bench_busy()
+        self.send_btn.setText("Queue  ↗" if busy else "Send  ↗")
+        self.send_btn.setEnabled(True)
+        self.stop_btn.setEnabled(busy)
+        self._refresh_queue_panel()
+
     def send_message(self):
         self._send_refusal = None
+        self._send_queued = False
         text = self.input.toPlainText().strip()
-        if not text or (self.worker and self.worker.isRunning()):
+        if not text:
             # Sweep R34: EVERY refusal exit below records its words
             # in _send_refusal, not just the multimodal guard — the
             # phone path and the artifact-comment path both read it
             # right after calling here, and without it they told
             # their caller "received / started" about a turn that
             # never ran.
-            if not text:
-                self._send_refusal = "Nothing to send — the prompt was empty."
+            self._send_refusal = "Nothing to send — the prompt was empty."
             return
-        if self._fold_thread is not None and self._fold_thread.isRunning():
-            self._send_refusal = ("A context summary is running — "
-                                  "the turn starts when it settles.")
-            return  # a pre-send summary is running; the turn starts when it settles
+        # Message queue (2026-11-11): a busy bench no longer
+        # refuses the send — it QUEUES it. The button reads
+        # "Queue ↗" while a turn or fold runs (see
+        # _sync_send_button), and the held message fires in order
+        # when the bench settles. The one exception is an armed
+        # edit: truncation must happen against the live list at
+        # send time, so a queued edit makes no sense — it refuses
+        # and the edit stays armed.
+        if self._bench_busy():
+            if self._edit_target is not None:
+                self._send_refusal = (
+                    "A turn is running — your edit stays in the "
+                    "box; send it when the turn ends.")
+                self.log(self._send_refusal)
+                self.statusBar().showMessage(self._send_refusal)
+                return
+            self._queue_message(text)
+            return
         # Item #54: Plan mode cannot run inside a side chat. A plan
         # lives in the window's ONE plan slot and its on-disk sidecar
         # (APP_DIR/plans/<main conversation id>.json) — a fork has no
@@ -20927,7 +21552,15 @@ class ForgeWindow(QMainWindow):
         if self.pending_upload_note:
             text = self.pending_upload_note + "\n" + text
             self.pending_upload_note = ""
-        self.messages.append({"role": "user", "content": text})
+        if self._edit_target is not None:
+            # An armed edit (see edit_message): truncate the live
+            # list after the edited message and re-run from it,
+            # the full original already forked into history. A
+            # False here leaves everything exactly as it was.
+            if not self._apply_edit(text):
+                return
+        else:
+            self.messages.append({"role": "user", "content": text})
         # Item #54: the resume state is a persistent record of the
         # MAIN thread (its restore loads this conversation and puts
         # last_prompt back in the input box) — a side chat's prompt
@@ -20952,7 +21585,9 @@ class ForgeWindow(QMainWindow):
         self.log(f"Request sent to {model}.")
         self.agent_state.setText("●  THINKING"); self.agent_state.setStyleSheet("color:#e6c16c;font-weight:700;")
         self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
-        self.send_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        # The button sync moved to the end of the send (below):
+        # the worker / fold thread only exists after _maybe_fold /
+        # _start_turn run, and _sync_send_button derives from them.
         options = {"temperature": self.settings.get("temperature", .7),
                    "num_predict": self.settings.get("num_predict", 2048),
                    "num_ctx": self.settings.get("num_ctx", 8192),
@@ -20998,8 +21633,10 @@ class ForgeWindow(QMainWindow):
         # never blocks the send: failure, refusal, or an impossible
         # fold all fall through to the turn exactly as it was.
         if self._maybe_fold(model, options, text):
+            self._sync_send_button()
             return
         self._start_turn(model, options, text)
+        self._sync_send_button()
 
     # ---------- Item #41 (audit D42): seats file + mode bindings ----------
     def _load_seat_file(self):
@@ -21301,6 +21938,10 @@ class ForgeWindow(QMainWindow):
         self._sync_deck_turn()
         self._push_deck_streams()
         self.worker.start()
+        # Message queue (2026-11-11): every turn start funnels
+        # through here — the button reads "Queue ↗" from now until
+        # the turn settles.
+        self._sync_send_button()
 
     # ---------- Item #64: workstreams (parallel turns) ----------
     def _max_parallel_turns(self):
@@ -21543,6 +22184,13 @@ class ForgeWindow(QMainWindow):
             self.send_message()
             if getattr(self, "_send_refusal", None):
                 return None
+            if getattr(self, "_send_queued", False):
+                # Message queue (2026-11-11): the instruction is
+                # held, not started — tagging the RUNNING stream
+                # with this item would attribute the wrong turn.
+                # The spawn fails cleanly; the item finalises
+                # flagged.
+                return None
             stream = self._stage_stream()
             if stream is None:
                 return None
@@ -21619,6 +22267,13 @@ class ForgeWindow(QMainWindow):
                 self.send_message()
                 if getattr(self, "_send_refusal", None):
                     return False
+                if getattr(self, "_send_queued", False):
+                    # Message queue (2026-11-11): the repair
+                    # instruction is held, not started — tagging
+                    # the RUNNING stream with it would attribute
+                    # the wrong turn. The repair fails cleanly;
+                    # the caller finalises the item flagged.
+                    return False
                 stream = self._stage_stream()
                 if stream is None:
                     return False
@@ -21665,7 +22320,7 @@ class ForgeWindow(QMainWindow):
         self._stage_stream_id = None
         self.worker = None
         self._stream_text = ""
-        self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self._sync_send_button()
         self.agent_state.setText("●  IDLE")
         self.agent_state.setStyleSheet(
             f"color:{TOKENS['state_idle']};font-weight:700;")
@@ -21707,7 +22362,7 @@ class ForgeWindow(QMainWindow):
         if partial:
             self.messages.append({"role": "assistant", "content": partial})
         self.render()
-        self.send_btn.setEnabled(False); self.stop_btn.setEnabled(True)
+        self._sync_send_button()
         self.agent_state.setText("●  THINKING")
         self.agent_state.setStyleSheet("color:#e6c16c;font-weight:700;")
         self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
@@ -22821,9 +23476,11 @@ class ForgeWindow(QMainWindow):
         options = {"temperature": self.settings.get("temperature", .7),
                    "num_predict": self.settings.get("num_predict", 2048),
                    "num_ctx": num_ctx}
-        self.send_btn.setEnabled(False); self.stop_btn.setEnabled(True)
         self._launch_fold(model, options, plan, then_start=False,
                           num_ctx=num_ctx)
+        # The sync runs AFTER the launch: the fold thread exists
+        # only then, and _sync_send_button derives from it.
+        self._sync_send_button()
 
     def _write_trajectory_fallback(self, plan) -> None:
         """Manus study M8 — the between-turn half of the saturation
@@ -22935,7 +23592,11 @@ class ForgeWindow(QMainWindow):
                 if then_start:
                     self._start_turn(model, options, text)
                 else:
-                    self.send_btn.setEnabled(True)
+                    # The fold never started, so nothing queued
+                    # during it — no drain (a queue held from a
+                    # stop waits for Send next, it does not fire
+                    # on an aborted fold).
+                    self._sync_send_button()
                 return
         thread = SummarizeThread(
             self.client, model,
@@ -23002,10 +23663,35 @@ class ForgeWindow(QMainWindow):
                 # nothing: the send proceeds exactly as a refused
                 # fold does.
                 self._write_trajectory_fallback(plan)
+                # The trajectory fallback may have changed the
+                # estimate — the gauge re-reads, as in the folded
+                # branch above.
+                self._update_context_gauge()
             if then_start:
+                # Message queue (2026-11-11): ONE fold attempt per
+                # send — the send path never folds twice. If the
+                # fold could not get under the fold threshold, say
+                # so ONCE and run the turn anyway (the worker's
+                # budget stop + compression handle the overflow
+                # mid-turn) instead of grinding through another
+                # fold. On an 8k window the tool schemas alone sit
+                # above the threshold, so this line is the honest
+                # answer to a gauge that stays red after a fold.
+                after = context_mod.total_estimate(
+                    self.messages, self._context_schemas())
+                if after >= context_mod.FOLD_THRESHOLD * num_ctx:
+                    note = (f"Still over the context limit after "
+                            f"summarizing (~{after:,} of {num_ctx:,} "
+                            f"tokens) — the turn runs anyway. For "
+                            f"more room, start a fresh conversation, "
+                            f"or summarize the older messages again "
+                            f"from the gauge's right-click menu.")
+                    self.log(note)
+                    self.statusBar().showMessage(note)
                 self._start_turn(model, options, text)
             else:
-                self.send_btn.setEnabled(True)
+                self._sync_send_button()
+                self._drain_message_queue()
 
         def _failed(why):
             _settle()
@@ -23015,7 +23701,8 @@ class ForgeWindow(QMainWindow):
             if then_start:
                 self._start_turn(model, options, text)
             else:
-                self.send_btn.setEnabled(True)
+                self._sync_send_button()
+                self._drain_message_queue()
 
         def _cancelled():
             _settle()
@@ -23027,13 +23714,17 @@ class ForgeWindow(QMainWindow):
                 # settles back to idle.
                 upd.clear_resume_state(APP_DIR)
                 self.log("Stop pressed — summarizing cancelled, nothing was sent.")
-                self.send_btn.setEnabled(True)
+                # No drain: the send was stopped on purpose, and a
+                # held queue waits for Send next.
+                self._sync_send_button()
                 self.agent_state.setText("●  IDLE")
                 self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
                 self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
             else:
                 self.log("Summarizing cancelled — nothing changed.")
-                self.send_btn.setEnabled(True)
+                # No drain: the owner stopped the summarizing; the
+                # queue waits for Send next.
+                self._sync_send_button()
                 # Sweep R61: the manual fold never set the agent
                 # state/ember the pre-send branch resets, but it DID
                 # set the status bar's "Summarizing…" message — a
@@ -23376,6 +24067,14 @@ class ForgeWindow(QMainWindow):
         self._sync_deck_turn()
         upd.clear_resume_state(APP_DIR)
         self._drain_phone_queue()
+        # Message queue (2026-11-11): a natural settle fires the
+        # oldest held message — but NOT when the owner pressed
+        # Stop. A stopped turn's queue waits for Send next; the
+        # owner halted work on purpose, and auto-starting the
+        # next turn would undo it. (The worker slot still holds
+        # the finished worker here — it is cleared below.)
+        if not getattr(self.worker, "_cancel", False):
+            self._drain_message_queue()
         self._render_timer.stop()
         # Sweep R53: the turn is settled — its streaming bookkeeping
         # is spent. Left standing, a stale anchor/bubble pair could
@@ -23387,7 +24086,7 @@ class ForgeWindow(QMainWindow):
         self._stream_prefix_len = 0
         self._stream_painted = None
         self.persist_conversation(); self.render()
-        self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self._sync_send_button()
         self.agent_state.setText("●  IDLE"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
         self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
         self.statusBar().showMessage("Response complete")
@@ -23531,7 +24230,7 @@ class ForgeWindow(QMainWindow):
         if self.worker is failed_worker:
             self.worker = None
         QMessageBox.critical(self, "Agent error", error)
-        self.send_btn.setEnabled(True); self.stop_btn.setEnabled(False)
+        self._sync_send_button()
         self.agent_state.setText("●  ERROR"); self.agent_state.setStyleSheet("color:#e28b83;font-weight:700;")
         self.ember.set_mode("cooling"); self.ember_label.setText("ERROR")
         # Item #69: a failed maintenance turn still lands in the
@@ -23544,6 +24243,9 @@ class ForgeWindow(QMainWindow):
         # A failed turn ends the wait too: held phone prompts drain
         # here, after the error dialog above has been dismissed.
         self._drain_phone_queue()
+        # Message queue (2026-11-11): a failure is not a stop —
+        # held messages drain normally.
+        self._drain_message_queue()
 
     def stop_generation(self):
         if self._fold_thread is not None and self._fold_thread.isRunning():

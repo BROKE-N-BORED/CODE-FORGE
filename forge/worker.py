@@ -1496,6 +1496,18 @@ class AgentWorker(QThread):
             # filter below — a disabled tool is offered in NO mode.
             all_schemas = [s for s in all_schemas
                            if s["function"]["name"] not in self.disabled_tools]
+        if self._research_web_off():
+            # The Research room's web switch is an owner setting
+            # for the whole run — unlike the approval gate, it
+            # never flips mid-session, so the browse verbs are
+            # filtered from the OFFER here (the M5 retirement
+            # covered only the approval gate; the execution
+            # backstop in _research_refusal stays as the second
+            # line). With the web off, the verbs are neither
+            # offered nor executable, in any mode.
+            all_schemas = [s for s in all_schemas
+                           if s["function"]["name"]
+                           not in RESEARCH_BROWSE_TOOLS]
         mode = self.permissions.get("mode", "code")
         if mode == "code":
             return all_schemas

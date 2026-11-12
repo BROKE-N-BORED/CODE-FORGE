@@ -171,7 +171,7 @@ erasing the old.
 Review reports from Review mode: each report opens with a
 Walkthrough — what changed, the changes in dependency order
 grouped by layer, an Effort line and a Risk line — before the
-findings. Every finding is one line carrying
+findings by severity. Every finding is one line carrying
 its severity (Critical / Major / Minor / Trivial), its type (Bug /
 Security / Performance / Refactor / Nitpick) and its Source — what
 triggered it — plus the fix it suggests. Under each finding, one

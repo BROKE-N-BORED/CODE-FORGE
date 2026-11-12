@@ -1173,24 +1173,28 @@ class ContextBudgetTests(unittest.TestCase):
         # The exemption: the pending SKRIBE grading generation keeps
         # its tools even when the payload is already past the stop
         # fraction. Measured fixture: with this script the estimated
-        # payloads are 1227 (write), 1285 (quiet answer), 1507
-        # (grading) — a 1550-token window stays under 90% for the
-        # first two generations (0.79, 0.83) and crosses it only at
-        # the grading generation (0.97), which is exactly the one
+        # payloads are 1386 (write), 1444 (quiet answer), 1666
+        # (grading) — a 1700-token window stays under 90% for the
+        # first two generations (0.82, 0.85) and crosses it only at
+        # the grading generation (0.98), which is exactly the one
         # the exemption protects. The client records the estimate of
         # every call so the fixture cannot silently drift under the
         # threshold: the test asserts the crossing really happened.
         # (Recalibrated 2026-11-09: the Write/Research file kit
         # added four built-in schemas, ~620 estimated tokens of
         # schema payload on every generation — the window moved
-        # from 850 to 1550 to keep the same three relationships.)
+        # from 850 to 1550 to keep the same three relationships.
+        # Recalibrated 2026-11-11: the code_graph tool (Tier 2 #2)
+        # added one built-in schema, ~159 estimated tokens on every
+        # generation — the window moved from 1550 to 1700 to keep
+        # the same three relationships.)
         from forge.worker import AgentWorker
         with tempfile.TemporaryDirectory() as td:
             log = _FakeEventLog()
             client = _GradingClient()
             worker = AgentWorker(
                 client, "maternion/minicpm5-heretic:2b",
-                [{"role": "user", "content": "go"}], {"num_ctx": 1550},
+                [{"role": "user", "content": "go"}], {"num_ctx": 1700},
                 td, eventlog=log)
             worker.approval_needed.connect(
                 lambda *a: worker.resolve_approval(True))
@@ -1200,10 +1204,10 @@ class ContextBudgetTests(unittest.TestCase):
             worker.run()
             self.assertEqual(client.calls, 3)
             # The first two generations were under the fraction…
-            self.assertLess(client.estimates[0], 0.90 * 1550)
-            self.assertLess(client.estimates[1], 0.90 * 1550)
+            self.assertLess(client.estimates[0], 0.90 * 1700)
+            self.assertLess(client.estimates[1], 0.90 * 1700)
             # …the grading generation was over it…
-            self.assertGreaterEqual(client.estimates[2], 0.90 * 1550)
+            self.assertGreaterEqual(client.estimates[2], 0.90 * 1700)
             # …and still kept its tools, with no budget trip logged.
             self.assertTrue(client.schemas_seen[2])
             self.assertNotIn("context_budget_stop", log.kinds())
@@ -1303,7 +1307,16 @@ class ContextContinuityTests(unittest.TestCase):
             folds = [f for k, f in log.events
                      if k == "context_fold_mid_turn"]
             self.assertEqual(len(folds), 2)
-            self.assertTrue(all(f["estimate"] < 7200 for f in folds))
+            # Recalibrated 2026-11-11: the code_graph tool (Tier 2
+            # #2) added one built-in schema, ~159 estimated tokens
+            # on every generation — the fold estimates moved from
+            # 5992/7147 to 6151/7306, so the ceiling moved from
+            # 7200 to 7380 to keep the same relationship (the fold
+            # lands below it with the same headroom, and no budget
+            # stop fires — asserted below). Same precedent as the
+            # 2026-11-09 file-kit recalibration in the SKRIBE
+            # grading test above.
+            self.assertTrue(all(f["estimate"] < 7380 for f in folds))
             self.assertNotIn("context_budget_stop", log.kinds())
             self.assertEqual(hits["n"], 1)
             self.assertTrue(any(m.get("summary") for m in worker.messages))
@@ -40247,6 +40260,765 @@ class ResendReplyTests(unittest.TestCase):
 
 
 
+class _QueueRunningWorker:
+    """A stand-in for a worker mid-turn: isRunning() is True, and
+    nothing else about it is consulted."""
+
+    def isRunning(self):
+        return True
+
+
+class _QueueStoppedWorker:
+    """A finished worker whose turn the owner stopped: not running,
+    _cancel set — the flag on_finished reads before draining."""
+
+    _cancel = True
+
+    def isRunning(self):
+        return False
+
+
+class _QueueFoldingThread:
+    """A stand-in for a fold in flight."""
+
+    def isRunning(self):
+        return True
+
+
+class _TestSignal:
+    """A minimal stand-in for a Qt Signal: connect + emit."""
+
+    def __init__(self):
+        self._handlers = []
+
+    def connect(self, handler):
+        self._handlers.append(handler)
+
+    def emit(self, *args):
+        for handler in list(self._handlers):
+            handler(*args)
+
+
+class _SyncSummarizeThread:
+    """Stand-in for SummarizeThread: runs the summary generation
+    synchronously on the calling thread (no QThread), so a fold
+    can be driven to completion deterministically in a test. The
+    window's real _launch_fold / _done code runs unchanged — only
+    the delivery is synchronous. Instances are recorded for the
+    one-fold-per-send pin."""
+
+    instances = []
+
+    def __init__(self, client, model, messages, options,
+                 light_machine=False, seat=False):
+        self.client = client
+        self.model = model
+        self.messages = messages
+        self.options = options
+        self.done = _TestSignal()
+        self.failed = _TestSignal()
+        self.cancelled = _TestSignal()
+        self._running = False
+        _SyncSummarizeThread.instances.append(self)
+
+    def isRunning(self):
+        return self._running
+
+    def cancel(self):
+        pass
+
+    def start(self):
+        self._running = True
+        try:
+            chunks = []
+            for event in self.client.chat_stream(
+                    self.model, self.messages, self.options, []):
+                content = event.get("message", {}).get("content", "")
+                if content:
+                    chunks.append(content)
+            text = "".join(chunks).strip()
+            if not text:
+                self.failed.emit("the model returned an empty summary")
+                return
+            self.done.emit(text)
+        finally:
+            self._running = False
+
+
+class _SummaryClient:
+    """A fake summarizer: one canned summary, no network."""
+
+    def chat_stream(self, model, messages, options, schemas):
+        yield {"message": {"content":
+                           "Earlier we discussed the project and "
+                           "made progress.",
+                           "tool_calls": []}}
+
+
+class MessageQueueTests(unittest.TestCase):
+    """The message queue (owner request, 2026-11-11): while a turn
+    or fold runs, Enter/Send QUEUES the message instead of being
+    blocked — the Send button stays enabled and reads "Queue ↗".
+    Queued messages fire in order, one per settle, each editable
+    in place or deletable before it sends. Stop does NOT drop the
+    queue (a stopped settle deliberately does not drain; Send next
+    fires manually), a failed turn drains normally, and entries
+    for other conversations wait — never dropped. A queued message
+    whose send is refused goes back to the FRONT of the line, never
+    lost, never double-sent. _start_turn is stubbed with a
+    recorder throughout (no real worker starts); singleShot is
+    captured so the drain's fire callback runs synchronously."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        import forge.main as main_mod
+        from unittest import mock
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win.plan_state = None
+        self.win.conversation_id = None
+        self.win._log_lines = []
+        self.win._message_queue = []
+        self.win._message_queue_seq = 0
+        self.win._queue_editing_id = None
+        self.win._edit_target = None
+        self.win._refresh_queue_panel()
+        self.win.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first ask"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        self.win.input.clear()
+        self.win.mode_combo.setCurrentText("Code")
+        self.started = []
+        self._real_start_turn = self.win._start_turn
+        self.win._start_turn = (
+            lambda model, options, text: self.started.append(text))
+        self._real_auto = self.win.settings.get("auto_summarize", True)
+        self.win.settings["auto_summarize"] = False
+        self.fired = []
+        self._singleShot_patch = mock.patch.object(
+            main_mod.QTimer, "singleShot",
+            lambda *a, **k: self.fired.append(a))
+        self._singleShot_patch.start()
+
+    def tearDown(self):
+        self._singleShot_patch.stop()
+        self.win._start_turn = self._real_start_turn
+        self.win.settings["auto_summarize"] = self._real_auto
+        self.win._side_chat = None
+        self.win._message_queue = []
+        self.win._edit_target = None
+        self.win._queue_editing_id = None
+        self.win._streams = {}
+        self.win.messages = []
+        self.win.input.clear()
+        self.temp.cleanup()
+
+    def _first_queue_row(self):
+        item = self.win._queue_rows.itemAt(0)
+        self.assertIsNotNone(item, "no queue row rendered")
+        return item.widget()
+
+    @staticmethod
+    def _button_in(widget, text):
+        from PySide6.QtWidgets import QPushButton
+        for btn in widget.findChildren(QPushButton):
+            if btn.text() == text:
+                return btn
+        raise AssertionError(f"no button {text!r} in row")
+
+    def test_send_while_turn_runs_queues_instead_of_blocking(self):
+        self.win.worker = _QueueRunningWorker()
+        self.win._sync_send_button()
+        self.assertEqual(self.win.send_btn.text(), "Queue  ↗")
+        self.assertTrue(self.win.send_btn.isEnabled())
+        self.win.input.setPlainText("second message")
+        before = [dict(m) for m in self.win.messages]
+        self.win.send_message()
+        self.assertEqual(len(self.win._message_queue), 1)
+        self.assertEqual(self.win._message_queue[0]["text"],
+                         "second message")
+        self.assertTrue(self.win._send_queued)
+        self.assertIsNone(self.win._send_refusal)
+        self.assertEqual(self.win.input.toPlainText(), "")
+        self.assertEqual(self.win.messages, before)
+        self.assertEqual(self.started, [])
+        self.assertFalse(self.win._queue_panel.isHidden())
+
+    def test_send_while_fold_runs_queues_too(self):
+        self.win._fold_thread = _QueueFoldingThread()
+        self.win._sync_send_button()
+        self.assertEqual(self.win.send_btn.text(), "Queue  ↗")
+        self.win.input.setPlainText("during a fold")
+        self.win.send_message()
+        self.assertEqual(len(self.win._message_queue), 1)
+        self.assertTrue(self.win._send_queued)
+        self.assertEqual(self.started, [])
+
+    def test_queue_drains_in_order_after_settle(self):
+        # The conversation here is fresh (never persisted): the
+        # first fired send persists it and mints its store id —
+        # the drain must still find the entries held behind it
+        # (matched by conversation token, not store id).
+        self.win.worker = _QueueRunningWorker()
+        for text in ("one", "two", "three"):
+            self.win.input.setPlainText(text)
+            self.win.send_message()
+        self.assertEqual([e["text"] for e in self.win._message_queue],
+                         ["one", "two", "three"])
+        self.win.worker = None
+        self.win._drain_message_queue()
+        self.assertEqual(len(self.fired), 1, "one fire per settle")
+        self.fired[0][2]()
+        self.assertEqual(self.started, ["one"])
+        self.assertEqual([e["text"] for e in self.win._message_queue],
+                         ["two", "three"])
+        self.win._drain_message_queue()
+        self.assertEqual(len(self.fired), 2)
+        self.fired[1][2]()
+        self.assertEqual(self.started, ["one", "two"])
+        self.win._drain_message_queue()
+        self.fired[2][2]()
+        self.assertEqual(self.started, ["one", "two", "three"])
+        self.assertEqual(self.win._message_queue, [])
+        self.assertTrue(self.win._queue_panel.isHidden())
+
+    def test_edit_queued_message_sends_edited(self):
+        self.win._queue_message("original text")
+        entry_id = self.win._message_queue[0]["id"]
+        self.win._queue_set_text(entry_id, "edited text")
+        self.assertEqual(self.win._message_queue[0]["text"],
+                         "edited text")
+        self.win._drain_message_queue()
+        self.fired[0][2]()
+        self.assertEqual(self.started, ["edited text"])
+
+    def test_empty_edit_keeps_the_old_text(self):
+        self.win._queue_message("keep me")
+        entry_id = self.win._message_queue[0]["id"]
+        self.win._queue_set_text(entry_id, "   ")
+        self.assertEqual(self.win._message_queue[0]["text"], "keep me")
+
+    def test_delete_queued_message_never_sends(self):
+        self.win._queue_message("keep")
+        self.win._queue_message("drop")
+        drop_id = self.win._message_queue[1]["id"]
+        self.win._queue_delete_entry(drop_id)
+        self.assertEqual([e["text"] for e in self.win._message_queue],
+                         ["keep"])
+        self.win._drain_message_queue()
+        self.fired[0][2]()
+        self.assertEqual(self.started, ["keep"])
+        self.win._drain_message_queue()
+        self.assertEqual(len(self.fired), 1, "nothing left to fire")
+
+    def test_clear_all_drops_only_this_conversation(self):
+        self.win._queue_message("mine one")
+        self.win._queue_message("mine two")
+        self.win._message_queue.append(
+            {"id": 999, "text": "another conversation",
+             "conversation_id": 12345,
+             "conversation_token": ("store", 12345),
+             "images": [], "upload_note": ""})
+        self.win._queue_clear_all()
+        self.assertEqual([e["text"] for e in self.win._message_queue],
+                         ["another conversation"])
+
+    def test_queue_row_edit_button_edits_in_place(self):
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.win._queue_message("before edit")
+        row = self._first_queue_row()
+        self._button_in(row, "Edit").click()
+        editor = row.findChild(QPlainTextEdit)
+        self.assertIsNotNone(editor)
+        self.assertFalse(editor.isHidden())
+        self.assertEqual(editor.toPlainText(), "before edit")
+        editor.setPlainText("after edit")
+        self._button_in(row, "Save").click()
+        self.assertEqual(self.win._message_queue[0]["text"],
+                         "after edit")
+
+    def test_queue_row_delete_button_removes_the_entry(self):
+        self.win._queue_message("drop me")
+        row = self._first_queue_row()
+        self._button_in(row, "Delete").click()
+        self.assertEqual(self.win._message_queue, [])
+        self.assertTrue(self.win._queue_panel.isHidden())
+
+    def test_send_next_button_fires_the_oldest_when_idle(self):
+        self.win._queue_message("next up")
+        self.assertTrue(self.win._queue_send_next_btn.isEnabled())
+        self.win._queue_send_next_btn.click()
+        self.assertEqual(len(self.fired), 1)
+        self.fired[0][2]()
+        self.assertEqual(self.started, ["next up"])
+
+    def test_send_next_does_nothing_while_busy(self):
+        self.win._queue_message("held")
+        self.win.worker = _QueueRunningWorker()
+        self.win._send_next_queued()
+        self.assertEqual(self.fired, [])
+        self.assertEqual(len(self.win._message_queue), 1)
+
+    def test_clear_all_button_drops_the_conversations_queue(self):
+        self.win._queue_message("one")
+        self.win._queue_message("two")
+        self.win._queue_clear_btn.click()
+        self.assertEqual(self.win._message_queue, [])
+        self.assertTrue(self.win._queue_panel.isHidden())
+
+    def test_stop_does_not_drop_the_queue(self):
+        self.win.worker = _QueueRunningWorker()
+        for text in ("held one", "held two"):
+            self.win.input.setPlainText(text)
+            self.win.send_message()
+        self.win.worker = _QueueStoppedWorker()
+        real_distill = self.win._distill_knowledge_async
+        real_cadence = self.win._cadence_evaluate
+        self.win._distill_knowledge_async = lambda *a, **k: None
+        self.win._cadence_evaluate = lambda *a, **k: None
+        try:
+            self.win.on_finished(
+                "the reply",
+                self.win.messages
+                + [{"role": "assistant", "content": "the reply"}])
+        finally:
+            self.win._distill_knowledge_async = real_distill
+            self.win._cadence_evaluate = real_cadence
+        # A stopped settle fires nothing; the queue is intact and
+        # the button is back to Send.
+        self.assertEqual(self.fired, [])
+        self.assertEqual([e["text"] for e in self.win._message_queue],
+                         ["held one", "held two"])
+        self.assertEqual(self.win.send_btn.text(), "Send  ↗")
+        # Send next fires the oldest manually.
+        self.win._send_next_queued()
+        self.assertEqual(len(self.fired), 1)
+        self.fired[0][2]()
+        self.assertEqual(self.started, ["held one"])
+
+    def test_failed_turn_drains_the_queue(self):
+        import forge.main as main_mod
+        from unittest import mock
+        self.win.worker = _QueueRunningWorker()
+        self.win.input.setPlainText("after failure")
+        self.win.send_message()
+        with mock.patch.object(main_mod.QMessageBox, "critical",
+                               lambda *a, **k: None):
+            self.win.on_failed("the turn blew up")
+        self.assertEqual(len(self.fired), 1)
+        self.fired[0][2]()
+        self.assertEqual(self.started, ["after failure"])
+
+    def test_refused_queued_message_goes_back_to_the_front(self):
+        self.win._queue_message("first")
+        self.win._queue_message("second")
+        # The parallel cap refuses the fire: one live background
+        # stream against the default cap of 1.
+        self.win._streams = {
+            999: {"id": 999, "settled": None,
+                  "worker": _QueueRunningWorker(),
+                  "conversation_id": 12345}}
+        self.win._drain_message_queue()
+        self.assertEqual(len(self.fired), 1)
+        self.fired[0][2]()
+        self.assertEqual(self.started, [])
+        self.assertEqual([e["text"] for e in self.win._message_queue],
+                         ["first", "second"])
+        self.assertEqual(self.win.input.toPlainText(), "",
+                         "the refused text lives in the queue, not "
+                         "the box — it can never double-send")
+        self.assertTrue(any("Queued message held" in line
+                            for line in self.win._log_lines))
+
+    def test_queue_survives_a_conversation_switch(self):
+        cid_a = self.win.store.save(
+            None, self.win.messages, model=self.MODEL, project=None)
+        cid_b = self.win.store.save(
+            None, [{"role": "system", "content": "sys"},
+                   {"role": "user", "content": "other chat"}],
+            model=self.MODEL, project=None)
+        self.win.load_conversation(cid_a)
+        self.win.worker = _QueueRunningWorker()
+        self.win.input.setPlainText("for conversation A")
+        self.win.send_message()
+        self.assertEqual(len(self.win._message_queue), 1)
+        # The turn is stopped — no drain (see
+        # test_stop_does_not_drop_the_queue) — and the owner
+        # switches conversations with the entry still held.
+        self.win.worker = _QueueStoppedWorker()
+        real_distill = self.win._distill_knowledge_async
+        real_cadence = self.win._cadence_evaluate
+        self.win._distill_knowledge_async = lambda *a, **k: None
+        self.win._cadence_evaluate = lambda *a, **k: None
+        try:
+            self.win.on_finished(
+                "the reply",
+                self.win.messages
+                + [{"role": "assistant", "content": "the reply"}])
+        finally:
+            self.win._distill_knowledge_async = real_distill
+            self.win._cadence_evaluate = real_cadence
+        self.assertEqual(len(self.win._message_queue), 1)
+        self.win.load_conversation(cid_b)
+        # The entry waits — still queued, out of sight in B.
+        self.assertEqual(len(self.win._message_queue), 1)
+        self.assertTrue(self.win._queue_panel.isHidden())
+        self.assertEqual(self.win._queue_rows.count(), 0)
+        self.win.load_conversation(cid_a)
+        self.assertFalse(self.win._queue_panel.isHidden())
+        self.assertEqual(self.win._queue_rows.count(), 1)
+
+
+class EditMessageTests(unittest.TestCase):
+    """Edit a sent message (owner request, 2026-11-11) —
+    truncate-and-rerun. Arming an edit loads the text into the
+    composer with the banner above it; sending truncates the
+    ACTIVE conversation after the edited message and re-runs from
+    it. The full original is forked into history first (never
+    silently destroyed), files already written stay written, and
+    the edit state clears on cancel, on send, and on a
+    conversation switch. Idle-only, plan-draft-blocked, and
+    draft-guarded, like Resend. _start_turn is stubbed with a
+    recorder throughout (no real worker starts)."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win.plan_state = None
+        self.win.conversation_id = None
+        self.win._log_lines = []
+        self.win._message_queue = []
+        self.win._edit_target = None
+        self.win._queue_editing_id = None
+        self.win.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first ask"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second ask"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+        self.win.input.clear()
+        self.win.mode_combo.setCurrentText("Code")
+        self.started = []
+        self._real_start_turn = self.win._start_turn
+        self.win._start_turn = (
+            lambda model, options, text: self.started.append(text))
+        self._real_auto = self.win.settings.get("auto_summarize", True)
+        self.win.settings["auto_summarize"] = False
+
+    def tearDown(self):
+        self.win._start_turn = self._real_start_turn
+        self.win.settings["auto_summarize"] = self._real_auto
+        self.win._side_chat = None
+        self.win._message_queue = []
+        self.win._edit_target = None
+        self.win._queue_editing_id = None
+        self.win.plan_state = None
+        self.win._streams = {}
+        self.win.messages = []
+        self.win.input.clear()
+        self.temp.cleanup()
+
+    def test_edit_truncates_and_reruns_from_the_edited_message(self):
+        self.win.persist_conversation()
+        original_id = self.win.conversation_id
+        self.assertIsNotNone(original_id)
+        ok, _note = self.win.edit_message(1)
+        self.assertTrue(ok)
+        self.assertEqual(self.win._edit_target, 1)
+        self.assertEqual(self.win.input.toPlainText(), "first ask")
+        self.assertFalse(self.win._edit_banner.isHidden())
+        self.win.input.setPlainText("first ask, reworded")
+        self.win.send_message()
+        self.assertEqual(self.started, ["first ask, reworded"])
+        # The live list is truncated after the edited message.
+        live = self.win.messages
+        self.assertEqual([m["role"] for m in live],
+                         ["system", "user"])
+        self.assertEqual(live[1]["content"], "first ask, reworded")
+        self.assertIsNone(self.win._edit_target)
+        self.assertTrue(self.win._edit_banner.isHidden())
+        # The full original survives as a fork in history.
+        recent = self.win.store.recent(10)
+        forks = [c for c in recent
+                 if (c["title"] or "").endswith("(fork)")]
+        self.assertEqual(len(forks), 1)
+        forked = self.win.store.load(forks[0]["id"])
+        self.assertEqual([m["role"] for m in forked],
+                         ["system", "user", "assistant", "user",
+                          "assistant"])
+        self.assertEqual([m["content"] for m in forked
+                          if m["role"] == "user"],
+                         ["first ask", "second ask"])
+        # And the live conversation's stored record is the
+        # truncated one.
+        stored = self.win.store.load(original_id)
+        self.assertEqual([m["role"] for m in stored],
+                         ["system", "user"])
+        self.assertEqual(stored[1]["content"], "first ask, reworded")
+
+    def test_edit_keeps_files_written(self):
+        target = Path(self.temp.name) / "made_by_the_agent.txt"
+        target.write_text("do not touch\n")
+        self.win.persist_conversation()
+        ok, _note = self.win.edit_message(1)
+        self.assertTrue(ok)
+        self.win.input.setPlainText("write the file differently")
+        self.win.send_message()
+        self.assertEqual(self.started, ["write the file differently"])
+        self.assertEqual(target.read_text(), "do not touch\n")
+
+    def test_edit_refused_while_a_turn_runs(self):
+        self.win.worker = _QueueRunningWorker()
+        ok, note = self.win.edit_message(1)
+        self.assertFalse(ok)
+        self.assertIn("running", note)
+        self.assertIsNone(self.win._edit_target)
+        self.assertTrue(self.win._edit_banner.isHidden())
+
+    def test_edit_refused_with_a_plan_draft_waiting(self):
+        self.win.plan_state = {"status": "draft", "steps": []}
+        ok, note = self.win.edit_message(1)
+        self.assertFalse(ok)
+        self.assertIn("plan", note.lower())
+        self.assertIsNone(self.win._edit_target)
+
+    def test_edit_never_overwrites_a_draft(self):
+        self.win.input.setPlainText("keep me")
+        ok, _note = self.win.edit_message(1)
+        self.assertFalse(ok)
+        self.assertEqual(self.win.input.toPlainText(), "keep me")
+        self.assertIsNone(self.win._edit_target)
+
+    def test_edit_refused_for_the_agents_message(self):
+        ok, note = self.win.edit_message(2)
+        self.assertFalse(ok)
+        self.assertIn("your own", note)
+
+    def test_cancel_edit_clears_state_and_leaves_history(self):
+        ok, _note = self.win.edit_message(1)
+        self.assertTrue(ok)
+        before = [dict(m) for m in self.win.messages]
+        self.win._on_cancel_edit_clicked()
+        self.assertIsNone(self.win._edit_target)
+        self.assertTrue(self.win._edit_banner.isHidden())
+        self.assertEqual(self.win.input.toPlainText(), "")
+        self.assertEqual(self.win.messages, before)
+
+    def test_edit_armed_then_busy_refuses_and_keeps_the_edit(self):
+        ok, _note = self.win.edit_message(1)
+        self.assertTrue(ok)
+        self.win.input.setPlainText("reworded")
+        self.win.worker = _QueueRunningWorker()
+        self.win.send_message()
+        self.assertEqual(
+            self.win._send_refusal,
+            "A turn is running — your edit stays in the box; send "
+            "it when the turn ends.")
+        self.assertEqual(self.win._edit_target, 1)
+        self.assertEqual(self.win.input.toPlainText(), "reworded")
+        self.assertEqual(self.win._message_queue, [])
+        self.assertEqual(self.started, [])
+
+    def test_edit_in_a_side_chat_truncates_only_the_fork(self):
+        main = self.win.messages
+        snapshot = [dict(m) for m in main]
+        self.win.open_side_chat()
+        self.assertIsNotNone(self.win._side_chat)
+        self.assertIsNot(self.win.messages, main)
+        ok, _note = self.win.edit_message(1)
+        self.assertTrue(ok)
+        self.win.input.setPlainText("fork reworded")
+        self.win.send_message()
+        self.assertEqual(self.started, ["fork reworded"])
+        self.assertEqual([m["role"] for m in self.win.messages],
+                         ["system", "user"])
+        # No fork record was created — the side chat's fork is
+        # ephemeral and there is nothing stored to preserve from.
+        self.assertEqual(self.win.store.recent(10), [])
+        self.win.close_side_chat()
+        self.assertIs(self.win.messages, main)
+        self.assertEqual(self.win.messages, snapshot)
+
+
+class FoldCapTests(unittest.TestCase):
+    """The context-overflow hang-up (owner report, 2026-11-11): a
+    send on an over-budget conversation folds AT MOST once, then
+    proceeds — the worker's budget stop + compression handle the
+    overflow mid-turn. If the fold cannot get under the fold
+    threshold, the send says so plainly ONCE (log + status bar)
+    with the real outs, instead of grinding silently; the gauge
+    still reads the post-fold estimate honestly. The fold is
+    driven through the window's real _launch_fold / _done with a
+    synchronous SummarizeThread stand-in (no QThread, no
+    network) and a canned summary; _start_turn is stubbed with a
+    recorder (no real worker starts)."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        import forge.main as main_mod
+        from unittest import mock
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win.plan_state = None
+        self.win.conversation_id = None
+        self.win._log_lines = []
+        self.win._message_queue = []
+        self.win._edit_target = None
+        self.win.workspace = ""
+        self.win.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first ask"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        self.win.input.clear()
+        self.win.mode_combo.setCurrentText("Code")
+        self.started = []
+        self._real_start_turn = self.win._start_turn
+        self.win._start_turn = (
+            lambda model, options, text: self.started.append(text))
+        self._real_auto = self.win.settings.get("auto_summarize", True)
+        self.win.settings["auto_summarize"] = True
+        self._real_client = self.win.client
+        self.win.client = _SummaryClient()
+        _SyncSummarizeThread.instances = []
+        self._thread_patch = mock.patch.object(
+            main_mod, "SummarizeThread", _SyncSummarizeThread)
+        self._thread_patch.start()
+
+    def tearDown(self):
+        self._thread_patch.stop()
+        self.win.client = self._real_client
+        self.win._start_turn = self._real_start_turn
+        self.win.settings["auto_summarize"] = self._real_auto
+        self.win._side_chat = None
+        self.win._message_queue = []
+        self.win._edit_target = None
+        self.win._streams = {}
+        self.win.messages = []
+        self.win.input.clear()
+        self.temp.cleanup()
+
+    def _fat_history(self, exchanges=10, chars=6000):
+        """Exchanges fat enough that even the newest four (the
+        fold's protected tail) stay over the 0.80 fold threshold
+        on an 8k window by themselves — the still-over line must
+        fire no matter what the schema load is in this env."""
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(exchanges):
+            msgs.append({"role": "user",
+                         "content": f"ask {i} " + "x" * chars})
+            msgs.append({"role": "assistant",
+                         "content": f"answer {i} " + "y" * chars})
+        return msgs
+
+    def test_one_send_folds_at_most_once_then_proceeds(self):
+        self.win.messages = self._fat_history()
+        self.win.input.setPlainText("next question")
+        self.win.send_message()
+        self.assertEqual(len(_SyncSummarizeThread.instances), 1,
+                         "one send, one fold attempt — never a "
+                         "second fold grinding after the first")
+        self.assertEqual(self.started, ["next question"],
+                         "the turn proceeds after the single fold")
+
+    def test_still_over_budget_says_so_once_and_gauge_stays_honest(self):
+        from forge import context as ctx
+        self.win.messages = self._fat_history()
+        self.win.input.setPlainText("next question")
+        self.win.send_message()
+        lines = [line for line in self.win._log_lines
+                 if "Still over the context limit" in line]
+        self.assertEqual(len(lines), 1, "said plainly ONCE")
+        self.assertIn("the turn runs anyway", lines[0])
+        self.assertIn("fresh conversation", lines[0])
+        # The gauge reads the post-fold estimate honestly.
+        parts = ctx.breakdown(self.win.messages,
+                              self.win._context_schemas())
+        est = parts["system"] + parts["history"] + parts["tools"]
+        self.assertTrue(self.win.ctx_text.text().startswith(
+            f"~{est:,}"), self.win.ctx_text.text())
+        self.assertEqual(self.win.ctx_bar.value(), 100)
+        self.assertEqual(self.win.ctx_bar.objectName(), "crit")
+
+    def test_under_budget_send_never_folds(self):
+        self.win.input.setPlainText("next")
+        self.win.send_message()
+        self.assertEqual(_SyncSummarizeThread.instances, [])
+        self.assertEqual(self.started, ["next"])
+        self.assertEqual([line for line in self.win._log_lines
+                          if "Still over" in line], [])
+
+
 class FindingFormatTests(unittest.TestCase):
     """CR2 (CodeRabbit Tier 1 #2, 2026-11-11): every Review finding
     carries a severity, a type and a Source line. One shared parser
@@ -47678,3 +48450,219 @@ class LinterLayerTests(unittest.TestCase):
                           win.review_state_status.text())
         finally:
             win.close()
+
+class CodeGraphTests(unittest.TestCase):
+    """Tier 2 #2 (CodeRabbit Tier 2, 2026-11-11): code graph,
+    light edition. The repo map (repomap.py) already renders the
+    static half — classes, functions, ranked by references. This
+    is the queryable half: where a symbol is defined, who uses
+    it, what a file is connected to — asked through the
+    code_graph read tool during the HOMEWORK pass instead of
+    guessed. Stdlib ast only, Python files only, names not
+    resolved references, one hop only."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "a.py").write_text(
+            "from b import helper\n\n\n"
+            "def run_turn():\n    return helper()\n\n\n"
+            "class Worker:\n    def start(self):\n        return run_turn()\n",
+            encoding="utf-8")
+        (self.root / "b.py").write_text(
+            "import os\n\n\n"
+            "def helper():\n    return os.getcwd()\n",
+            encoding="utf-8")
+        (self.root / "c.py").write_text(
+            "from a import run_turn\n\n\n"
+            "def drive():\n    return run_turn()\n",
+            encoding="utf-8")
+        (self.root / "d.py").write_text(
+            "def broken(:\n", encoding="utf-8")
+        (self.root / "e.js").write_text(
+            "function helper() { return 1; }\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _graph(self):
+        from forge import codegraph as cg_mod
+        return cg_mod.build_graph(self.root)
+
+    # -- the graph ---------------------------------------------------------------
+
+    def test_definitions_indexed_qualified_and_short(self):
+        from forge import codegraph as cg_mod
+        graph = self._graph()
+        self.assertEqual(graph["files_scanned"], 3)
+        self.assertEqual(graph["skipped"], 1)
+        hits = cg_mod.find_symbol(graph, "run_turn")
+        self.assertEqual(hits, [("a.py", 4, "function", "run_turn")])
+        hits = cg_mod.find_symbol(graph, "Worker.start")
+        self.assertEqual(hits, [("a.py", 9, "method", "Worker.start")])
+        # The short name finds the method too.
+        hits = cg_mod.find_symbol(graph, "start")
+        self.assertEqual(hits, [("a.py", 9, "method", "Worker.start")])
+        self.assertEqual(cg_mod.find_symbol(graph, "nope"), [])
+        # The JS file is invisible to the graph.
+        self.assertNotIn("e.js", graph["files"])
+
+    def test_used_by_lists_other_files_only(self):
+        from forge import codegraph as cg_mod
+        graph = self._graph()
+        # c.py calls run_turn; a.py defines it and calls it from
+        # Worker.start, but a file is not its own user.
+        self.assertEqual(cg_mod.used_by(graph, "run_turn"), ["c.py"])
+        # a.py imports helper from b.py, so a.py uses it.
+        self.assertEqual(cg_mod.used_by(graph, "helper"), ["a.py"])
+        self.assertEqual(cg_mod.used_by(graph, "Worker"), [])
+        self.assertEqual(cg_mod.used_by(graph, "nope"), [])
+
+    def test_related_files_both_directions(self):
+        from forge import codegraph as cg_mod
+        graph = self._graph()
+        rel = cg_mod.related_files(graph, "a.py")
+        self.assertEqual(rel["imports"], ["b.py"])
+        self.assertEqual(rel["imported_by"], ["c.py"])
+        rel = cg_mod.related_files(graph, "b.py")
+        # os is stdlib, not a project file — no import edge.
+        self.assertEqual(rel["imports"], [])
+        self.assertEqual(rel["imported_by"], ["a.py"])
+        self.assertEqual(cg_mod.related_files(graph, "nope.py"),
+                         {"imports": [], "imported_by": []})
+
+    def test_graph_is_cached_and_rebuilds_on_change(self):
+        from forge import codegraph as cg_mod
+        first = self._graph()
+        second = self._graph()
+        self.assertIs(first, second)
+        (self.root / "c.py").write_text(
+            "from a import run_turn\n\n\n"
+            "def drive():\n    return run_turn()\n\n\n"
+            "def extra():\n    return 1\n",
+            encoding="utf-8")
+        third = self._graph()
+        self.assertIsNot(first, third)
+        self.assertEqual(
+            cg_mod.find_symbol(third, "extra"),
+            [("c.py", 8, "function", "extra")])
+
+    def test_symbols_per_file_are_capped(self):
+        from forge import codegraph as cg_mod
+        many = "\n".join(f"def f{i}():\n    return {i}\n"
+                         for i in range(105))
+        (self.root / "big.py").write_text(many, encoding="utf-8")
+        graph = self._graph()
+        self.assertEqual(len(graph["files"]["big.py"]["defines"]),
+                         cg_mod.MAX_SYMBOLS_PER_FILE)
+
+    def test_answer_text_shapes(self):
+        from forge import codegraph as cg_mod
+        graph = self._graph()
+        out = cg_mod.answer(graph, "find", "run_turn")
+        self.assertIn("'run_turn' is defined in:", out)
+        self.assertIn("- a.py:4 (function)", out)
+        out = cg_mod.answer(graph, "find", "nope")
+        self.assertIn("No definition of 'nope' found", out)
+        out = cg_mod.answer(graph, "used_by", "run_turn")
+        self.assertIn("'run_turn' is used in:", out)
+        self.assertIn("- c.py", out)
+        out = cg_mod.answer(graph, "related", "a.py")
+        self.assertIn("Files related to 'a.py':", out)
+        self.assertIn("- b.py (imported by it)", out)
+        self.assertIn("- c.py (imports it)", out)
+        self.assertIn("unknown action",
+                      cg_mod.answer(graph, "explode", "x"))
+        self.assertIn("no target given",
+                      cg_mod.answer(graph, "find", "  "))
+        # The skipped file is named honestly.
+        self.assertIn("could not be parsed",
+                      cg_mod.answer(graph, "find", "run_turn"))
+
+    # -- the tool ------------------------------------------------------------------
+
+    def test_code_graph_tool_find(self):
+        from forge.tools import execute_tool
+        out = execute_tool("code_graph",
+                           {"action": "find", "target": "helper"},
+                           str(self.root))
+        self.assertIn("- b.py:4 (function)", out)
+
+    def test_code_graph_tool_related_and_used_by(self):
+        from forge.tools import execute_tool
+        out = execute_tool("code_graph",
+                           {"action": "related", "target": "c.py"},
+                           str(self.root))
+        self.assertIn("- a.py (imported by it)", out)
+        out = execute_tool("code_graph",
+                           {"action": "used_by",
+                            "target": "run_turn"},
+                           str(self.root))
+        self.assertIn("- c.py", out)
+
+    def test_code_graph_tool_validation(self):
+        from forge.tools import validate_tool_args
+        self.assertIsNone(validate_tool_args(
+            "code_graph", {"action": "find", "target": "x"}))
+        self.assertIn("unknown action", validate_tool_args(
+            "code_graph", {"action": "explode", "target": "x"}))
+        self.assertIn("empty", validate_tool_args(
+            "code_graph", {"action": "find", "target": "  "}))
+        self.assertIn("related", validate_tool_args(
+            "code_graph", {"action": "find", "target": "a/b.py"}))
+
+    def test_code_graph_related_is_jailed_to_the_workspace(self):
+        from forge.tools import execute_tool, ToolError
+        with self.assertRaises(ToolError):
+            execute_tool("code_graph",
+                         {"action": "related",
+                          "target": "../outside.py"},
+                         str(self.root))
+
+    def test_code_graph_is_a_read_tool(self):
+        from forge import permissions as perm_mod
+        self.assertEqual(perm_mod.tool_class("code_graph"), "read")
+        from forge.tools import TOOL_SCHEMAS
+        names = {s["function"]["name"] for s in TOOL_SCHEMAS}
+        self.assertIn("code_graph", names)
+
+    def test_guidance_names_the_tool_in_code_and_review(self):
+        from forge import permissions as perm_mod
+        self.assertIn("code_graph",
+                      perm_mod.MODE_GUIDANCE["code"])
+        self.assertIn("code_graph",
+                      perm_mod.MODE_GUIDANCE["review"])
+        self.assertNotIn("code_graph",
+                         perm_mod.MODE_GUIDANCE["plan"])
+
+    def test_relative_imports_are_edges(self):
+        # `from . import b` — the dominant import style in Forge's
+        # own codebase — names the MODULE in the names list (the
+        # module part is empty). Without this the graph's related
+        # answers were blind for the whole tree (found by hand on
+        # the real tree: repomap showed no importers).
+        import tempfile as _tf
+        from pathlib import Path as _Path
+        from forge import codegraph as cg_mod
+        with _tf.TemporaryDirectory() as td:
+            root = _Path(td)
+            (root / "b.py").write_text(
+                "def helper():\n    return 1\n", encoding="utf-8")
+            (root / "f.py").write_text(
+                "from . import b\n\n\n"
+                "def use_it():\n    return b.helper()\n",
+                encoding="utf-8")
+            (root / "g.py").write_text(
+                "from .b import helper\n\n\n"
+                "def use_it():\n    return helper()\n",
+                encoding="utf-8")
+            graph = cg_mod.build_graph(root)
+            self.assertEqual(
+                cg_mod.related_files(graph, "f.py")["imports"],
+                ["b.py"])
+            self.assertEqual(
+                cg_mod.related_files(graph, "g.py")["imports"],
+                ["b.py"])
+            self.assertEqual(
+                cg_mod.related_files(graph, "b.py")["imported_by"],
+                ["f.py", "g.py"])
