@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-11-11 — LOADED MODEL label fix
+- The bench header stamp that read LOADED MODEL now reads IN RAM (LOCAL). It names the local models sitting in this PC's RAM (from Ollama), not the model running the turn — hovering it says so plainly, and names the dropdown as the model doing the work. Same data, same refresh, same MODELS row.
+
 ## 2026-11-11 — EXAONE rate-limit message fix
 - The rate-limit dialog no longer claims Forge shrank its requests for every provider: that shrink exists only for Groq, whose requests are pre-sized to its recorded 8,000 tokens-per-minute cap. For EXAONE and Gemini the dialog now says plainly that Forge does not know the provider's limit and cannot size its requests to fit it.
 - The dialog names a time window (per-minute / per-day) only when the provider's own error text names it, or when a recorded cap says so. The provider's full error is still kept in the session log. No number is invented for EXAONE — LG publishes none.

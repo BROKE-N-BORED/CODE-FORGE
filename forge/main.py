@@ -15293,8 +15293,20 @@ class ForgeWindow(QMainWindow):
         hl.addLayout(gauge_box)
         hl.addStretch()
         loaded_box = QVBoxLayout()
-        loaded_lab = QLabel("LOADED MODEL"); loaded_lab.setObjectName("section"); loaded_box.addWidget(loaded_lab)
+        # LOADED MODEL rename (owner's report, 2026-11-11): the old
+        # stamp read as "the model running your turn" — it is the
+        # local model(s) sitting in RAM, from Ollama /api/ps, the
+        # same data as the MODELS row. The stamp now says where
+        # the models are, and the tooltip says which model runs
+        # the turn (the dropdown pick). Data and refresh unchanged.
+        loaded_lab = QLabel("IN RAM (LOCAL)"); loaded_lab.setObjectName("section")
+        loaded_lab.setToolTip(
+            "Local models sitting in this PC's RAM right now. "
+            "The model running your turn is the one in the dropdown.")
+        self.loaded_stamp = loaded_lab
+        loaded_box.addWidget(loaded_lab)
         self.loaded_label = QLabel("none"); self.loaded_label.setStyleSheet(f"color:{TOKENS['text_base']};font-weight:700;font-size:12px;"); loaded_box.addWidget(self.loaded_label)
+        self.loaded_label.setToolTip(loaded_lab.toolTip())
         hl.addLayout(loaded_box)
         hl.addSpacing(16)
         self.model_combo = QComboBox(); self.model_combo.setMinimumWidth(200)

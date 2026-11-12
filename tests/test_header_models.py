@@ -192,5 +192,94 @@ class HeaderModelsWindowTests(unittest.TestCase):
         win.hide()
 
 
+class LoadedLabelWindowTests(unittest.TestCase):
+    """LOADED MODEL rename (owner's report, 2026-11-11): the old
+    stamp read as "the model running your turn" while the dropdown
+    held a provider model — it is the local model(s) sitting in
+    RAM, from Ollama /api/ps. The stamp now says where the models
+    are; the tooltip says which model runs the turn. Data and
+    refresh are unchanged — only the words moved."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def test_stamp_says_in_ram_local(self):
+        self.assertEqual(self.win.loaded_stamp.text(), "IN RAM (LOCAL)")
+        self.assertEqual(self.win.loaded_stamp.objectName(), "section")
+
+    def test_value_still_shows_the_resident_local_model(self):
+        win = self.win
+        # The live report's own case: Bonsai resident in RAM while
+        # the dropdown holds a provider model. The value is the
+        # resident local model, short-named — that data is unchanged.
+        win._apply_gauges(_snap(
+            ["eriktonon/bonsai-2-uncensored:2b"],
+            {"eriktonon/bonsai-2-uncensored:2b": 1_000_000_000}))
+        self.assertEqual(win.loaded_label.text(), "bonsai-2-uncensored:2b")
+        # The MODELS row rides the same pass, untouched by the rename.
+        self.assertEqual(win.models_text.text(), "1 · 1.0 GB")
+        win._apply_gauges(_snap())
+        self.assertEqual(win.loaded_label.text(), "none")
+
+    def test_tooltip_explains_the_distinction(self):
+        tip = ("Local models sitting in this PC's RAM right now. "
+               "The model running your turn is the one in the dropdown.")
+        self.assertEqual(self.win.loaded_stamp.toolTip(), tip)
+        self.assertEqual(self.win.loaded_label.toolTip(), tip)
+
+    def test_no_old_stamp_text_remains(self):
+        from PySide6.QtWidgets import QLabel
+        for label in self.win.findChildren(QLabel):
+            self.assertNotEqual(label.text(), "LOADED MODEL")
+
+    def test_new_stamp_geometry_never_overlaps_its_neighbours(self):
+        from PySide6.QtCore import QRect
+        win = self.win
+
+        def global_rect(w):
+            tl = w.mapToGlobal(w.rect().topLeft())
+            return QRect(tl, w.size())
+
+        def header_frame(w):
+            frame = w.parentWidget()
+            while frame is not None and frame.objectName() != "header":
+                frame = frame.parentWidget()
+            return frame
+
+        win._apply_gauges(_snap(
+            ["eriktonon/bonsai-2-uncensored:2b"],
+            {"eriktonon/bonsai-2-uncensored:2b": 1_000_000_000}))
+        try:
+            for width in (1220, 1600):
+                win.resize(width, 820)
+                win.show()
+                self.app.processEvents()
+                frame = header_frame(win.loaded_label)
+                self.assertIsNotNone(frame, "header frame not found")
+                frame_rect = global_rect(frame)
+                for mine in (win.loaded_stamp, win.loaded_label):
+                    mine_rect = global_rect(mine)
+                    self.assertGreater(mine_rect.width(), 0)
+                    for other in (win.ram_text, win.cpu_text, win.ram_bar,
+                                  win.cpu_bar, win.models_text,
+                                  win.model_combo, win.privacy_badge):
+                        self.assertFalse(
+                            mine_rect.intersects(global_rect(other)),
+                            f"{mine.text()} overlaps "
+                            f"{other.objectName() or other!r} at {width}px")
+                    self.assertLessEqual(mine_rect.bottom(), frame_rect.bottom())
+                    self.assertGreaterEqual(mine_rect.top(), frame_rect.top())
+        finally:
+            win.hide()
+
+
 if __name__ == "__main__":
     unittest.main()
