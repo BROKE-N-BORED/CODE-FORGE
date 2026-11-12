@@ -319,6 +319,65 @@ def plan_progress_text(steps: list[str], done: set[int]) -> str:
     return "\n".join(lines)
 
 
+# --- Manus study M3: programmatic recitation ------------------------
+# Manus keeps its plan in recent attention by constantly rewriting a
+# todo.md — and later found its executor spent ~1/3 of all actions on
+# that rewriting, so planning moved off the executor. Forge's version:
+# the PROGRAM recites. While an approved plan executes, the worker
+# appends this block to the OUTGOING request copy on every cycle —
+# built fresh from the live checklist state, at request time only,
+# never written into the stored conversation (so it cannot
+# accumulate, cannot be folded, and leaves M1's stable prefix at the
+# head of the request untouched). Zero model actions are spent on it.
+# The D39 reminder above is the older, coarser cousin: it lands IN
+# the history every few cycles; this block is every cycle and
+# history-free. The header wording differs on purpose so the two can
+# never be confused in a transcript or a test.
+RECITATION_STEP_CAP = 120     # chars per step line in the block
+RECITATION_CRITERIA_CAP = 200  # chars for the Success criteria line
+
+
+def _recitation_clip(text: str, cap: int) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) > cap:
+        return text[:cap - 1] + "…"
+    return text
+
+
+def plan_recitation_text(steps: list[str], done: set[int],
+                         title: str = "", success: str = "") -> str:
+    """The compact plan-state block for one outgoing request
+    (Manus study M3). Pure: same state in, same text out. `done`
+    holds zero-based indices, matching find_step_done's world; the
+    rendered indices are 1-based. Marks match the live checklist
+    and the D39 reminder: ✓ done, → current (the first undone
+    step), · pending. Step text is clipped — unlike the D39
+    reminder, this block rides EVERY cycle, so it stays compact;
+    the plan's own words are otherwise unaltered. The Success
+    criteria line appears only when the plan document has that
+    section (Item C7) — absent section, no line, never an empty
+    one."""
+    steps = [str(s) for s in (steps or [])]
+    if not steps:
+        return ""
+    done = set(done or ())
+    next_idx = next((i for i in range(len(steps)) if i not in done),
+                    len(steps) - 1)
+    head = "[Current plan"
+    if str(title or "").strip():
+        head += f" — {_recitation_clip(title, 80)}"
+    head += f" — step {next_idx + 1} of {len(steps)}]"
+    lines = [head]
+    for i, step in enumerate(steps):
+        mark = "✓" if i in done else ("→" if i == next_idx else "·")
+        lines.append(f"{mark} {i + 1}. "
+                     f"{_recitation_clip(step, RECITATION_STEP_CAP)}")
+    criteria = _recitation_clip(success, RECITATION_CRITERIA_CAP)
+    if criteria:
+        lines.append(f"Success criteria: {criteria}")
+    return "\n".join(lines)
+
+
 def new_plan(steps: list[str], request: str = "", document: str = "") -> dict:
     return {"version": 1,
             "status": "draft",

@@ -319,6 +319,42 @@ def friendly_http_error(code: int, detail: str) -> str | None:
     return None
 
 
+def _strip_thought_signatures(messages):
+    """Gemini thought signatures ride the internal tool-call shape
+    as function.thought_signature so Gemini replays can reattach
+    them — but this client sends its messages to /api/chat
+    verbatim, so the Gemini-only key must not leak into a local
+    request (Groq/EXAONE rebuild their calls from name+args and
+    never see it; only this verbatim path needs the strip).
+    Returns the list unchanged when no call carries one (the
+    common path); otherwise a copy with the key dropped from
+    every function dict. The caller's messages are never mutated
+    (same rule as the images copy in chat_stream)."""
+    out = None
+    for idx, message in enumerate(messages or []):
+        calls = message.get("tool_calls") \
+            if isinstance(message, dict) else None
+        if not calls:
+            continue
+        changed = False
+        new_calls = []
+        for call in calls:
+            fn = (call or {}).get("function") or {}
+            if isinstance(fn, dict) and "thought_signature" in fn:
+                changed = True
+                new_calls.append({
+                    **call,
+                    "function": {k: v for k, v in fn.items()
+                                 if k != "thought_signature"}})
+            else:
+                new_calls.append(call)
+        if changed:
+            if out is None:
+                out = list(messages)
+            out[idx] = {**message, "tool_calls": new_calls}
+    return out if out is not None else messages
+
+
 class OllamaClient:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", timeout: int = 1800):
         self.base_url = base_url.rstrip("/")
@@ -455,7 +491,7 @@ class OllamaClient:
         if images and messages:
             messages = [dict(m) for m in messages]
             messages[-1] = {**messages[-1], "images": images}
-        payload = {"model": model, "messages": messages, "stream": True, "options": options, "tools": tools, "keep_alive": keep_alive}
+        payload = {"model": model, "messages": _strip_thought_signatures(messages), "stream": True, "options": options, "tools": tools, "keep_alive": keep_alive}
         # StartFix: the attempt loop. Attempt 1 is the generation
         # exactly as before; a llama-server start timeout (HTTP 500,
         # Ollama's own wording) raised BEFORE any chunk was yielded
@@ -470,8 +506,17 @@ class OllamaClient:
         while True:
             attempt += 1
             emitted = False
+            # Manus study M1 (stable-prefix discipline): sort_keys makes
+            # the request bytes a pure function of the request's MEANING.
+            # Without it, a message dict rebuilt in a different insertion
+            # order (a history restored from storage, a tool call parsed
+            # back from a server reply) serializes to different bytes for
+            # the same conversation, and the engine's prefix reuse — the
+            # CPU-only box's prefill saving — is lost on bytes that only
+            # differ in key order. JSON object order carries no meaning
+            # for the API, so sorting is free.
             request = urllib.request.Request(
-                self.base_url + "/api/chat", data=json.dumps(payload).encode(),
+                self.base_url + "/api/chat", data=json.dumps(payload, sort_keys=True).encode(),
                 headers={"Content-Type": "application/json"}, method="POST")
             # Sweep R4: with a cancel event, a watch force-closes the
             # live response the moment the event fires, so a stream that

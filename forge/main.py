@@ -57,6 +57,8 @@ from . import templates as templates_mod
 from . import bench as bench_mod
 from . import recipes as recipes_mod
 from . import planning as planning_mod
+from . import fanout as fanout_mod
+from . import handoff as handoff_mod
 from . import exporting as export_mod
 from . import converting as convert_mod
 from . import goldfish as goldfish_mod
@@ -68,6 +70,10 @@ from . import debugger as debugger_mod
 from . import gitpanel as gitpanel_mod
 from . import artifacts as artifacts_mod
 from . import knowledge as knowledge_mod
+from . import learnings as learnings_mod
+from . import guidelines as guidelines_mod
+from . import review_state as review_state_mod
+from . import gate_checks as gate_checks_mod
 from . import diffview as diff_mod
 from . import snapshots as snap_mod
 from . import checkpoints as ckpt_mod
@@ -80,12 +86,14 @@ from . import designshell_bridge as dsbridge_mod
 from . import council as council_mod
 from . import seats as seats_mod
 from . import monitor as monitor_mod
+from . import proposals as proposals_mod
 from . import timeline as timeline_mod
 from . import maintenance as maint_mod
 from . import providers as providers_mod
 from . import modelfit as modelfit_mod
 from . import modes as modes_mod
 from . import self_maintenance as self_maint_mod
+from . import inbox as inbox_mod
 from . import testcadence as cadence_mod
 from . import testview as testview_mod
 from . import design_canvas as design_canvas_mod
@@ -221,6 +229,21 @@ TOKENS = {
     "padding_menu_item": "7px 22px 7px 12px",
 }
 
+# T1 (GUIFX task list, 2026-11-11): every button selector in the
+# template also carries :pressed (a deeper surface than its hover)
+# and :disabled (flattened to surface_input, dimmed border_input
+# rim, text_muted label) rules — before T1 there were none anywhere
+# in the tree, so controls that went dead during a run still looked
+# live. Variants whose own rule overrides background/border/color
+# (#primary, #nav, #navActive, #accordion, and #topbarBtn via its
+# :checked rule) carry their own state rules, because the base
+# QPushButton state rules would lose to their #id specificity.
+# T2 (GUIFX task list, 2026-11-11): Forge had zero QScrollBar rules,
+# so every scrollable surface showed the platform-default bar. The
+# QScrollBar family in the template below styles them all from
+# existing tokens — 10px thin bars, dark track, warm thumb with
+# hover/pressed states, arrow buttons hidden (zero-sized). No new
+# tokens; dimensions stay literal px like the splitter handle.
 _STYLE_TEMPLATE = Template("""
 QWidget { background:$surface_base; color:$text_base; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }
 QMainWindow { background:$surface_base; }
@@ -235,11 +258,19 @@ QLabel#section { color:$text_section; font-size:10px; font-weight:700; letter-sp
 QLabel#big { font-size:15px; font-weight:700; color:$text_big; }
 QPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 $surface_button_top, stop:1 $surface_button_bottom); border:1px solid $border_button; border-radius:$radius_control; padding:$padding_button; color:$text_button; }
 QPushButton:hover { background:$surface_button_hover; border-color:$rim_hover; }
+QPushButton:pressed { background:$surface_glass_bottom; }
+QPushButton:disabled { background:$surface_input; border-color:$border_input; color:$text_muted; }
 QPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 $accent_primary_top, stop:1 $accent_primary_bottom); border-color:$accent_primary_top; color:$text_white; font-weight:700; }
 QPushButton#primary:hover { background:$accent_primary_top; }
+QPushButton#primary:pressed { background:$accent_primary_bottom; }
+QPushButton#primary:disabled { background:$surface_input; border-color:$border_input; color:$text_muted; }
 QPushButton#nav { text-align:left; background:transparent; border:0; padding:$padding_nav; color:$text_nav; }
 QPushButton#nav:hover { background:$surface_nav_hover; color:$text_white; }
+QPushButton#nav:pressed { background:$surface_nav_active; }
+QPushButton#nav:disabled { color:$text_muted; }
 QPushButton#navActive { text-align:left; background:$surface_nav_active; border:1px solid $accent_primary_bottom; border-radius:$radius_control; padding:$padding_nav; color:$text_amber_light; }
+QPushButton#navActive:pressed { background:$surface_glass_bottom; }
+QPushButton#navActive:disabled { background:$surface_input; border-color:$border_input; color:$text_muted; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:$surface_input; border:1px solid $border_input; border-radius:$radius_control; padding:$padding_input; selection-background-color:$accent_primary_bottom; }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:$rim_focus; }
 QTextBrowser { background:$surface_chat; border:1px solid $rim_chat; border-radius:$radius_card; padding:$padding_chat; }
@@ -250,10 +281,28 @@ QProgressBar#hot::chunk { background:$progress_hot; }
 QProgressBar#crit::chunk { background:$progress_crit; }
 QStatusBar { background:$surface_glass_bottom; color:$text_muted; }
 QSplitter::handle { background:$surface_splitter; width:1px; }
+QScrollBar:vertical { background:$surface_input; width:10px; margin:0px; border:0; }
+QScrollBar:horizontal { background:$surface_input; height:10px; margin:0px; border:0; }
+QScrollBar::handle:vertical { background:$surface_button_top; border:1px solid $border_button; border-radius:5px; min-height:20px; }
+QScrollBar::handle:horizontal { background:$surface_button_top; border:1px solid $border_button; border-radius:5px; min-width:20px; }
+QScrollBar::handle:vertical:hover { background:$surface_button_hover; }
+QScrollBar::handle:horizontal:hover { background:$surface_button_hover; }
+QScrollBar::handle:vertical:pressed { background:$surface_button_bottom; }
+QScrollBar::handle:horizontal:pressed { background:$surface_button_bottom; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; background:transparent; border:0; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }
+QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }
+QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }
 QPushButton#accordion { text-align:left; background:transparent; border:0; padding:$padding_accordion; color:$text_section; font-size:10px; font-weight:700; letter-spacing:1.6px; }
 QPushButton#accordion:hover { color:$text_accordion_hover; background:transparent; }
+QPushButton#accordion:pressed { background:$surface_nav_hover; }
+QPushButton#accordion:disabled { color:$text_muted; }
 QPushButton#topbarBtn { padding:$padding_topbar; }
 QPushButton#topbarBtn:checked { background:$surface_topbar_checked; border-color:$accent_primary_bottom; color:$text_amber_light; }
+QPushButton#topbarBtn:pressed { background:$surface_glass_bottom; }
+QPushButton#topbarBtn:disabled { background:$surface_input; border-color:$border_input; color:$text_muted; }
 QScrollArea#historyScroll { background:$surface_glass_bottom; border:0; }
 QWidget#historyContent { background:$surface_glass_bottom; }
 QMenu { background:$surface_menu; border:1px solid $border_menu; }
@@ -358,10 +407,20 @@ class WindowHeader(QFrame):
             self.overflow_btn = QToolButton(self)
             self.overflow_btn.setText("⋯")
             self.overflow_btn.setToolTip("More actions")
+            # T1 (GUIFX task list, 2026-11-11): the app's one
+            # QToolButton is styled here, not by STYLE, so its
+            # :pressed / :disabled states live in this sheet, built
+            # from the same TOKENS values the QPushButton states use.
             self.overflow_btn.setStyleSheet(
-                f"background:transparent; border:1px solid "
-                f"{TOKENS['border_button']}; border-radius:"
-                f"{TOKENS['radius_control']}; padding:2px 8px;")
+                f"QToolButton {{ background:transparent; "
+                f"border:1px solid {TOKENS['border_button']}; "
+                f"border-radius:{TOKENS['radius_control']}; "
+                f"padding:2px 8px; }}"
+                f"QToolButton:pressed {{ background:"
+                f"{TOKENS['surface_glass_bottom']}; }}"
+                f"QToolButton:disabled {{ color:"
+                f"{TOKENS['text_muted']}; border-color:"
+                f"{TOKENS['border_input']}; }}")
             self.overflow_btn.setPopupMode(QToolButton.InstantPopup)
             self.overflow_btn.setMenu(self.overflow_menu)
             lay.addWidget(self.overflow_btn)
@@ -1479,7 +1538,8 @@ class CustomizeDialog(QDialog):
 
     def __init__(self, parent, skills, plugins, disabled_skills, disabled_plugins, config, rules=None,
                  skribe_writes=True, project_local=None, on_house=None,
-                 tools=None, disabled_tools=None, goldfish_review=True):
+                 tools=None, disabled_tools=None, goldfish_review=True,
+                 offer_save_run_as_skill=False):
         super().__init__(parent)
         self.setWindowTitle("Customize — skills · plugins · connectors")
         self.setMinimumWidth(600)
@@ -1570,6 +1630,16 @@ class CustomizeDialog(QDialog):
                                "round. Turning the goldfish skill itself off above also "
                                "disables the pass.")
         goldfish_note.setObjectName("muted"); goldfish_note.setWordWrap(True); sk_lay.addWidget(goldfish_note)
+        # Manus study M10: offer to save a finished run as a skill —
+        # default OFF, packaged like the Goldfish toggle above (a
+        # checkbox + this accessor; the values() tuple keeps its
+        # shape). The offer fires only after a plan completes, and
+        # the draft lands DISABLED until the owner enables it.
+        self._save_skill_box = QCheckBox("Offer to save a finished run as a skill — after a plan completes, ask whether to draft it as a new skill")
+        self._save_skill_box.setChecked(bool(offer_save_run_as_skill))
+        sk_lay.addWidget(self._save_skill_box)
+        save_skill_note = QLabel("The draft is built from the run's own record — goal, steps, files touched — with no extra generation, and it starts disabled. Declining writes nothing. Off = nothing changes at all: no offer, no draft, no extra generation.")
+        save_skill_note.setObjectName("muted"); save_skill_note.setWordWrap(True); sk_lay.addWidget(save_skill_note)
         sk_lay.addStretch()
         tabs.addTab(skills_page, "Skills")
         # plugins + connectors
@@ -1965,6 +2035,12 @@ class CustomizeDialog(QDialog):
         ForgeWindow.open_customize after the dialog closes — the
         values() tuple keeps its long-standing 6-element shape."""
         return bool(self._goldfish_box.isChecked())
+
+    def save_skill_offer_on(self):
+        """Manus study M10: the save-run-as-skill toggle's state.
+        Read by ForgeWindow.open_customize after the dialog closes
+        — the values() tuple keeps its shape, like goldfish_on()."""
+        return bool(self._save_skill_box.isChecked())
 
     def _secret_widgets(self, key, edit):
         """Stored-state label + Clear button for one secret field
@@ -2623,6 +2699,30 @@ class SettingsDialog(QDialog):
         self.light_machine.setChecked(
             bool(settings.get("light_machine", False)))
         form.addRow("Light machine", self.light_machine)
+        # Review voice (CR5, 2026-11-11): how much a Review turn
+        # says and how hard it pushes. Default Chill — today's
+        # review exactly. Quiet reports Critical/Major only;
+        # Assertive reports everything including nitpicks.
+        self.review_profile = QComboBox()
+        self.review_profile.addItem("Quiet — Critical and Major only",
+                                    "quiet")
+        self.review_profile.addItem("Chill — the usual review",
+                                    "chill")
+        self.review_profile.addItem(
+            "Assertive — everything, including nitpicks", "assertive")
+        _voice_idx = self.review_profile.findData(
+            perm_mod.normalize_review_profile(
+                settings.get("review_profile", "chill")))
+        if _voice_idx >= 0:
+            self.review_profile.setCurrentIndex(_voice_idx)
+        form.addRow("Review voice", self.review_profile)
+        form.addRow("", caption("Review voice — the voice Review "
+                                "turns use. The finding format, the "
+                                "Walkthrough and the severity scale "
+                                "never change, only how much the "
+                                "review says and how hard it pushes. "
+                                "The Review room has the same switch, "
+                                "and both write this one setting."))
         # Design Shell bridge (B1, 2026-11-11): where the shell is
         # installed. Blank = auto (FORGE_DESIGN_SHELL, then
         # ~/design-shell) — the bridge validates whatever it finds
@@ -2719,6 +2819,8 @@ class SettingsDialog(QDialog):
                 "forge_browser_engine": str(
                     self.forge_browser_engine.currentData() or "auto"),
                 "light_machine": self.light_machine.isChecked(),
+                "review_profile": str(
+                    self.review_profile.currentData() or "chill"),
                 "design_shell_path": self.design_shell_path.text().strip(),
                 "density": str(self.density.currentData() or "comfortable")}
 
@@ -7523,10 +7625,16 @@ class ReviewWindow(ModeWindow):
     """The Review room as half of a working loop (2026-11-10
     upgrade): focus picks above the composer load the review's
     framing in one click, and the Reviews tab parses the shown
-    review's Findings into a list with a "Fix this finding"
+    review's Findings into a list with a "Fix with Driver"
     button — the fix runs as a Code turn on the bench, scoped
-    to that one finding. Findings parse lazily, from the
-    selected review only."""
+    to that one finding, and the request is recorded in the
+    review under ## Fix requests (CR9), so the list shows which
+    findings already have a fix on the way. Findings parse
+    lazily, from the selected review only. CR3: the tab's viewer
+    shows the full document, so a report's Walkthrough section
+    (CR3) reads at the top exactly as filed; the Findings
+    heading additionally carries the shown review's severity
+    counts."""
 
     FOCUSES = ("Correctness", "Safety", "Performance", "All three")
 
@@ -7534,8 +7642,12 @@ class ReviewWindow(ModeWindow):
         # Set before super().__init__: a document shown during
         # construction already fires _on_doc_shown.
         self._current_review_name = ""
+        self._current_review_path = ""
         self._finding_lines = []
+        self._finding_drivers = []
         self.findings_list = None
+        self.findings_label = None
+        self.teach_btn = None
         super().__init__(owner, key)
         focus_row = QHBoxLayout()
         focus_cap = QLabel("Focus:")
@@ -7551,6 +7663,33 @@ class ReviewWindow(ModeWindow):
                 lambda _checked=False, n=name: self._load_focus(n))
             focus_row.addWidget(btn)
             self.focus_btns[name] = btn
+        # CR5 (Review voices): the same switch as Settings →
+        # Review voice, in the room where reviews happen. It
+        # writes the one settings key ("review_profile") live, so
+        # the next Review turn uses the picked voice; Settings
+        # shows the same value. An owner without a settings dict
+        # (test stubs) keeps the choice local to the room.
+        voice_cap = QLabel("Voice:")
+        voice_cap.setObjectName("muted")
+        focus_row.addWidget(voice_cap)
+        self.voice_combo = QComboBox()
+        self.voice_combo.addItem("Quiet", "quiet")
+        self.voice_combo.addItem("Chill", "chill")
+        self.voice_combo.addItem("Assertive", "assertive")
+        self.voice_combo.setToolTip(
+            "How much a Review turn says and how hard it pushes — "
+            "Quiet reports Critical and Major only, Chill is the "
+            "usual review, Assertive reports everything including "
+            "nitpicks. The finding format never changes.")
+        _voice_idx = self.voice_combo.findData(
+            perm_mod.normalize_review_profile(
+                (getattr(self._owner, "settings", None) or {}).get(
+                    "review_profile", "chill")))
+        if _voice_idx >= 0:
+            self.voice_combo.setCurrentIndex(_voice_idx)
+        self.voice_combo.currentIndexChanged.connect(
+            self._on_voice_changed)
+        focus_row.addWidget(self.voice_combo)
         focus_row.addStretch(1)
         self.session_lay.insertLayout(1, focus_row)
         page = self._doc_pages.get("Reviews")
@@ -7558,15 +7697,59 @@ class ReviewWindow(ModeWindow):
             col = QWidget()
             col_lay = QVBoxLayout(col)
             col_lay.setContentsMargins(0, 0, 0, 0); col_lay.setSpacing(4)
-            col_lay.addWidget(QLabel("Findings"))
+            # CR3: the heading doubles as the counts surface —
+            # _on_doc_shown rewrites it with the shown review's
+            # severity counts ('Findings — 1 Critical · …'), so
+            # no new panel is bolted on for them.
+            self.findings_label = QLabel("Findings")
+            col_lay.addWidget(self.findings_label)
             self.findings_list = QListWidget()
+            # CR9: double-clicking a finding runs its Fix with
+            # Driver action — the list item itself carries the
+            # action, not just the button below it.
+            self.findings_list.itemDoubleClicked.connect(
+                lambda _item: self.fix_selected_finding())
             col_lay.addWidget(self.findings_list, 1)
-            self.fix_btn = QPushButton("Fix this finding")
+            self.fix_btn = QPushButton("Fix with Driver")
             self.fix_btn.setToolTip(
-                "Run a Code turn scoped to the selected finding — "
-                "smallest change, then verify")
+                "Run a Code turn on the selected finding, using "
+                "its Prompt for the Driver — smallest change, "
+                "then verify. The request is recorded in the "
+                "review under Fix requests.")
             self.fix_btn.clicked.connect(self.fix_selected_finding)
             col_lay.addWidget(self.fix_btn)
+            self.teach_btn = QPushButton("Not a finding — teach")
+            self.teach_btn.setToolTip(
+                "Dismiss the selected finding with a reason — the "
+                "reason is filed as a learning and future reviews "
+                "apply it instead of re-raising this")
+            self.teach_btn.clicked.connect(self.teach_from_finding)
+            col_lay.addWidget(self.teach_btn)
+            # CR6 (Incremental review): the room remembers what
+            # was reviewed. "Mark reviewed" snapshots the project
+            # as reviewed; "Review what's new" loads only what
+            # changed since then into the composer. Nothing marks
+            # itself — the owner says when a review is done.
+            self.incremental_btn = QPushButton("Review what's new")
+            self.incremental_btn.setToolTip(
+                "Load the composer with an incremental review — "
+                "only the files changed since the last review you "
+                "marked reviewed.")
+            self.incremental_btn.clicked.connect(
+                self._review_whats_new)
+            col_lay.addWidget(self.incremental_btn)
+            self.mark_reviewed_btn = QPushButton("Mark reviewed")
+            self.mark_reviewed_btn.setToolTip(
+                "Record the project as reviewed as it stands — "
+                "future 'Review what's new' lists changes from "
+                "here.")
+            self.mark_reviewed_btn.clicked.connect(
+                self._mark_reviewed)
+            col_lay.addWidget(self.mark_reviewed_btn)
+            self.review_state_status = QLabel("")
+            self.review_state_status.setObjectName("muted")
+            self.review_state_status.setWordWrap(True)
+            col_lay.addWidget(self.review_state_status)
             col.setMaximumWidth(300)
             page.layout().addWidget(col)
             listing, _viewer, paths = self._doc_tabs["Reviews"]
@@ -7578,24 +7761,136 @@ class ReviewWindow(ModeWindow):
         self.composer.setPlainText(f"Review focus: {name}. ")
         self.composer.setFocus()
 
+    def _on_voice_changed(self, _index):
+        # CR5: the room's Voice switch writes the one settings
+        # key live and persists it when the owner can save — the
+        # next Review turn reads it in build_system_prompt.
+        voice = str(self.voice_combo.currentData() or "chill")
+        settings = getattr(self._owner, "settings", None)
+        if isinstance(settings, dict):
+            settings["review_profile"] = voice
+            save = getattr(self._owner, "save_settings", None)
+            if callable(save):
+                try:
+                    save()
+                except Exception:
+                    pass
+
+    def _review_workspace(self):
+        # CR6: the room's project — the mode window's workspace
+        # when set, else the owner's.
+        ws = getattr(self, "_workspace", "") or ""
+        if not ws:
+            ws = getattr(self._owner, "workspace", "") or ""
+        return str(ws)
+
+    def _review_whats_new(self):
+        # CR6: load an incremental review into the composer — the
+        # program computes the scope (files changed since the
+        # last marked review), the model reviews only those.
+        ws = self._review_workspace()
+        if not ws:
+            self.review_state_status.setText(
+                "No project open — open one first.")
+            return
+        try:
+            result = review_state_mod.changed_since(ws)
+        except Exception:
+            self.review_state_status.setText(
+                "Could not work out what changed — run a full "
+                "review instead.")
+            return
+        if not result["ever"]:
+            self.review_state_status.setText(
+                "No review baseline yet — mark a review done with "
+                "'Mark reviewed' first, then this lists what's new.")
+            return
+        changed = result["changed"]
+        removed = result["removed"]
+        if not changed and not removed:
+            when = (result["last_review"] or "")[:10]
+            self.review_state_status.setText(
+                f"Nothing new since the last review"
+                + (f" ({when})." if when else "."))
+            return
+        parts = [f"Incremental review since "
+                 f"{(result['last_review'] or '')[:10]}. Review ONLY "
+                 f"these files:"]
+        parts.extend(f"- {rel}" for rel in changed)
+        if result["changed_total"] > len(changed):
+            parts.append(
+                f"+{result['changed_total'] - len(changed)} more "
+                f"changed files (see the full list in the project).")
+        if removed:
+            parts.append("Removed since the last review:")
+            parts.extend(f"- {rel}" for rel in removed)
+        parts.append("Do not re-review unchanged files.")
+        self.composer.setPlainText("\n".join(parts))
+        self.composer.setFocus()
+        total = result["changed_total"] + len(removed)
+        self.review_state_status.setText(
+            f"{total} file(s) changed since the last review — "
+            f"loaded into the composer.")
+
+    def _mark_reviewed(self):
+        # CR6: the owner says a review is done — snapshot the
+        # project as reviewed from here on.
+        ws = self._review_workspace()
+        if not ws:
+            self.review_state_status.setText(
+                "No project open — open one first.")
+            return
+        state = review_state_mod.record_review(ws)
+        count = len(state.get("files", {}))
+        self.review_state_status.setText(
+            f"Marked reviewed — {count} file(s) recorded. Future "
+            f"'Review what's new' lists changes from here.")
+
     def _on_doc_shown(self, tab_label, path):
         if tab_label != "Reviews" or self.findings_list is None:
             return
         self._current_review_name = Path(path).name
+        self._current_review_path = str(path)
         viewer = self._doc_tabs["Reviews"][1]
-        body = modes_mod.section_body(viewer.toPlainText(), "Findings")
-        lines = []
-        if body:
-            for raw in body.splitlines():
-                stripped = raw.strip()
-                stripped = re.sub(r"^[-*]\s+", "", stripped)
-                stripped = re.sub(r"^\d+[.)]\s+", "", stripped)
-                if stripped:
-                    lines.append(stripped)
-        self._finding_lines = lines
+        full_text = viewer.toPlainText()
+        body = modes_mod.section_body(full_text, "Findings")
+        # CR2 + CR7: the ONE shared finding parser (forge/modes.py)
+        # decides what a finding line is and what it carries, and
+        # pairs each finding with its "Driver:" line when the
+        # report has one. _finding_lines keeps the full cleaned
+        # line — the exact text the Fix/Teach flows act on;
+        # _finding_drivers keeps the paired driver prompt (None
+        # for reports written before CR7).
+        parsed_lines = modes_mod.parse_findings_body(body) if body else []
+        self._finding_lines = [p["text"] for p in parsed_lines]
+        self._finding_drivers = [p.get("driver") for p in parsed_lines]
         self.findings_list.clear()
-        for line in lines:
-            self.findings_list.addItem(QListWidgetItem(line))
+        for parsed in parsed_lines:
+            display = modes_mod.finding_display(parsed)
+            tip_parts = []
+            if parsed.get("source"):
+                tip_parts.append(f"Source: {parsed['source']}")
+            if parsed.get("driver"):
+                tip_parts.append(f"Driver: {parsed['driver']}")
+            # CR9: a finding with a recorded fix request shows it
+            # in the list, so the owner sees what is already on
+            # its way and what is still open.
+            requested = modes_mod.fix_requested_for(
+                full_text, parsed["text"])
+            if requested:
+                display += " ↻ fix requested"
+                tip_parts.append(f"Fix requested {requested}")
+            item = QListWidgetItem(display)
+            item.setToolTip("\n".join(tip_parts))
+            self.findings_list.addItem(item)
+        # CR3: severity counts on the existing Findings heading —
+        # legacy findings count under their mapped severities
+        # (parse_finding already mapped them). A report whose
+        # findings carry no severity keeps the plain heading.
+        if self.findings_label is not None:
+            counts = modes_mod.finding_counts_text(parsed_lines)
+            self.findings_label.setText(
+                f"Findings — {counts}" if counts else "Findings")
 
     def fix_selected_finding(self):
         row = self.findings_list.currentRow() \
@@ -7606,18 +7901,101 @@ class ReviewWindow(ModeWindow):
                 "runs as a Code turn.")
             return
         line = self._finding_lines[row]
-        prompt = (
-            f"Fix this review finding: {line} "
-            f"(from review file {self._current_review_name}). "
-            "Read the finding's file first, make the smallest "
-            "change that resolves it, and verify.")
+        # CR7: when the report carries a "Prompt for the Driver"
+        # for this finding, the fix turn runs on THAT prompt — it
+        # names the file, the exact change and the check — with
+        # the finding line kept as context. Reports without one
+        # fix exactly as before.
+        driver = None
+        if 0 <= row < len(getattr(self, "_finding_drivers", [])):
+            driver = self._finding_drivers[row]
+        if driver:
+            prompt = (
+                f"{driver}\n\n(Finding from review file "
+                f"{self._current_review_name}: {line})")
+        else:
+            prompt = (
+                f"Fix this review finding: {line} "
+                f"(from review file {self._current_review_name}). "
+                "Read the finding's file first, make the smallest "
+                "change that resolves it, and verify.")
         ok, why = self._bench_turn("Code", prompt)
         if not ok:
             self.composer_status.setText(
                 "The bench is not available to run the fix.")
             return
+        # CR9: the fix request is recorded in the review itself,
+        # under ## Fix requests — the review carries its own fix
+        # history. The turn still went out even if the record
+        # cannot be written; the status line says so plainly.
+        recorded = False
+        updated = None
+        review_path = getattr(self, "_current_review_path", "")
+        if review_path:
+            try:
+                from datetime import datetime
+                current = Path(review_path).read_text(
+                    encoding="utf-8", errors="replace")
+                updated = modes_mod.record_fix_request(
+                    current,
+                    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    line, prompt)
+                Path(review_path).write_text(updated,
+                                             encoding="utf-8")
+                recorded = True
+            except Exception:
+                recorded = False
+        if recorded:
+            # The viewer still holds the pre-write text — refresh
+            # it first, so the re-rendered list shows the new
+            # "fix requested" mark on this finding.
+            viewer = self._doc_tabs["Reviews"][1]
+            viewer.setPlainText(updated)
+            self._on_doc_shown("Reviews", Path(review_path))
+            self.composer_status.setText(
+                "Fix sent as a Code turn — recorded in the review "
+                "under Fix requests.")
+        else:
+            self.composer_status.setText(
+                "Fix sent as a Code turn — but the request could "
+                "not be recorded in the review file.")
+
+    def teach_from_finding(self):
+        """CR1 (Learnings loop): dismiss the selected finding with
+        a reason, filed as a project learning (forge/learnings.py)
+        that future Review turns carry — the finding stops coming
+        back for that reason. The owner's words only: no model is
+        involved, and nothing is written on cancel or empty."""
+        row = self.findings_list.currentRow() \
+            if self.findings_list is not None else -1
+        if not (0 <= row < len(self._finding_lines)):
+            self.composer_status.setText(
+                "Pick a finding from the list first — teaching "
+                "files a learning from it.")
+            return
+        if not self._workspace:
+            self.composer_status.setText(
+                "No project is open — nothing was saved.")
+            return
+        line = self._finding_lines[row]
+        reason, ok = QInputDialog.getText(
+            self, "Teach Forge",
+            f"Why is this not a finding? This becomes a learning "
+            f"for future reviews:\n{line}")
+        if not ok or not reason.strip():
+            self.composer_status.setText(
+                "Nothing was saved — no learning filed.")
+            return
+        try:
+            learnings_mod.add_learning(
+                self._workspace, reason, scope="project",
+                source=self._current_review_name)
+        except Exception as exc:
+            self.composer_status.setText(
+                f"Learning not saved: {exc}")
+            return
         self.composer_status.setText(
-            "Fix sent as a Code turn — it runs on the bench.")
+            "Learning saved — future reviews will apply it.")
 
 
 class AskWindow(ModeWindow):
@@ -8757,6 +9135,20 @@ class PlanWindow(QWidget):
             "draft plan (plan + named files only, no conversation) "
             "and its findings land here before you approve.")
         glay.addWidget(self.goldfish_view)
+        # CR8: the pre-merge checks, rendered under the Goldfish
+        # review in the same gate — the owner's plain-words
+        # checks from .forge/gate-checks.md, each shown PASS /
+        # FAIL / CAN'T CHECK. Advisory only, like the Goldfish
+        # view: this view holds no control and nothing reads it
+        # back — Approve stays the owner's call, a failed check
+        # never blocks it.
+        self.gate_checks_view = QPlainTextEdit()
+        self.gate_checks_view.setReadOnly(True)
+        self.gate_checks_view.setMaximumHeight(110)
+        self.gate_checks_view.setPlaceholderText(
+            "Gate checks — plain-words checks from "
+            ".forge/gate-checks.md, run here before you approve.")
+        glay.addWidget(self.gate_checks_view)
         # Item #58: the plan DOCUMENT itself — the full text the
         # checklist was extracted from (goal, context, contents,
         # risks, assumptions ride with the steps now, so the gate
@@ -8835,6 +9227,25 @@ class PlanWindow(QWidget):
         if action is not None:
             action("comment")
 
+    def refresh_gate_checks(self):
+        """CR8: (re)run the owner's plain-words pre-merge checks
+        from .forge/gate-checks.md and render each one PASS /
+        FAIL / CAN'T CHECK in the gate's checks view. Runs when
+        a plan draft lands at the gate (ForgeWindow._plan_render
+        calls it) and on set_project; a project with no checks
+        file shows the pointer to where the checks live. Never
+        raises — a failed read renders as a line, not a crash."""
+        view = getattr(self, "gate_checks_view", None)
+        if view is None:
+            return
+        try:
+            view.setPlainText(
+                gate_checks_mod.render_text(self._workspace))
+        except Exception:
+            view.setPlainText(
+                "Gate checks unreadable — check "
+                ".forge/gate-checks.md by hand.")
+
     def refresh_plans(self):
         """(Re)list the project's filed plans from the artifact
         index. Runs on set_project; an empty project is simply
@@ -8900,6 +9311,7 @@ class PlanWindow(QWidget):
         self.setWindowTitle(f"Plan — {name}" if name else "Plan — Code Forge")
         self.header.title_label.setText(self.windowTitle())
         self.refresh_plans()
+        self.refresh_gate_checks()
 
 
 class ArtifactsWindow(QWidget):
@@ -9007,6 +9419,43 @@ class ArtifactsWindow(QWidget):
         knowledge_row.addWidget(self.knowledge_status, 1)
         lay.addLayout(knowledge_row)
         self._knowledge_drafts: list[dict] = []
+        # Project Guidelines gate (CR4, 2026-11-11): standard
+        # instruction files found in the project (AGENTS.md,
+        # CLAUDE.md, .cursorrules, copilot-instructions.md) wait
+        # here until the owner approves them. Nothing applies
+        # unapproved — a guideline file that arrived with a cloned
+        # repo must never reach the agent on its own. Selecting
+        # one shows its head in the viewer so the owner reads it
+        # before approving. forge/guidelines.py owns detection +
+        # the approval record; this window is only its gate.
+        self.guidelines_label = QLabel("Guideline files")
+        self.guidelines_label.setObjectName("section")
+        lay.addWidget(self.guidelines_label)
+        self.guidelines_list = QListWidget()
+        self.guidelines_list.setMaximumHeight(110)
+        self.guidelines_list.currentRowChanged.connect(
+            self._show_guideline)
+        lay.addWidget(self.guidelines_list)
+        guidelines_row = QHBoxLayout()
+        self.guidelines_approve_btn = QPushButton("✔ Approve")
+        self.guidelines_approve_btn.setToolTip(
+            "Approve this guideline file — its rules join Review "
+            "and Plan turns for this project.")
+        self.guidelines_approve_btn.clicked.connect(
+            self._approve_guideline)
+        guidelines_row.addWidget(self.guidelines_approve_btn)
+        self.guidelines_revoke_btn = QPushButton("✖ Revoke")
+        self.guidelines_revoke_btn.setToolTip(
+            "Take back this file's approval — its rules stop "
+            "applying. The file itself is untouched.")
+        self.guidelines_revoke_btn.clicked.connect(
+            self._revoke_guideline)
+        guidelines_row.addWidget(self.guidelines_revoke_btn)
+        self.guidelines_status = QLabel("")
+        guidelines_row.addWidget(self.guidelines_status, 1)
+        lay.addLayout(guidelines_row)
+        self._guidelines_pending: list[str] = []
+        self._guidelines_approved: list[str] = []
         self.refresh()
 
     def refresh(self):
@@ -9034,6 +9483,7 @@ class ArtifactsWindow(QWidget):
         else:
             self.artifact_view.clear()
         self._refresh_knowledge_drafts()
+        self._refresh_guidelines()
 
     def _refresh_knowledge_drafts(self):
         owner = self._owner
@@ -9053,6 +9503,89 @@ class ArtifactsWindow(QWidget):
             item = QListWidgetItem(label)
             item.setToolTip(e.get("summary", ""))
             self.knowledge_drafts_list.addItem(item)
+
+    def _refresh_guidelines(self):
+        owner = self._owner
+        if owner is None:
+            return
+        self._guidelines_pending = guidelines_mod.pending_guidelines(
+            owner.workspace)
+        self._guidelines_approved = guidelines_mod.list_approved(
+            owner.workspace)
+        self.guidelines_label.setText(
+            f"Guideline files — {len(self._guidelines_pending)} "
+            f"waiting · {len(self._guidelines_approved)} approved")
+        self.guidelines_list.clear()
+        for rel in (self._guidelines_pending
+                    + self._guidelines_approved):
+            label = rel
+            if rel in self._guidelines_approved:
+                label += "  ✓"
+            if len(label) > 42:
+                label = label[:41] + "…"
+            item = QListWidgetItem(label)
+            item.setToolTip(rel)
+            self.guidelines_list.addItem(item)
+
+    def _selected_guideline(self):
+        rows = (self._guidelines_pending
+                + self._guidelines_approved)
+        row = self.guidelines_list.currentRow()
+        if 0 <= row < len(rows):
+            return rows[row]
+        return None
+
+    def _show_guideline(self, row):
+        owner = self._owner
+        rows = (self._guidelines_pending
+                + self._guidelines_approved)
+        if owner is None or not (0 <= row < len(rows)):
+            return
+        path = Path(owner.workspace) / rows[row]
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if len(text) > ModeWindow._DOC_VIEW_CAP:
+            text = (text[:ModeWindow._DOC_VIEW_CAP]
+                    + "\n\n… (showing the head of the file)")
+        self.artifact_view.setPlainText(text)
+
+    def _approve_guideline(self):
+        owner = self._owner
+        rel = self._selected_guideline()
+        if owner is None or rel is None:
+            self.guidelines_status.setText("Pick a file first.")
+            return
+        if rel in self._guidelines_approved:
+            self.guidelines_status.setText(
+                f"Already approved — “{rel}” applies already.")
+            return
+        try:
+            guidelines_mod.approve_guideline(owner.workspace, rel)
+        except Exception as exc:
+            self.guidelines_status.setText(
+                f"Approval failed: {exc}")
+            return
+        self.guidelines_status.setText(
+            f"Approved — “{rel}” now applies in Review and Plan "
+            f"turns for this project.")
+        self._refresh_guidelines()
+
+    def _revoke_guideline(self):
+        owner = self._owner
+        rel = self._selected_guideline()
+        if owner is None or rel is None:
+            self.guidelines_status.setText("Pick a file first.")
+            return
+        if guidelines_mod.revoke_guideline(owner.workspace, rel):
+            self.guidelines_status.setText(
+                f"Revoked — “{rel}” no longer applies. The file "
+                f"itself is untouched.")
+        else:
+            self.guidelines_status.setText(
+                f"“{rel}” was not approved.")
+        self._refresh_guidelines()
 
     def _selected_draft(self):
         row = self.knowledge_drafts_list.currentRow()
@@ -11951,6 +12484,257 @@ class MissionControlWindow(QWidget):
             self.refresh()
 
 
+class InboxWindow(QWidget):
+    """Inbox mode (VS Code 1.146, adapted — owner order 2026-11-11):
+    one consolidated view of what needs attention, what's running,
+    and what's ready to merge. Groups in the owner's order —
+    Working, Needs attention, Ready to merge, On hold, Done (VS
+    Code itself puts Needs attention first; the order lives in
+    forge/inbox.py, one word to flip). Rows come from
+    ForgeWindow.inbox_groups() (rebuilt on every refresh — the
+    window keeps no state of its own, exactly like Mission
+    Control); triage state lives in the owner's InboxStore, so it
+    survives a restart. Dismiss from Inbox moves the item to Done
+    without stopping its turn or archiving anything — Forge has no
+    conversation-archive operation, so Dismiss and Mark as Done
+    are both Inbox-level states: a dismissed item returns to its
+    live group on new activity, a done-marked one does not, and
+    the underlying conversation is untouched either way. Undo
+    restores the one previous triage action."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.setWindowTitle("Inbox — Code Forge")
+        self.resize(760, 560)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
+        title = QLabel("INBOX")
+        title.setObjectName("section")
+        lay.addWidget(title)
+        blurb = QLabel(
+            "What needs attention, what's running, and what's ready "
+            "to merge — across every project. Dismissing a session "
+            "doesn't archive it and doesn't stop it: it waits in "
+            "Done and comes back on new activity. Mark as Done "
+            "closes it for good (the conversation itself is never "
+            "touched).")
+        blurb.setObjectName("muted"); blurb.setWordWrap(True)
+        lay.addWidget(blurb)
+        self._lists = {}
+        self._group_items = {}
+        for group in inbox_mod.GROUPS:
+            head = QLabel(inbox_mod.GROUP_TITLES[group])
+            head.setObjectName("section")
+            lay.addWidget(head)
+            lst = QListWidget()
+            lst.currentRowChanged.connect(
+                lambda _row, g=group: self._on_select(g))
+            lst.itemDoubleClicked.connect(lambda _i: self._go_to())
+            lay.addWidget(lst, 1)
+            self._lists[group] = lst
+        btn_row = QHBoxLayout()
+        self.go_btn = QPushButton("Go to")
+        self.go_btn.clicked.connect(self._go_to)
+        self.dismiss_btn = QPushButton("Dismiss from Inbox")
+        self.dismiss_btn.clicked.connect(self._dismiss)
+        self.hold_btn = QPushButton("Put on Hold")
+        self.hold_btn.clicked.connect(self._hold)
+        self.snooze_btn = QPushButton("Snooze")
+        snooze_menu = QMenu(self)
+        snooze_menu.addAction(
+            "Snooze for 1 hour",
+            lambda: self._snooze(inbox_mod.SNOOZE_ONE_HOUR))
+        snooze_menu.addAction(
+            "Snooze until tomorrow (09:00)",
+            lambda: self._snooze(inbox_mod.SNOOZE_TOMORROW))
+        snooze_menu.addAction(
+            "Snooze until next launch",
+            lambda: self._snooze(inbox_mod.SNOOZE_NEXT_LAUNCH))
+        self.snooze_btn.setMenu(snooze_menu)
+        self.done_btn = QPushButton("Mark as Done")
+        self.done_btn.clicked.connect(self._mark_done)
+        self.undo_btn = QPushButton("Undo")
+        self.undo_btn.clicked.connect(self._undo)
+        btn_row.addWidget(self.go_btn)
+        btn_row.addWidget(self.dismiss_btn)
+        btn_row.addWidget(self.hold_btn)
+        btn_row.addWidget(self.snooze_btn)
+        btn_row.addWidget(self.done_btn)
+        btn_row.addWidget(self.undo_btn)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+        promote_row = QHBoxLayout()
+        self.merge_btn = QPushButton("Approve merge")
+        self.merge_btn.clicked.connect(self._approve_merge)
+        self.diff_btn = QPushButton("View diff")
+        self.diff_btn.clicked.connect(self._view_diff)
+        self.ckpts_btn = QPushButton("Open checkpoints")
+        self.ckpts_btn.clicked.connect(self._open_checkpoints)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh)
+        promote_row.addWidget(self.merge_btn)
+        promote_row.addWidget(self.diff_btn)
+        promote_row.addWidget(self.ckpts_btn)
+        promote_row.addStretch(1)
+        promote_row.addWidget(self.refresh_btn)
+        lay.addLayout(promote_row)
+        self._selected_key = None
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self.refresh)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def refresh(self):
+        """Rebuild the groups from the owner's live data, keeping
+        the selection on the same item where it survives."""
+        groups = self._owner.inbox_groups()
+        self._group_items = groups
+        for group, lst in self._lists.items():
+            lst.clear()
+            for item in groups.get(group, []):
+                line = item["title"]
+                if item.get("project"):
+                    line += f"  ·  {item['project']}"
+                if item.get("model"):
+                    line += f"  ·  {item['model']}"
+                if item.get("detail"):
+                    line += f"  ·  {item['detail']}"
+                if item.get("triage_note"):
+                    line += f"  ·  {item['triage_note']}"
+                lst.addItem(QListWidgetItem(line))
+            if not groups.get(group):
+                lst.addItem(QListWidgetItem(
+                    {"working": "Nothing running.",
+                     "attention": "Nothing needs you.",
+                     "ready": "Nothing waiting to merge.",
+                     "held": "Nothing on hold.",
+                     "done": "Nothing done yet."}[group]))
+        target = None
+        for group, items in groups.items():
+            for i, item in enumerate(items):
+                if item["key"] == self._selected_key:
+                    target = (group, i)
+                    break
+            if target is not None:
+                break
+        if target is not None:
+            self._lists[target[0]].setCurrentRow(target[1])
+        elif groups.get("working"):
+            self._lists["working"].setCurrentRow(0)
+        self._sync_buttons()
+
+    def _on_select(self, group):
+        lst = self._lists[group]
+        row = lst.currentRow()
+        items = self._group_items.get(group, [])
+        if 0 <= row < len(items):
+            self._selected_key = items[row]["key"]
+            for other, other_lst in self._lists.items():
+                if other != group:
+                    other_lst.setCurrentRow(-1)
+        self._sync_buttons()
+
+    def _selected(self):
+        for group, items in self._group_items.items():
+            for item in items:
+                if item["key"] == self._selected_key:
+                    return group, item
+        return None, None
+
+    def _sync_buttons(self):
+        group, item = self._selected()
+        has = item is not None
+        self.go_btn.setEnabled(
+            has and self._owner.inbox_can_go_to(item))
+        self.dismiss_btn.setEnabled(
+            has and group != "done")
+        held = bool(item and item.get("triage_state") == "held")
+        self.hold_btn.setText(
+            "Take off hold" if held else "Put on Hold")
+        self.hold_btn.setEnabled(
+            has and item.get("triage_state") != "done")
+        self.snooze_btn.setEnabled(
+            has and group in ("working", "attention", "ready",
+                             "held"))
+        self.done_btn.setEnabled(
+            has and item.get("triage_state") != "done")
+        self.undo_btn.setEnabled(
+            getattr(self._owner, "_inbox_undo", None) is not None)
+        ready_job = (has and item.get("kind") == "job"
+                     and group == "ready")
+        self.merge_btn.setEnabled(
+            bool(ready_job and item.get("promote") == "merge"))
+        self.diff_btn.setEnabled(bool(ready_job))
+        self.ckpts_btn.setEnabled(
+            has and item.get("kind") == "turn"
+            and group == "ready"
+            and item.get("promote") == "checkpoints")
+
+    def _go_to(self):
+        _group, item = self._selected()
+        if item is not None:
+            self._owner.inbox_go_to(item)
+            self.refresh()
+
+    def _dismiss(self):
+        _group, item = self._selected()
+        if item is not None:
+            self._owner.inbox_dismiss(item["key"])
+            self.refresh()
+
+    def _hold(self):
+        _group, item = self._selected()
+        if item is not None:
+            self._owner.inbox_hold(item["key"])
+            self.refresh()
+
+    def _snooze(self, choice):
+        _group, item = self._selected()
+        if item is not None:
+            self._owner.inbox_snooze(item["key"], choice)
+            self.refresh()
+
+    def _mark_done(self):
+        _group, item = self._selected()
+        if item is not None:
+            self._owner.inbox_mark_done(item["key"])
+            self.refresh()
+
+    def _undo(self):
+        self._owner.inbox_undo()
+        self.refresh()
+
+    def _approve_merge(self):
+        _group, item = self._selected()
+        if item is not None:
+            _landed, message = self._owner.approve_parallel_job(
+                item["job_id"])
+            QMessageBox.information(self, "Parallel job", message)
+            self.refresh()
+
+    def _view_diff(self):
+        _group, item = self._selected()
+        if item is not None and item.get("job") is not None:
+            ParallelDiffDialog(self._owner, item["job"]).exec()
+            self.refresh()
+
+    def _open_checkpoints(self):
+        _group, item = self._selected()
+        if item is not None:
+            self._owner.inbox_open_checkpoints(item)
+            self.refresh()
+
+
 class ProviderChatWindow(QWidget):
     """Provider chat (owner ask, 2026-11-09): a plain conversation
     with the hosted models (Groq / Gemini / EXAONE) that runs ALONGSIDE the
@@ -13330,6 +14114,11 @@ class ForgeWindow(QMainWindow):
         # own line stream (see _append_run_output / start_run).
         self._run_monitor = monitor_mod.RunMonitor()
         self._monitor_thread = None
+        # Manus study M13: bench-log lines for proposals raised
+        # from a worker thread wait here until the GUI-thread
+        # watch tick drains them — a worker thread must never
+        # touch the activity widget directly.
+        self._proposal_log_queue: list[str] = []
         self._debug_session = None
         self._gauge_busy = False
         self.gauge_ready.connect(self._apply_gauges)
@@ -13425,6 +14214,16 @@ class ForgeWindow(QMainWindow):
         self._gate_queue = []
         self._gate_presenting = False
         self._gate_owner_worker = None
+        # Inbox mode (VS Code 1.146, adapted — owner order
+        # 2026-11-11): the triage store is app-level (the Inbox
+        # spans all projects) and survives a restart; _inbox_undo
+        # holds the one previous triage action (in-memory only);
+        # the checkpoint cache keeps the 1 s refresh from shelling
+        # out to git for every settled turn (60 s TTL per project).
+        self.inbox_store = inbox_mod.InboxStore(APP_DIR / "inbox.json")
+        self._inbox_undo = None
+        self._inbox_checkpoint_cache = {}
+        self.inbox_win = None
         self.mission_win = None
         self.templates_win = None
         self.testing_win = None
@@ -13955,7 +14754,8 @@ class ForgeWindow(QMainWindow):
                                  on_house=self._house_project_local,
                                  tools=self._customize_tools(),
                                  disabled_tools=set(self.settings.get("disabled_tools", [])),
-                                 goldfish_review=bool(self.settings.get("goldfish_review", True)))
+                                 goldfish_review=bool(self.settings.get("goldfish_review", True)),
+                                 offer_save_run_as_skill=bool(self.settings.get("offer_save_run_as_skill", False)))
         if dialog.exec() == QDialog.Accepted:
             disabled_skills, disabled_plugins, config, rules, skribe_on, disabled_tools = dialog.values()
             self.settings["permission_rules"] = rules
@@ -13963,6 +14763,9 @@ class ForgeWindow(QMainWindow):
             # Item #56: the Goldfish toggle rides its own accessor —
             # the values() tuple keeps its 6-element shape.
             self.settings["goldfish_review"] = dialog.goldfish_on()
+            # Manus study M10: default off — the offer never fires
+            # until the owner turns this on.
+            self.settings["offer_save_run_as_skill"] = dialog.save_skill_offer_on()
             self.settings["disabled_skills"] = sorted(disabled_skills)
             self.settings["disabled_plugins"] = sorted(disabled_plugins)
             # Item #52: persisted like the other disabled sets — the
@@ -14322,6 +15125,10 @@ class ForgeWindow(QMainWindow):
             fileperms.write_text_private(
                 DB_FILE, json.dumps(self.settings, indent=2))
         except Exception as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             log = getattr(self, "log", None)
             if callable(log):
                 log(f"Settings could not be saved: {exc}")
@@ -14612,6 +15419,7 @@ class ForgeWindow(QMainWindow):
         self.plan_win = PlanWindow(self)
         self.plan_list = self.plan_win.plan_list
         self.goldfish_view = self.plan_win.goldfish_view
+        self.gate_checks_view = self.plan_win.gate_checks_view
         self.document_view = self.plan_win.document_view
         self.plan_approve_btn = self.plan_win.plan_approve_btn
         self.plan_edit_btn = self.plan_win.plan_edit_btn
@@ -14663,6 +15471,11 @@ class ForgeWindow(QMainWindow):
         # its first refresh.
         self._models_data = []
         self.models_win = ModelsWindow(self)
+        # Inbox mode (VS Code 1.146, adapted — owner order
+        # 2026-11-11): what needs attention, what's running, what's
+        # ready to merge (see InboxWindow). Created hidden like the
+        # other rooms; opened from the menus / palette.
+        self.inbox_win = InboxWindow(self)
         # Item #64: mission control — every running workstream in
         # one room (see MissionControlWindow). Created hidden like
         # the other rooms; opened from the menus / palette.
@@ -14951,6 +15764,9 @@ class ForgeWindow(QMainWindow):
         self.act_mission_window = menu.addAction(
             "🛰   Mission control", self.open_mission_control)
         self.act_mission_window.setToolTip("Item #64: every running turn across conversations — what is running, what is parked at a gate, what finished")
+        self.act_inbox_window = menu.addAction(
+            "📥   Inbox", self.open_inbox)
+        self.act_inbox_window.setToolTip("Inbox mode: what needs attention, what's running, what's ready to merge — across every project")
         self.act_templates_window = menu.addAction(
             "🧰   Templates", self.open_templates_window)
         self.act_templates_window.setToolTip("Item C4: start a new project from a template that ships with Code Forge")
@@ -14988,6 +15804,7 @@ class ForgeWindow(QMainWindow):
         self.view_act_sees = menu.addAction("👁   What the AI sees window", self.open_sees_window)
         self.view_act_models = menu.addAction("🤖   Models window", self.open_models_window)
         self.view_act_mission = menu.addAction("🛰   Mission control", self.open_mission_control)
+        self.view_act_inbox = menu.addAction("📥   Inbox", self.open_inbox)
         self.view_act_templates = menu.addAction("🧰   Templates…", self.open_templates_window)
         self.view_act_testing = menu.addAction("🧪   Testing window", self.open_testing_window)
         self.view_act_provider_chat = menu.addAction("💬   Provider chat", self.open_provider_chat)
@@ -16008,6 +16825,26 @@ class ForgeWindow(QMainWindow):
         self.deck.set_state(monitor={
             "alerts": self._run_monitor.active(),
             "watching": self.run_is_running()})
+        # Manus study M13: a crash or HTTP alert is a local event
+        # the owner may want to act on — it raises a proposal
+        # (deduplicated: the same alert never stacks a second
+        # one). Stall and repeat alerts stay alerts only: a stall
+        # has no failing code to fix, and a repeat restates an
+        # error the crash alert already covers. Noting an alert
+        # still never starts anything by itself.
+        if alert.get("kind") in ("crash", "http"):
+            self.raise_event_proposal(
+                "run_failed",
+                event=(f"Run {alert['kind']}: {alert['detail']}"),
+                action="Ask the Watch seat to draft a fix for "
+                       "this alert",
+                touches="the project file(s) behind the alert",
+                detail={"alert": {
+                    "id": alert.get("id"), "kind": alert.get("kind"),
+                    "detail": alert.get("detail"),
+                    "evidence": alert.get("evidence"),
+                    "count": alert.get("count"),
+                    "when": alert.get("when")}})
 
     def _watch_seat_model(self):
         """Resolve the Watch seat exactly the way _start_turn
@@ -16131,7 +16968,12 @@ class ForgeWindow(QMainWindow):
         prior_worker = self.worker
         self.worker = _WatchGateAsker(self._watch_seat_model())
         try:
-            self.request_approval("write_file", args, description, diff)
+            # Manus study M13: this gate presents a proposal's
+            # action, so Remember stays hidden — approving a fix
+            # must never mint a remembered rule that would
+            # auto-allow a later identical write unjudged.
+            self.request_approval("write_file", args, description,
+                                  diff, allow_remember=False)
         finally:
             self.worker = prior_worker
         answer = getattr(self, "_watch_gate_answer", None)
@@ -16155,6 +16997,190 @@ class ForgeWindow(QMainWindow):
                                  alert_kind=alert.get("kind", ""))
         except Exception:
             pass
+
+    # ---------- Manus study M13: gated local event triggers ----------
+
+    def _proposal_store(self):
+        """This project's proposal store (forge/proposals.py). A
+        fresh instance per call — the list is tiny, and the file
+        is the record, so there is nothing to keep in sync."""
+        return proposals_mod.ProposalStore(self.workspace)
+
+    def _raise_proposal_record(self, kind, event, action, touches,
+                               detail=None):
+        """The thread-safe core of raising a proposal: the store
+        write, the event-log record, and the deck state push —
+        each lock-protected, none touching a widget. Returns
+        (proposal, created). Called from the worker thread by
+        _on_worker_event and from the GUI thread by
+        raise_event_proposal."""
+        store = self._proposal_store()
+        proposal, created = store.raise_proposal(
+            kind, event, action, touches, detail=detail)
+        if created:
+            try:
+                self.eventlog.record(
+                    "proposal_raised", proposal_id=proposal["id"],
+                    proposal_kind=kind, event=event)
+            except Exception:
+                pass
+        try:
+            self.deck.set_state(
+                proposals=[proposals_mod.public(p)
+                           for p in store.pending()])
+        except Exception:
+            pass
+        return proposal, created
+
+    def _on_worker_event(self, kind, payload):
+        """The worker's event callback (wired in _start_turn): a
+        local event the turn observed, turned into a proposal or
+        nothing. Only the kinds proposals.py knows are raised;
+        anything else is recorded and dropped. This runs on the
+        worker thread, so it uses the thread-safe core only — the
+        bench-log line waits in the queue for the GUI-thread
+        watch tick."""
+        if kind != "tester_failed":
+            try:
+                self.eventlog.record("event_ignored", kind=str(kind))
+            except Exception:
+                pass
+            return
+        payload = payload or {}
+        files = str(payload.get("files") or "").strip()
+        evidence = str(payload.get("evidence") or "").strip()
+        _proposal, created = self._raise_proposal_record(
+            "tester_failed",
+            event="Tester run failed",
+            action="Start a fix turn for the failing test(s)",
+            touches=(files if files else "the project tests"),
+            detail={"files": files, "evidence": evidence,
+                    "open": str(payload.get("open") or "").strip()})
+        if created:
+            queue = getattr(self, "_proposal_log_queue", None)
+            if queue is not None:
+                queue.append("📩 Proposal raised · tester_failed · "
+                             "Tester run failed — Start a fix turn "
+                             "for the failing test(s). Accept or "
+                             "decline it; nothing happens until "
+                             "you do.")
+
+    def raise_event_proposal(self, kind, event, action, touches,
+                             detail=None):
+        """Raise a proposal from an observed local event and
+        surface it where the owner looks: the bench log, the
+        event log, and the deck's proposals field. Returns the
+        proposal record, or the existing pending one when the
+        same event was already proposed. Raises nothing else —
+        no tool runs, no turn starts, no dialog pops: the
+        proposal waits for the owner to decide it. GUI-thread
+        caller (the monitor-alert path); the worker thread uses
+        _on_worker_event instead."""
+        try:
+            proposal, created = self._raise_proposal_record(
+                kind, event, action, touches, detail=detail)
+        except ValueError:
+            self.log(f"📩 Proposal rejected — unknown kind: {kind}.")
+            return None
+        if created:
+            self.log(f"📩 Proposal raised · {kind} · {event} — "
+                     f"{action}. Accept or decline it; nothing "
+                     f"happens until you do.")
+        return proposal
+
+    def proposals_pending(self):
+        """The proposals the owner can still decide, oldest
+        first. Expired ones are already dead — this never
+        returns a proposal past its TTL."""
+        try:
+            return [proposals_mod.public(p)
+                    for p in self._proposal_store().pending()]
+        except Exception:
+            return []
+
+    def decide_proposal(self, proposal_id, accept):
+        """Decide a pending proposal. Decline kills it and
+        nothing runs. Accept dispatches by kind through the
+        existing gates (a fix turn via the ordinary send path,
+        a run failure via the Watch seat's fix drafting) — and
+        only then. A decided or expired proposal refuses, and
+        an accept for a fix turn refuses while a turn is already
+        running, leaving the proposal pending. Returns True only
+        when a decision landed."""
+        store = self._proposal_store()
+        pending = store.pending()
+        target = next((p for p in pending
+                       if p.get("id") == proposal_id), None)
+        if target is None:
+            self.log(f"📩 Proposal {proposal_id} cannot be decided "
+                     f"— it is already decided or expired.")
+            return False
+        if accept and target.get("kind") == "tester_failed" \
+                and self.worker is not None \
+                and self.worker.isRunning():
+            # The bench is busy: do not consume the decision on a
+            # turn that cannot start. The proposal stays pending
+            # untouched — accept it again when the bench is free.
+            self.log("📩 A turn is already running — the proposal "
+                     "stays pending; accept it again when the "
+                     "bench is free.")
+            return False
+        decided = store.decide(proposal_id, bool(accept))
+        if decided is None:  # decided between the read and the write
+            return False
+        try:
+            self.deck.set_state(
+                proposals=[proposals_mod.public(p)
+                           for p in store.pending()])
+        except Exception:
+            pass
+        if not accept:
+            self.log(f"📩 Proposal declined · {decided['kind']} · "
+                     f"{decided['event']} — nothing runs.")
+            try:
+                self.eventlog.record(
+                    "proposal_declined", proposal_id=proposal_id,
+                    proposal_kind=decided["kind"])
+            except Exception:
+                pass
+            return True
+        if decided["kind"] == "tester_failed":
+            self._proposal_start_fix_turn(decided)
+        elif decided["kind"] == "run_failed":
+            alert = (decided.get("detail") or {}).get("alert") or {}
+            self.request_monitor_fix(alert)
+        else:  # pragma: no cover — the store only knows two kinds
+            return False
+        self.log(f"📩 Proposal accepted · {decided['kind']} · "
+                 f"{decided['event']} — running through the gate.")
+        try:
+            self.eventlog.record(
+                "proposal_accepted", proposal_id=proposal_id,
+                proposal_kind=decided["kind"])
+        except Exception:
+            pass
+        return True
+
+    def _proposal_start_fix_turn(self, proposal):
+        """An accepted tester_failed proposal starts an ordinary
+        Code turn in the current conversation: the fix task is
+        sent through the owner's normal send path, so the plan
+        gate, the approval gate, and every per-turn rule apply
+        exactly as if the owner had typed it. The mode is Code
+        for this turn only (the fan-out spawn's shape) and is
+        restored afterwards."""
+        previous_mode = self.mode_combo.currentText()
+        try:
+            self.mode_combo.setCurrentText("Code")
+            self.input.setPlainText(
+                proposals_mod.fix_turn_task(proposal))
+            self.send_message()
+            if getattr(self, "_send_refusal", None):
+                self.log(f"📩 The fix turn could not start: "
+                         f"{self._send_refusal}")
+        finally:
+            if self.mode_combo.currentText() != previous_mode:
+                self.mode_combo.setCurrentText(previous_mode)
 
     # ---------- Debug: ONE session, two drivers (window + agent) ----------
     def debug_session_live(self):
@@ -16374,6 +17400,7 @@ class ForgeWindow(QMainWindow):
             "what_ai_sees": self.open_sees_window,
             "models_window": self.open_models_window,
             "mission_control": self.open_mission_control,
+            "inbox": self.open_inbox,
             "templates": self.open_templates_window,
             "testing_window": self.open_testing_window,
             "provider_chat": self.open_provider_chat,
@@ -16736,28 +17763,46 @@ class ForgeWindow(QMainWindow):
 
     # ---------- conversations ----------
     def build_system_prompt(self) -> str:
-        parts = [self.settings.get("system_prompt", SYSTEM_PROMPT), HOUSE_RULES]
+        # CR10 (context rank + compress): the prompt is built as
+        # NAMED parts with a tier each (forge/context.py owns the
+        # tiers: 0 core — never dropped; 1 the owner's words; 2
+        # project state; 3 generated indexes — first to go), and
+        # compressed to a share of the window at the end. When
+        # everything fits, the joined prompt is byte-identical to
+        # the old plain-parts build.
+        named: list[tuple[str, int, str]] = []
+
+        def _add(label: str, tier: int, text: str) -> None:
+            if text:
+                named.append((label, tier, text))
+
+        _add("base prompt", 0,
+             self.settings.get("system_prompt", SYSTEM_PROMPT))
+        _add("house rules", 0, HOUSE_RULES)
         instructions = proj.project_instructions(self.workspace)
         if instructions:
-            parts.append("Project instructions (owner-written, this project only):\n" + instructions)
+            _add("project instructions", 1,
+                 "Project instructions (owner-written, this project only):\n" + instructions)
         brief = knowledge_mod.brief_text(self.workspace)
         if brief:
-            parts.append("Project brief — what this project is and where it "
-                         "stands (.forge/brief.md; read it first):\n" + brief)
+            _add("project brief", 2,
+                 "Project brief — what this project is and where it "
+                 "stands (.forge/brief.md; read it first):\n" + brief)
         sources = proj.sources_index_text(self.workspace)
         if sources:
-            parts.append(sources)
+            _add("sources index", 2, sources)
         knowledge_idx = knowledge_mod.knowledge_index_text(self.workspace)
         if knowledge_idx:
-            parts.append(knowledge_idx)
+            _add("knowledge index", 2, knowledge_idx)
         hints = proj.hints_text(self.workspace)
         if hints:
-            parts.append("Project hints — the owner's standing instructions for THIS project "
-                         "(from .forge/hints.md). Follow them unless the owner's current "
-                         "message says otherwise:\n" + hints)
+            _add("project hints", 1,
+                 "Project hints — the owner's standing instructions for THIS project "
+                 "(from .forge/hints.md). Follow them unless the owner's current "
+                 "message says otherwise:\n" + hints)
         production = prod_mod.context_text(prod_mod.load_markings(self.workspace))
         if production:
-            parts.append(production)
+            _add("production markings", 2, production)
         if self.settings.get("repo_map", True):
             try:
                 project_map = repomap.build_map(self.workspace)
@@ -16772,35 +17817,66 @@ class ForgeWindow(QMainWindow):
                     seen.add(problem)
                     self.log(problem)
             if project_map:
-                parts.append(project_map)
+                _add("project map", 3, project_map)
         skills_idx = skills_index_text(self.skills)
         if skills_idx:
-            parts.append(skills_idx)
+            _add("skills index", 3, skills_idx)
         mode_now = str(self.settings.get("mode", "code")).lower()
-        guidance = perm_mod.MODE_GUIDANCE.get(mode_now)
+        # CR5 (Review voices): Review turns use the voice the
+        # owner picked (settings "review_profile", default
+        # "chill" — byte-identical to the base guidance); every
+        # other mode reads its static guidance as before.
+        if mode_now == "review":
+            guidance = perm_mod.review_guidance(
+                self.settings.get("review_profile", "chill"))
+        else:
+            guidance = perm_mod.MODE_GUIDANCE.get(mode_now)
         if guidance:
-            parts.append(guidance)
+            _add("mode guidance", 0, guidance)
         # Project System (2026-11-11): folder prompts are LIVE — the
         # PROMPT.md of the folder this mode files into rides in the
         # prompt, and the sources folder's prompt rides whenever its
         # index does, so the folder rules are working instructions.
         folder_prompt = proj.folder_prompt_text(self.workspace, mode_now)
         if folder_prompt:
-            parts.append(
-                "Folder instructions — the PROMPT.md of the folder this "
-                "mode files into (.forge/, owner-editable). Follow them "
-                "for anything you file there:\n" + folder_prompt)
+            _add("folder instructions", 1,
+                 "Folder instructions — the PROMPT.md of the folder this "
+                 "mode files into (.forge/, owner-editable). Follow them "
+                 "for anything you file there:\n" + folder_prompt)
         if sources:
             sources_prompt = proj.sources_prompt_text(self.workspace)
             if sources_prompt:
-                parts.append("Sources folder instructions "
-                             "(.forge/sources/PROMPT.md):\n"
-                             + sources_prompt)
+                _add("sources folder instructions", 1,
+                     "Sources folder instructions "
+                     "(.forge/sources/PROMPT.md):\n"
+                     + sources_prompt)
+        # CR1 (Learnings loop): the owner's taught review learnings
+        # ride in REVIEW turns only — global first, then this
+        # project's. Byte-stability: with no learnings the block is
+        # "" and the prompt is byte-identical to before.
+        if mode_now == "review":
+            learnings = learnings_mod.learnings_block(self.workspace)
+            if learnings:
+                _add("review learnings", 1, learnings)
+        # CR4 (Guidelines): the project's standard instruction
+        # files (AGENTS.md, CLAUDE.md, .cursorrules,
+        # copilot-instructions.md) ride in REVIEW and PLAN turns
+        # ONLY once the owner has approved them — an unapproved
+        # file never reaches a prompt, so a guideline file that
+        # arrived with a cloned repo cannot steer the agent on
+        # its own. forge/guidelines.py owns detection + the
+        # approval record; the block is "" with nothing approved,
+        # so those projects prompt byte-identically to before.
+        if mode_now in ("review", "plan"):
+            guidelines = guidelines_mod.guidelines_block(
+                self.workspace)
+            if guidelines:
+                _add("approved guidelines", 1, guidelines)
         macro_idx = macros_mod.index_text(self.macros)
         if macro_idx:
-            parts.append(macro_idx)
-        parts.append(
-            "Self-extension (owner's standing instruction): skills and plugins are GLOBAL — "
+            _add("macros index", 3, macro_idx)
+        _add("self-extension", 0,
+             "Self-extension (owner's standing instruction): skills and plugins are GLOBAL — "
             "they live in the Forge's own skills/ and plugins/ folders and are available in "
             "every project. When the owner asks you to create a skill, use create_skill; to "
             "create a plugin or tool, use create_plugin; to change a skill or plugin that "
@@ -16815,7 +17891,8 @@ class ForgeWindow(QMainWindow):
             scratch = scratch_path.read_text(encoding="utf-8")
             body = "\n".join(l for l in scratch.splitlines() if not l.startswith("#")).strip()
             if body:
-                parts.append("Project scratchpad (your persistent notes here):\n" + body[:700])
+                _add("scratchpad", 1,
+                     "Project scratchpad (your persistent notes here):\n" + body[:700])
         except Exception as exc:
             # Sweep R50: a MISSING scratchpad is the ordinary case
             # and stays silent; a present-but-unreadable one is a
@@ -16833,10 +17910,39 @@ class ForgeWindow(QMainWindow):
         if getattr(self, "_self_maintenance_active", False):
             work = getattr(self, "_self_maintenance_worktree", None) \
                 or str(self_maint_mod.worktree_dir(APP_DIR))
-            parts.append(self_maint_mod.MAINTENANCE_CHARTER
-                         + f"\nMaintenance work copy: {work}"
-                         + f"\nLive app root (reference only, never "
-                           f"edit directly): {ROOT_DIR}")
+            _add("maintenance charter", 0,
+                 self_maint_mod.MAINTENANCE_CHARTER
+                 + f"\nMaintenance work copy: {work}"
+                 + f"\nLive app root (reference only, never "
+                   f"edit directly): {ROOT_DIR}")
+        # CR10: rank + compress the named parts to a share of the
+        # window before the model. When everything fits, kept is
+        # the parts unchanged and there is no footer — the prompt
+        # is byte-identical to before. When something is dropped
+        # or truncated, the footer names what was lost (the model
+        # sees the gap), and the same line is logged for the owner.
+        # A compression failure never breaks the turn: the prompt
+        # goes out whole, as before.
+        try:
+            num_ctx = int(self.settings.get("num_ctx", 8192) or 8192)
+        except Exception:
+            num_ctx = 8192
+        budget = int(num_ctx * context_mod.SYSTEM_PROMPT_SHARE)
+        try:
+            kept, report = context_mod.compress_system_parts(
+                named, budget)
+            parts = list(kept)
+            note = context_mod.compression_note(report)
+        except Exception:
+            parts = [text for _label, _tier, text in named]
+            note = ""
+        if note:
+            parts.append(note)
+            try:
+                self.log("Context compressed for the window: "
+                         + note)
+            except Exception:
+                pass
         return "\n\n".join(parts)
 
     def render(self, messages=None):
@@ -17054,10 +18160,16 @@ class ForgeWindow(QMainWindow):
         right-click menu — export the transcript, or delete the chat."""
         menu = QMenu(self)
         export_act = menu.addAction("Export conversation…")
+        # Manus study M9: the session replay — C9 timeline +
+        # transcript as one self-contained local HTML file — lives
+        # on the same menu as the Markdown transcript export.
+        replay_act = menu.addAction("Export session replay…")
         delete_act = menu.addAction("Delete conversation")
         chosen = menu.exec(button.mapToGlobal(pos))
         if chosen == export_act:
             self.export_conversation(conversation_id, title)
+        elif chosen == replay_act:
+            self.export_replay(conversation_id, title)
         elif chosen == delete_act:
             self.delete_conversation(conversation_id)
 
@@ -17096,6 +18208,40 @@ class ForgeWindow(QMainWindow):
                 title = content.strip().splitlines()[0][:64]
                 break
         self.export_conversation(self.conversation_id, title)
+
+    def export_replay(self, conversation_id, title="Conversation"):
+        """Manus study M9: export this conversation as a session
+        replay — the C9 turn timeline plus the chronological
+        transcript in one self-contained local HTML file at
+        <workspace>/.forge/replays/conversation-<id>-replay.html.
+        The timeline only exists for turns finished in this app
+        session (the window's marks are session state), so an older
+        conversation replays transcript-only and the file says so.
+        No save dialog: the path is deterministic, like the session
+        summary export."""
+        from . import replay as replay_mod
+        messages = self.store.load(conversation_id)
+        if messages is None:
+            self.log("Replay export failed — that conversation no longer exists.")
+            return
+        model, project = self.store.meta(conversation_id)
+        entries = []
+        if conversation_id == self.conversation_id:
+            entries = self.timeline_data(conversation_id)["entries"]
+        try:
+            path = replay_mod.export_replay(
+                self.workspace, conversation_id, title, messages,
+                entries, model=model, project=project)
+        except Exception as exc:
+            self.log(f"Replay export failed: {exc}")
+            return
+        self.eventlog.record("replay_export",
+                             conversation_id=conversation_id,
+                             path=str(path))
+        self.log(f"Session replay exported → {path}")
+        self.receipt_bar.setText(
+            f"🧾  SHELL RECEIPT · replay → {path.name} · "
+            f"{datetime.now().strftime('%H:%M:%S')}")
 
     def delete_conversation(self, conversation_id):
         if conversation_id == self.conversation_id and (
@@ -17314,6 +18460,10 @@ class ForgeWindow(QMainWindow):
                                    "is drafted as a plan and held here for your call.")
             self.goldfish_view.clear()
             self.document_view.clear()
+            # CR8: the checks still run — the owner may have
+            # written them before any plan lands.
+            if getattr(self, "plan_win", None) is not None:
+                self.plan_win.refresh_gate_checks()
             return
         marks = {"done": "✓", "active": "▸", "pending": "·", "interrupted": "✗"}
         for i, step in enumerate(plan["steps"]):
@@ -17339,6 +18489,11 @@ class ForgeWindow(QMainWindow):
         # text the checklist was extracted from. A bare-list draft
         # (or a pre-#58 sidecar) has none on record.
         self.document_view.setPlainText(plan.get("document") or "")
+        # CR8: the pre-merge checks run fresh every time a draft
+        # lands at the gate — the owner reads them beside the
+        # Goldfish review before approving.
+        if getattr(self, "plan_win", None) is not None:
+            self.plan_win.refresh_gate_checks()
 
     def _plan_persist(self):
         if self.plan_state is not None and self.conversation_id:
@@ -17767,6 +18922,24 @@ class ForgeWindow(QMainWindow):
                  f"{outcome.get('steps_total', 0)} step(s) announced done · "
                  f"SKRIBE: {plan['skribe']}.")
 
+    def _on_skill_drafted(self, info):
+        """Manus study M10: a drafted skill landed on disk — run the
+        S6 reload so the new name is recorded as known-and-disabled
+        immediately (rather than at the next app start), and say so.
+        A failed draft never reaches here as a success: ok is False
+        and the reason rides the status line instead."""
+        try:
+            self.reload_extensions()
+        except Exception:
+            pass
+        info = info or {}
+        if info.get("ok"):
+            self.log(f"Draft skill '{info.get('name', '?')}' saved — "
+                     f"DISABLED until you enable it in Customize.")
+        else:
+            self.log(f"Could not save draft skill "
+                     f"'{info.get('name', '?')}': {info.get('message', '')}")
+
     def _plan_settle_draft(self):
         """A worker that ends while its plan still sits at the gate
         (Stop released the wait as a kill) leaves the checklist
@@ -17840,6 +19013,13 @@ class ForgeWindow(QMainWindow):
             _rollback()
 
     def _watch_tick(self):
+        # Manus study M13: drain the worker-thread proposal log
+        # queue on the GUI thread, where the activity widget lives.
+        if getattr(self, "_proposal_log_queue", None):
+            queued, self._proposal_log_queue = \
+                self._proposal_log_queue, []
+            for line in queued:
+                self.log(line)
         # C1: the Watch seat's stall check runs on EVERY tick, ahead
         # of the AI-comment gate below (watch_ai is the comment
         # feature's switch; the run monitor is not behind it).
@@ -19503,6 +20683,15 @@ class ForgeWindow(QMainWindow):
         if not isinstance(mcp_trust_store, dict):
             mcp_trust_store = {}
             self.settings["trusted_mcp_servers"] = mcp_trust_store
+        # Manus study M5: the session's tool-surface memory — one
+        # dict for the life of this window, handed to every worker
+        # (the mcp_trust pattern), so a turn whose offered surface
+        # differs from the previous turn's is logged as a surface
+        # change (an owner's configuration change: mode, plugin /
+        # skill toggles, the tool kill switch).
+        surface_state = getattr(self, "_tool_surface_state", None)
+        if surface_state is None:
+            surface_state = self._tool_surface_state = {}
         self.worker = AgentWorker(self.client, model, self.messages, options, self.workspace,
                                   extra_tools=extra, eventlog=self.eventlog,
                                   hooks=turn_hooks, verify_commands=turn_verify,
@@ -19551,6 +20740,16 @@ class ForgeWindow(QMainWindow):
                                   plugins_dir=self.app_plugins_dir,
                                   mcp_trust=mcp_trust_store,
                                   mcp_trust_save=self.save_settings,
+                                  # Manus study M10: default off.
+                                  offer_save_run_as_skill=bool(self.settings.get(
+                                      "offer_save_run_as_skill", False)),
+                                  surface_state=surface_state,
+                                  # Manus study M13: the worker
+                                  # reports local events it observes
+                                  # (a Tester FAIL verdict) to this
+                                  # callback; the window turns them
+                                  # into proposals, or into nothing.
+                                  on_event=self._on_worker_event,
                                   light_machine=bool(self.settings.get(
                                       "light_machine", False)))
         self.plugin_ctx.cancel_event = getattr(self.worker, "_cancel_event", None)
@@ -19582,6 +20781,7 @@ class ForgeWindow(QMainWindow):
         worker.plan_active.connect(self.on_plan_active)
         worker.plan_step_done.connect(self.on_plan_step_done)
         worker.plan_turn_done.connect(self.on_plan_turn_done)
+        worker.skill_drafted.connect(self._on_skill_drafted)
         worker.finished_text.connect(
             lambda t, m, s=stream: self._ws_finished(s, t, m))
         worker.failed.connect(lambda e, s=stream: self._ws_failed(s, e))
@@ -19690,6 +20890,192 @@ class ForgeWindow(QMainWindow):
         if stream["planning"] or stream["maintenance"] or stream["side"]:
             return False
         return self._max_parallel_turns() > 1
+
+    # ---------- Manus study M12: fan-out ----------
+    def fan_out_batch(self, items):
+        """Fan a batch of similar INDEPENDENT items out as fresh-
+        context parallel turns under the #53 cap, each return
+        collected through the M7 handoff schema. `items` are
+        FanOutItem (or dicts with task/independent/title). The
+        seeding rule is owner-grounded: an item fans only when
+        its `independent` flag says so — never inferred here.
+        True when the run started; False with the plain refusal
+        logged when nothing runs (bad batch, cap 1, a run already
+        live, or the parallel cap already full). No UI entry
+        point yet — this method is the seam a command or button
+        calls; the tests drive it directly. Each fanned turn is
+        a Code turn in its own fresh conversation (no history,
+        no plan slot — Plan turns never detach, so they never
+        fan), under the owner's approved plan and the ordinary
+        per-turn gates; the stage follows the newest fanned
+        turn, exactly as switching conversations does today,
+        and Mission Control tracks every stream."""
+        if getattr(self, "_fanout_run", None) is not None:
+            message = ("Fan-out refused — a fan-out is already "
+                       "running. Wait for it to finish first.")
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return False
+        try:
+            batch = [item if isinstance(item, fanout_mod.FanOutItem)
+                     else fanout_mod.FanOutItem(
+                         task=str(item.get("task", "")),
+                         independent=bool(item.get("independent", False)),
+                         title=str(item.get("title", "")))
+                     for item in (items or [])]
+            run = fanout_mod.FanOutRun(
+                batch, self._max_parallel_turns(),
+                self._fanout_spawn,
+                log=lambda event, **fields: self.eventlog.record(
+                    event, **fields))
+        except ValueError as exc:
+            message = str(exc)
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return False
+        if len([s for s in self._live_streams()
+                if not self._is_stage(s)]) \
+                >= self._max_parallel_turns():
+            message = (f"Fan-out refused — parallel turns are already "
+                       f"at the cap ({self._max_parallel_turns()}). "
+                       "Finish or stop one first (Mission Control).")
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return False
+        self._fanout_run = run
+        run.start()
+        if run.done:
+            # Every first-wave spawn was refused (a stage turn
+            # that cannot detach, e.g. Plan): the run stalled its
+            # queue at once, so say so plainly instead of
+            # leaving a silent queued run.
+            self._fanout_run = None
+            message = ("Fan-out refused — no fanned turn could start "
+                       "(the stage turn cannot detach right now). "
+                       "Nothing ran; try again when the stage is idle.")
+            self.log(message)
+            self.statusBar().showMessage(message)
+            return False
+        return True
+
+    def _fanout_spawn(self, item):
+        """Start one fanned turn: a fresh conversation (system
+        stub only — send_message rebuilds the real prompt), load
+        it (the #64 detach dance), send the item with its
+        handoff close-out, in Code mode. Returns the stream id
+        as the run's handle, or None when nothing started — the
+        run keeps the item queued and retries on the next
+        settle. Never sends into the wrong conversation: the
+        load is verified before the input is touched."""
+        try:
+            cid = self.store.save(
+                None, [{"role": "system", "content": ""}],
+                model=None, project=self.workspace)
+        except Exception as exc:
+            self.log(f"Fan-out: could not create a conversation "
+                     f"for '{item.label()}': {exc}")
+            return None
+        previous_mode = self.mode_combo.currentText()
+        try:
+            self.load_conversation(cid)
+            if self.conversation_id != cid:
+                return None
+            self.mode_combo.setCurrentText("Code")
+            self.input.setPlainText(fanout_mod.fanout_instruction(item))
+            self.send_message()
+            if getattr(self, "_send_refusal", None):
+                return None
+            stream = self._stage_stream()
+            if stream is None:
+                return None
+            stream["fanout_run"] = self._fanout_run
+            stream["fanout_item"] = item
+            stream["fanout_repair"] = False
+            return stream["id"]
+        finally:
+            if self.mode_combo.currentText() != previous_mode:
+                self.mode_combo.setCurrentText(previous_mode)
+
+    def _fanout_collect(self, stream, text, error):
+        """The fan-out settle hook, called at the end of the
+        stream settle paths (_ws_finished / _ws_failed) so the
+        finished stream's own bookkeeping is done first. Feeds
+        the settlement to the run, spawns a repair turn when the
+        run asks for one, and closes the run when it is done:
+        the collected handoffs go through the M7 keeper pass
+        (open items filed, nothing invented) and a summary line
+        is logged. A repair turn that cannot start finalises
+        its item flagged, per M7."""
+        run = stream.get("fanout_run")
+        if run is None or run is not getattr(self, "_fanout_run", None):
+            return
+        actions = run.on_settled(stream["id"], text, error,
+                                 is_repair=bool(stream.get("fanout_repair")))
+        repair = actions.get("repair")
+        if repair is not None:
+            item = repair["item"]
+            index = repair["index"]
+            if self._fanout_spawn_repair(item, repair["instruction"],
+                                         stream["conversation_id"],
+                                         index):
+                pass
+            else:
+                run.repair_unavailable(index)
+                actions = {"repair": None, "done": run.done}
+        if actions.get("done"):
+            self._fanout_run = None
+            kept = handoff_mod.keeper_pass(
+                self.workspace, run.results, log=self.log)
+            failed = sum(1 for r in run.results
+                         if r.get("status") in ("failed", "stalled"))
+            flagged = sum(1 for r in run.results
+                          if r.get("unparsed")
+                          and r.get("status") not in ("failed", "stalled"))
+            clean = len(run.results) - flagged - failed
+            self.log(f"Fan-out finished — {len(run.results)} item(s): "
+                     f"{clean} clean handoff(s), {flagged} flagged, "
+                     f"{failed} failed; keeper kept {kept['kept']}.")
+            self.eventlog.record("fanout_done", items=len(run.results),
+                                 flagged=flagged, failed=failed,
+                                 kept=kept["kept"])
+
+    def _fanout_spawn_repair(self, item, instruction, conversation_id,
+                             index):
+        """One repair turn for a fanned item, in its own
+        conversation: the repair instruction names only the
+        missing sections. True when the turn started (its stream
+        is tagged so the settle hook routes it back as a repair);
+        False when nothing started — the caller finalises the
+        item flagged."""
+        run = getattr(self, "_fanout_run", None)
+        if run is None:
+            return False
+        try:
+            self.load_conversation(conversation_id)
+            if self.conversation_id != conversation_id:
+                return False
+            previous_mode = self.mode_combo.currentText()
+            try:
+                self.mode_combo.setCurrentText("Code")
+                self.input.setPlainText(instruction)
+                self.send_message()
+                if getattr(self, "_send_refusal", None):
+                    return False
+                stream = self._stage_stream()
+                if stream is None:
+                    return False
+                stream["fanout_run"] = run
+                stream["fanout_item"] = item
+                stream["fanout_repair"] = True
+                run.note_repair(stream["id"], index)
+                return True
+            finally:
+                if self.mode_combo.currentText() != previous_mode:
+                    self.mode_combo.setCurrentText(previous_mode)
+        except Exception as exc:
+            self.log(f"Fan-out repair for '{item.label()}' could not "
+                     f"start: {exc}")
+            return False
 
     def _leave_stage(self, refuse_message=None):
         """The conversation-switch gate. True when the stage may
@@ -19820,8 +21206,13 @@ class ForgeWindow(QMainWindow):
             self.on_finished(text, messages)
             self._push_deck_streams()
             self._refresh_mission()
+            # Manus study M12: the stream's own settle is done —
+            # now the fan-out hook may start the next queued item
+            # or a repair turn.
+            self._fanout_collect(stream, text, None)
             return
         self._settle_background_stream(stream, text, messages, None)
+        self._fanout_collect(stream, text, None)
 
     def _ws_failed(self, stream, error):
         # Item C9: the timeline's mark for this turn (see
@@ -19833,8 +21224,11 @@ class ForgeWindow(QMainWindow):
             self.on_failed(error)
             self._push_deck_streams()
             self._refresh_mission()
+            # Manus study M12: as in _ws_finished.
+            self._fanout_collect(stream, None, error)
             return
         self._settle_background_stream(stream, None, None, error)
+        self._fanout_collect(stream, None, error)
 
     def _settle_background_stream(self, stream, text, messages, error):
         """A background turn ended. Everything the stage settle
@@ -20389,6 +21783,214 @@ class ForgeWindow(QMainWindow):
         win.raise_()
         win.activateWindow()
 
+    def open_inbox(self):
+        """Inbox mode: single instance, refreshed on open, in the
+        same shape as Mission Control."""
+        win = getattr(self, "inbox_win", None)
+        if win is None:
+            return
+        win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    # ---------- Inbox mode (VS Code 1.146, adapted) -------------
+
+    def inbox_has_checkpoints(self, workspace):
+        """True when the project's shadow holds at least one
+        checkpoint. Cached 60 s per project so the Inbox's 1 s
+        refresh never shells out to git on every tick."""
+        now = time.time()
+        cached = self._inbox_checkpoint_cache.get(workspace)
+        if cached is not None and now - cached[0] < 60:
+            return cached[1]
+        try:
+            has = bool(ckpt_mod.list_checkpoints(APP_DIR, workspace))
+        except Exception:
+            has = False
+        self._inbox_checkpoint_cache[workspace] = (now, has)
+        return has
+
+    def inbox_groups(self):
+        """The Inbox's data, grouped — see forge/inbox.py for the
+        grouping rules. Pure reads apart from the checkpoint cache
+        and the triage store's lazy expiry."""
+        plan_gate = None
+        plan = getattr(self, "plan_state", None)
+        if isinstance(plan, dict) and plan.get("status") == "draft":
+            stage = self._stage_stream()
+            plan_gate = {
+                "conversation_id": self.conversation_id,
+                "title": (stage["title"] if stage is not None
+                          else self._conversation_title(
+                              self.conversation_id)),
+                "project": Path(self.workspace).name or self.workspace,
+                "model": stage["model"] if stage is not None else "",
+                "request": plan.get("request") or "",
+                "steps": len(plan.get("steps") or []),
+                "goldfish": plan.get("goldfish") is not None,
+                "workspace": self.workspace,
+                "started_at": (stage["started_at"]
+                               if stage is not None else None)}
+        try:
+            jobs = self.parallel_job_rows()
+        except Exception:
+            jobs = []
+        # The Inbox's clock is the store's clock (time.time in
+        # production, injectable) — one clock for grouping,
+        # triage stamps and snooze expiry, so they can never
+        # disagree about what "now" is.
+        return inbox_mod.group_items(
+            list(self._streams.values()), plan_gate, jobs,
+            self.inbox_store, self.inbox_store.now_fn(),
+            self.inbox_has_checkpoints)
+
+    def _inbox_find_item(self, key):
+        for group, items in self.inbox_groups().items():
+            for item in items:
+                if item["key"] == key:
+                    return group, item
+        return None, None
+
+    def _inbox_triage(self, key, state, snooze_choice=None):
+        """Record one triage action for `key`, remembering the
+        previous record for the one-level Undo. Returns False when
+        the item is not in the Inbox at all."""
+        _group, item = self._inbox_find_item(key)
+        if item is None:
+            return False
+        self._inbox_undo = (key, self.inbox_store.peek(key))
+        if state is None:
+            self.inbox_store.clear(key)
+            return True
+        now = self.inbox_store.now_fn()
+        until, next_launch = (None, False)
+        if state == inbox_mod.STATE_SNOOZED:
+            until, next_launch = inbox_mod.snooze_window(
+                snooze_choice or inbox_mod.SNOOZE_ONE_HOUR, now)
+        self.inbox_store.set(key, {
+            "kind": item["kind"], "state": state,
+            "title": item["title"], "project": item["project"],
+            "detail": item["detail"],
+            "workspace": item.get("workspace") or "",
+            "snooze_until": until,
+            "until_next_launch": next_launch,
+            "activity": list(item.get("activity") or []),
+            "updated": now})
+        return True
+
+    def inbox_dismiss(self, key):
+        """Dismiss from Inbox: the item waits in Done and returns
+        on new activity. Never stops its turn, never archives —
+        the underlying session is untouched."""
+        if self._inbox_triage(key, inbox_mod.STATE_DISMISSED):
+            self.log("Inbox: dismissed — it returns on new activity.")
+            self._refresh_inbox()
+
+    def inbox_hold(self, key):
+        """Put on Hold — toggles: a held item comes back to its
+        live group (the toggle is the way back once Undo's
+        one-level memory is gone, e.g. after a restart)."""
+        _group, item = self._inbox_find_item(key)
+        if item is None:
+            return
+        if item.get("triage_state") == inbox_mod.STATE_HELD:
+            if self._inbox_triage(key, None):
+                self.log("Inbox: off hold — back in its live group.")
+        elif self._inbox_triage(key, inbox_mod.STATE_HELD):
+            self.log("Inbox: on hold.")
+        self._refresh_inbox()
+
+    def inbox_snooze(self, key, choice):
+        if self._inbox_triage(key, inbox_mod.STATE_SNOOZED,
+                              snooze_choice=choice):
+            self.log(f"Inbox: snoozed ({choice}).")
+            self._refresh_inbox()
+
+    def inbox_mark_done(self, key):
+        """Mark as Done: the item is closed in the Inbox and does
+        NOT return on new activity. There is no conversation-
+        archive operation in Forge, so this is an Inbox-level
+        done-mark — the conversation itself is never touched
+        (never deleted, never archived)."""
+        if self._inbox_triage(key, inbox_mod.STATE_DONE):
+            self.log("Inbox: marked done.")
+            self._refresh_inbox()
+
+    def inbox_undo(self):
+        """Undo the one previous triage action (in-memory only —
+        a restart clears it)."""
+        pending = getattr(self, "_inbox_undo", None)
+        if pending is None:
+            return
+        key, previous = pending
+        self._inbox_undo = None
+        if previous is None:
+            self.inbox_store.clear(key)
+        else:
+            self.inbox_store.set(key, previous)
+        self.log("Inbox: undid the last triage action.")
+        self._refresh_inbox()
+
+    def _refresh_inbox(self):
+        win = getattr(self, "inbox_win", None)
+        if win is not None and win.isVisible():
+            win.refresh()
+
+    def inbox_can_go_to(self, item):
+        """Go to is offered for turns and plans whose conversation
+        still exists — a job has no conversation to jump to, and
+        an orphan turn whose conversation was deleted has nowhere
+        to go."""
+        if item is None:
+            return False
+        if item.get("kind") == "plan":
+            return item.get("conversation_id") is not None
+        if item.get("kind") != "turn":
+            return False
+        if item.get("live"):
+            return True
+        cid = item.get("conversation_id")
+        if cid is None:
+            return False
+        try:
+            return self.store.load(cid) is not None
+        except Exception:
+            return False
+
+    def inbox_go_to(self, item):
+        """Jump to the item: a turn's conversation (reattaching its
+        live turn, Mission Control's jump_to_stream), a plan gate's
+        conversation with the Plan window opened on it."""
+        if item is None:
+            return
+        cid = item.get("conversation_id")
+        if item.get("kind") == "plan":
+            if cid is not None and cid != self.conversation_id:
+                self.load_conversation(cid)
+            self.open_plan_window()
+            return
+        if item.get("kind") != "turn" or cid is None:
+            return
+        stream = self._stream_for_conversation(cid)
+        if stream is not None:
+            self.jump_to_stream(stream["id"])
+        else:
+            self.load_conversation(cid)
+
+    def inbox_open_checkpoints(self, item):
+        """A Ready turn's checkpoints, in its own project — the
+        same Checkpoints dialog open_checkpoints shows, opened on
+        the item's workspace instead of the current one. Restore
+        is the dialog's own action; the Inbox invents no promote."""
+        if item is None:
+            return
+        CheckpointsDialog(self, item.get("workspace") or self.workspace,
+                          APP_DIR, settings=self.settings,
+                          save_settings=self.save_settings,
+                          log=self.log).exec()
+
     def open_provider_chat(self):
         """Provider chat: single instance, refreshed on open, in
         the same shape as the other rooms."""
@@ -20665,6 +22267,67 @@ class ForgeWindow(QMainWindow):
         self._launch_fold(model, options, plan, then_start=False,
                           num_ctx=num_ctx)
 
+    def _write_trajectory_fallback(self, plan) -> None:
+        """Manus study M8 — the between-turn half of the saturation
+        backstop (see worker._write_trajectory for the mid-turn
+        half). Plan state comes from the window's sidecar
+        (APP_DIR/plans/<id>.json): completed steps stay ticked, so
+        the trajectory's plan status is the sidecar's, not a guess.
+        Decisions come from the plan document only when it carries
+        a Decisions section — the document has none on record, so
+        the field honestly says so in the usual case. Never raises
+        and never blocks the send: any failure leaves the history
+        exactly as the refused fold left it."""
+        steps = None
+        done: set = set()
+        title = ""
+        decisions: list = []
+        plan_state = getattr(self, "plan_state", None) or {}
+        raw_steps = plan_state.get("steps") or []
+        doc = str(plan_state.get("document") or "")
+        if raw_steps:
+            steps = [str(s.get("text", "")) for s in raw_steps]
+            done = {i for i, s in enumerate(raw_steps)
+                    if s.get("state") == "done"}
+            if doc.strip():
+                title = doc.strip().splitlines()[0][:80]
+        if doc.strip():
+            section = planning_mod.document_section(doc, "Decisions")
+            if section:
+                decisions = [ln.strip(" -•\t") for ln in
+                             section.splitlines() if ln.strip()]
+        try:
+            data = context_mod.build_trajectory(
+                self.messages, plan_steps=steps, plan_done=done,
+                title=title, decisions=decisions)
+            replaced = context_mod.trajectory_replacement(
+                self.messages, plan, data)
+            if replaced is None:
+                return
+        except Exception:
+            return
+        self.messages = replaced
+        stored = None
+        if self.workspace:
+            try:
+                stored = context_mod.store_trajectory(
+                    self.workspace, data)
+            except Exception as exc:
+                self.eventlog.record(
+                    "context_trajectory_store_failed",
+                    error=str(exc)[:160])
+        self.eventlog.record(
+            "context_trajectory", stored=stored,
+            files=len(data.get("files_changed") or []),
+            errors=len(data.get("errors") or []),
+            open_items=len(data.get("open_items") or []))
+        self.log("Earlier conversation condensed into a fixed-field "
+                 "trajectory summary — the run continues from that, "
+                 "not the full history.")
+        self.persist_conversation()
+        self.render()
+        self._update_context_gauge()
+
     def _maybe_fold(self, model, options, text) -> bool:
         """True when a pre-send fold has been launched (the turn then
         starts from the fold's completion, folded or not)."""
@@ -20691,6 +22354,31 @@ class ForgeWindow(QMainWindow):
         # that same number, never re-derived from the raw options.
         num_ctx = int(num_ctx or options.get("num_ctx", 8192) or 8192)
         style = self.settings.get("fold_style", "prose")
+        # Manus study M2: archive the FULL span before the summarizer
+        # render clips it. If the archive cannot be written, the fold
+        # does NOT happen — the send proceeds with the history
+        # unfolded, exactly as a refused fold does; content is never
+        # dropped without a pointer. No workspace in scope = exactly
+        # the pre-M2 path (no archive, no pointer).
+        archive_rel = None
+        if self.workspace:
+            try:
+                archive_rel = context_mod.archive_span(
+                    plan["span"], self.workspace)
+            except Exception as exc:
+                self.eventlog.record(
+                    "context_fold_failed",
+                    error=f"archive: {str(exc)[:160]}")
+                self.log("Could not archive the earlier conversation "
+                         "before summarizing it — "
+                         + ("sending as-is." if then_start
+                            else "nothing changed."))
+                self.stop_btn.setEnabled(False)
+                if then_start:
+                    self._start_turn(model, options, text)
+                else:
+                    self.send_btn.setEnabled(True)
+                return
         thread = SummarizeThread(
             self.client, model,
             context_mod.summary_messages(plan["span"], num_ctx, style=style),
@@ -20715,7 +22403,8 @@ class ForgeWindow(QMainWindow):
         def _done(summary_text):
             _settle()
             folded, count = context_mod.apply_fold(self.messages, plan, summary_text,
-                                                   style=style)
+                                                   style=style,
+                                                   archive_rel=archive_rel)
             if folded is not None:
                 # H5: the fold stops being the place memory goes
                 # to die. The fold itself is entered in the
@@ -20737,6 +22426,7 @@ class ForgeWindow(QMainWindow):
                 self.messages = folded
                 self.eventlog.record(
                     "context_folded", folded=count,
+                    archive=archive_rel,
                     estimate_before=plan["estimate_before"],
                     estimate_after=context_mod.total_estimate(folded, self._context_schemas()))
                 self.log(f"Earlier conversation summarized — ~{count} messages folded into one summary.")
@@ -20745,6 +22435,15 @@ class ForgeWindow(QMainWindow):
                 self._update_context_gauge()
             else:
                 self.log("The summary would not have shrunk the conversation — left exactly as it was.")
+                # Manus study M8: the between-turn fold could not
+                # shrink — the same saturation backstop as the
+                # worker's mid-turn path. The span is replaced with
+                # a program-built trajectory summary (plan state
+                # from the window's sidecar) instead of sending
+                # over the stale bulk. A failure here changes
+                # nothing: the send proceeds exactly as a refused
+                # fold does.
+                self._write_trajectory_fallback(plan)
             if then_start:
                 self._start_turn(model, options, text)
             else:
@@ -20822,7 +22521,8 @@ class ForgeWindow(QMainWindow):
         self.deck.push_receipt(text)
         self.ember.flare()
 
-    def request_approval(self, name, args, description, diff=None):
+    def request_approval(self, name, args, description, diff=None,
+                         allow_remember=True):
         # Item #64: the gate's owner is the worker that ASKED — the
         # gate pump sets _gate_owner_worker before presenting. With
         # no pump in play (the classic path, and every direct call)
@@ -20850,7 +22550,12 @@ class ForgeWindow(QMainWindow):
         # S6 (audit S1-33): the soft long-turn prompt rides this
         # same gate, but it is not a tool call — it must never grow
         # a remembered allow-rule, so its dialog hides Remember.
-        show_remember = name != LONG_TURN_TOOL
+        # Manus study M13: a proposal-driven gate passes
+        # allow_remember=False for the same reason — a proposal
+        # must never mint a rule that auto-allows a later call
+        # without the owner judging it. The default (True) keeps
+        # every existing caller exactly as it was.
+        show_remember = name != LONG_TURN_TOOL and allow_remember
         if diff is not None:
             dialog = ApprovalDialog(self, model, name, target,
                                     (description or "").split("\n", 1)[0],

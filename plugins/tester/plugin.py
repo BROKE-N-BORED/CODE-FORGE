@@ -26,7 +26,9 @@ import inspect
 import time
 
 from forge.ollama_client import OllamaClient
-from forge.tools import TOOL_SCHEMAS, Containment, execute_tool
+from forge.tools import (TOOL_SCHEMAS, Containment, execute_tool,
+                         failure_detail)
+from forge import handoff as handoff_mod
 from forge import seats as seats_mod
 from forge import lightmachine as light_mod
 
@@ -50,10 +52,52 @@ TESTER_SYSTEM = """You are the TESTER seat of a local coding agent. Your only jo
 Work the test task you are given: run the commands, read the files, try the edge cases.
 Do not fix anything. Do not trust claims — gather evidence with your tools.
 Finish with a report whose FIRST line is exactly "VERDICT: PASS" or "VERDICT: FAIL",
-then the evidence (commands run and what they returned), then any failures or risks found."""
+then the evidence (commands run and what they returned), then any failures or risks found.
+
+Close your report with these five lines, one per line, after the evidence:
+ASKED: <the task as you understood it>
+DONE: <what you did>
+FILES: <files you read or ran, one per line, or (none)>
+EVIDENCE: <commands run and what they returned>
+OPEN: <anything unfinished, risks found, or (none)>"""
 
 MAX_CYCLES = 4
 MAX_SECONDS = 600
+
+
+def _finalize_report(client, messages, options, model, report,
+                     remaining, cancelled):
+    """Manus study M7: close a completed tester report in the
+    handoff schema. One repair generation when the report
+    attempted the schema but missed sections — and only while
+    the wall clock and Stop allow it. A handoff still incomplete
+    after repair is flagged with its raw text intact, never
+    dropped. The TESTER REPORT prefix never moves (pinned)."""
+    _parsed, missing, attempted = handoff_mod.parse_handoff(report)
+    if missing and attempted and not cancelled() and remaining() > 0:
+        client.timeout = max(1, int(remaining()))
+        messages.append({"role": "user", "content":
+                         handoff_mod.repair_instruction(missing)})
+        chunks = []
+        try:
+            for event in client.chat_stream(model, messages, options, []):
+                if cancelled():
+                    break
+                content = event.get("message", {}).get("content", "")
+                if content:
+                    chunks.append(content)
+        except Exception:
+            chunks = []
+        repair = "".join(chunks).strip()
+        if repair:
+            messages.append({"role": "assistant", "content": repair})
+            report = report + "\n" + repair
+            _parsed, missing, _attempted = handoff_mod.parse_handoff(
+                report)
+    if missing:
+        report = (report + "\n[HANDOFF: incomplete — missing: "
+                  + ", ".join(missing) + "]")
+    return f"TESTER REPORT (model: {model})\n{report}"
 TESTER_TOOLS = [s for s in TOOL_SCHEMAS
                 if s["function"]["name"] in ("list_directory", "read_file", "run_command")]
 
@@ -182,7 +226,10 @@ def run_tester(args, ctx):
         transcript.append(assistant["content"])
         if not tool_calls:
             report = assistant["content"].strip()
-            return f"TESTER REPORT (model: {model})\n{report or '(tester produced no report)'}"
+            return _finalize_report(
+                client, messages, options, model,
+                report or "(tester produced no report)",
+                remaining, cancelled)
         for call in tool_calls:
             reason = stopped()
             if reason:
@@ -203,6 +250,14 @@ def run_tester(args, ctx):
                                             cancel_event, containment)
             except Exception as exc:
                 result = f"Tool error: {exc}"
+                # Manus study M4: the same rule as the driver's
+                # loop — an UNEXPECTED inner failure keeps its type
+                # and raising frame in the result the tester model
+                # reads, not just the flattened message. Authored
+                # ToolErrors (failure_detail == "") stay exact.
+                detail = failure_detail(exc)
+                if detail:
+                    result += "\n" + detail
             transcript.append(f"[{name}] {result[:400]}")
             messages.append({"role": "tool", "tool_name": name, "content": result})
     # Cycles ran out while the tester still had tools in hand — say so,

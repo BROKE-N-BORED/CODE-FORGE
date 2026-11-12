@@ -168,9 +168,26 @@ the way it is — when a decision changes, add the new one instead of
 erasing the old.
 """,
     "reviews": """# Reviews
-Review reports from Review mode: findings by severity, each with
-the fix it suggests. Reviews change nothing by themselves — they are
-the record the owner acts on.
+Review reports from Review mode: each report opens with a
+Walkthrough — what changed, the changes in dependency order
+grouped by layer, an Effort line and a Risk line — before the
+findings. Every finding is one line carrying
+its severity (Critical / Major / Minor / Trivial), its type (Bug /
+Security / Performance / Refactor / Nitpick) and its Source — what
+triggered it — plus the fix it suggests. Under each finding, one
+indented line starting 'Driver:' carries the Prompt for the
+Driver — a self-contained instruction for Code mode to fix
+exactly that finding (file, exact change, how to verify). When
+the owner sends a finding for fixing, the request is recorded
+in the review under a '## Fix requests' section at the end
+(date, finding, and the prompt that was sent), so the review
+carries its own fix history. Reviews change nothing by
+themselves — they are the record the owner acts on.
+Incremental reviews cover only the files changed since the last
+review the owner marked reviewed; after filing a report, update
+summary.md at the top with one block per review (date, review
+file, What-changed line, severity counts), newest first, so it
+reads as the whole review history at a glance.
 """,
     "research": """# Research
 Research plans and reports from Research mode. Plans are named

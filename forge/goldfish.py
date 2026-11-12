@@ -271,13 +271,42 @@ def read_named_files(workspace: str, plan_text: str,
     return out
 
 
+# Manus study M6 (anti-rut): the stages of a review are repeated
+# similar generations off one template — the shape that invites a
+# model to fall into the rhythm of its own last answer. Each stage
+# therefore carries ONE framing line the program rotates by stage
+# index: deterministic (same stage, same line, every run — no
+# randomness, no timestamps, so M1's stable-prefix discipline is
+# untouched), and confined to this one line: the stage's task,
+# the plan text, and the findings format are byte-identical to
+# what they were without it.
+STAGE_FRAMINGS = (
+    "Reviewer emphasis for this stage: weigh the plan's riskiest "
+    "assumption first, then work outward from it.",
+    "Reviewer emphasis for this stage: start from the plan's final "
+    "step and check that the earlier steps earn it.",
+    "Reviewer emphasis for this stage: give the step you understand "
+    "least your closest attention.",
+    "Reviewer emphasis for this stage: check the seams between "
+    "steps — hand-offs are where plans tear.",
+)
+
+
+def stage_framing(stage: str) -> str:
+    """The framing line for a stage, by its index in STAGES
+    (an unknown stage keeps the first line)."""
+    index = STAGES.index(stage) if stage in STAGES else 0
+    return STAGE_FRAMINGS[index % len(STAGE_FRAMINGS)]
+
+
 def build_stage_messages(stage: str, plan_text: str,
                          file_contents: dict | None = None) -> list[dict]:
     """THE FIREWALL, as a function shape: a goldfish stage's whole
     world is (standing orders, the plan, the named files' contents).
     There is no history parameter — nothing else can get in."""
     system = ZOOM_SYSTEM if stage == "zoom" else COMPREHENSION_SYSTEM
-    parts = ["THE PLAN UNDER REVIEW:\n" + str(plan_text or "")]
+    parts = ["THE PLAN UNDER REVIEW:\n" + str(plan_text or ""),
+             stage_framing(stage)]
     contents = file_contents or {}
     if contents:
         blocks = []

@@ -62,10 +62,11 @@ PROCEED_WORD = "PROCEED"
 
 # Required output sections per mode. Plan's are the document
 # skeleton the shell assembles; Design's and Architect's are the
-# skeleton their artifacts are drafted against; Review's pair is
-# its report shape (the findings, then the coverage line); Ask's
-# is its answer shape (the answer, then its sources); Code's is
-# the closing account its reply states.
+# skeleton their artifacts are drafted against; Review's trio is
+# its report shape (CR3: the Walkthrough orientation first, then
+# the findings, then the coverage line); Ask's is its answer
+# shape (the answer, then its sources); Code's is the closing
+# account its reply states.
 SKELETONS = {
     # Item C7: a plan draft also carries Success criteria ("done
     # means X is true" — the target the work is judged against)
@@ -80,7 +81,7 @@ SKELETONS = {
                "Numbers/tuning", "Assets", "Hand-off notes"],
     "architect": ["Components", "Data", "Interfaces", "Decisions",
                   "Open questions"],
-    "review": ["Findings", "Coverage"],
+    "review": ["Walkthrough", "Findings", "Coverage"],
     "ask": ["Answer", "Sources"],
     "code": ["Context read", "Changes", "Verification"],
     # Write mode (Write/Research spec, 2026-11-09): the document
@@ -263,6 +264,331 @@ def section_body(text: str, name: str) -> str | None:
         if heading.rstrip(":").lower() == name.rstrip(":").lower():
             return body
     return None
+
+
+# ---------- Review findings (CR2 — severity + type + Source) ----------
+#
+# One documented shape for a Review finding (CodeRabbit study,
+# Tier 1 #2): every finding in a review's ## Findings section is
+# one line —
+#
+#   - [SEVERITY · TYPE · Source: SOURCE] FILE:PLACE — PROBLEM — Fix: FIX
+#
+# SEVERITY is Critical | Major | Minor | Trivial; TYPE is Bug |
+# Security | Performance | Refactor | Nitpick; SOURCE names what
+# actually triggered the finding (a guideline, an owner learning,
+# a mechanical check, a rubric item, or "Reviewer judgment").
+# Reviews written before this format used BLOCKER / SHOULD-FIX /
+# NIT; those lines still parse through LEGACY_SEVERITY_MAP below,
+# with type/source unspecified. parse_finding is the ONE parser —
+# every consumer of finding lines (the Review room's list, the
+# Fix/Teach flows) goes through it, never a private copy.
+
+FINDING_SEVERITIES = ("Critical", "Major", "Minor", "Trivial")
+FINDING_TYPES = ("Bug", "Security", "Performance", "Refactor",
+                 "Nitpick")
+
+#: Pre-CR2 Review severity words -> the CR2 scale.
+LEGACY_SEVERITY_MAP = {"BLOCKER": "Critical",
+                       "SHOULD-FIX": "Major",
+                       "NIT": "Trivial"}
+
+_FINDING_BRACKET_RE = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
+_FINDING_LEGACY_RE = re.compile(
+    r"^(BLOCKER|SHOULD-FIX|NIT)\b\s*[:\-—]?\s*(.*)$", re.IGNORECASE)
+_FINDING_BULLET_RE = re.compile(r"^(?:[-*+•]\s+|\d+[.)]\s+)")
+_FINDING_SEP = "·"
+
+
+def _finding_canonical(value: str, options: tuple) -> str | None:
+    """The canonical-case member of `options` matching `value`
+    (case-insensitive), or None."""
+    folded = (value or "").strip().casefold()
+    for option in options:
+        if option.casefold() == folded:
+            return option
+    return None
+
+
+def parse_finding(line: str) -> dict | None:
+    """Parse ONE finding line (as listed from a review's ##
+    Findings section) into {severity, type, source, text, legacy}.
+
+    severity/type/source are None when the line does not carry
+    them (legacy lines, plain lines, malformed bracket headers) —
+    the caller reports them as unspecified, never guesses. text
+    is the cleaned full line (bullet/number prefix stripped) —
+    the exact string the Fix/Teach flows act on. legacy is True
+    when no bracket header was parsed (pre-format lines, incl.
+    the old severity words); a bracket header, even a malformed
+    one, marks an attempted new-format line (legacy False).
+    Returns None for a blank line — the one non-finding input,
+    matching the Review room's long-standing rule that every
+    non-empty Findings line is listed. Never raises."""
+    text = _FINDING_BULLET_RE.sub("", str(line or "").strip()).strip()
+    if not text:
+        return None
+    out = {"severity": None, "type": None, "source": None,
+           "text": text, "legacy": True}
+    bracket = _FINDING_BRACKET_RE.match(text)
+    if bracket:
+        out["legacy"] = False
+        parts = [p.strip() for p in bracket.group(1).split(_FINDING_SEP)]
+        for part in parts:
+            if not part:
+                continue
+            severity = _finding_canonical(part, FINDING_SEVERITIES)
+            if severity is not None and out["severity"] is None:
+                out["severity"] = severity
+                continue
+            ftype = _finding_canonical(part, FINDING_TYPES)
+            if ftype is not None and out["type"] is None:
+                out["type"] = ftype
+                continue
+            if part.lower().startswith("source:") \
+                    and out["source"] is None:
+                source = part.split(":", 1)[1].strip()
+                if source:
+                    out["source"] = source
+                continue
+        return out
+    legacy = _FINDING_LEGACY_RE.match(text)
+    if legacy:
+        out["severity"] = LEGACY_SEVERITY_MAP[legacy.group(1).upper()]
+    return out
+
+
+def finding_display(parsed: dict) -> str:
+    """The one-line list display for a parse_finding result: the
+    parsed severity + type lead, then the finding's own words (the
+    bracket header / legacy severity word is not repeated). Lines
+    with nothing parsed display as themselves."""
+    text = (parsed or {}).get("text", "")
+    if not parsed:
+        return text
+    head = " · ".join(x for x in (parsed.get("severity"),
+                                  parsed.get("type")) if x)
+    if text.startswith("[") and "]" in text:
+        rest = text.split("]", 1)[1].strip()
+        if head and rest:
+            return f"{head} — {rest}"
+        return rest or text
+    if parsed.get("legacy") and parsed.get("severity"):
+        legacy = _FINDING_LEGACY_RE.match(text)
+        if legacy and legacy.group(2).strip():
+            return f"{parsed['severity']} — {legacy.group(2).strip()}"
+    return text
+
+
+# ---------- "Prompt for the Driver" (CR7 — one finding, one fix) -----
+#
+# A review finding says what is wrong; the driver (Code mode) still
+# has to work out what to DO. CR7 closes that gap in the report
+# itself: under each finding line, one indented line starting
+# "Driver:" — a self-contained instruction for Code mode to fix
+# exactly this finding (file, exact change, how to verify). The
+# Review prompt instructs the shape (forge/permissions.py); the
+# helpers below are the program half. A Driver line is a
+# CONTINUATION, never a finding of its own: parse_findings_body
+# attaches it to the finding above it, and the Review room's Fix
+# flow sends it (with the finding line as context) instead of the
+# bare finding. Reports written before CR7 have no Driver lines
+# and fix exactly as before — the driver is None, never guessed.
+
+_DRIVER_RE = re.compile(r"^Driver:\s*(.*)$", re.IGNORECASE)
+
+
+def parse_driver_line(line: str) -> str | None:
+    """The driver prompt on a "Driver:" continuation line, or None.
+    Bullet/number prefixes are stripped first, the match is
+    case-insensitive, and an empty prompt ("Driver:" alone) reads
+    as no driver line at all. Never raises."""
+    text = _FINDING_BULLET_RE.sub("", str(line or "").strip()).strip()
+    if not text:
+        return None
+    match = _DRIVER_RE.match(text)
+    if not match:
+        return None
+    prompt = match.group(1).strip()
+    return prompt or None
+
+
+def parse_findings_body(body: str) -> list[dict]:
+    """Parse a ## Findings section into parse_finding dicts, each
+    carrying a "driver" key (the Driver line under it, or None).
+    A Driver line attaches to the finding directly above it — a
+    second Driver line under the same finding replaces the first,
+    so a re-filed report cannot stack stale prompts. An orphan
+    Driver line (no finding above it) is ignored, never listed.
+    Blank lines are skipped. parse_finding's own shape is
+    untouched; this only adds the "driver" key. Never raises."""
+    out: list[dict] = []
+    try:
+        lines = (body or "").splitlines()
+    except Exception:
+        return out
+    for raw in lines:
+        driver = parse_driver_line(raw)
+        if driver is not None:
+            if out:
+                out[-1]["driver"] = driver
+            continue
+        try:
+            parsed = parse_finding(raw)
+        except Exception:
+            parsed = None
+        if parsed is None:
+            continue
+        parsed["driver"] = None
+        out.append(parsed)
+    return out
+
+
+# ---------- Fix requests (CR9 — one finding, one recorded fix) -----
+#
+# The Review room's "Fix with Driver" action sends one finding to
+# Code mode (CR7's driver prompt when the report has one). CR9
+# records the request in the review file itself, under a ##
+# Fix requests section at the end — the review carries its own
+# fix history, so the owner can see which findings already have
+# a fix on the way and which are still open. The section is a
+# separate section, so the Findings parser never sees it, and
+# the entries are plain text the owner can read or edit by hand.
+# A fix request is a RECORD of asking, not proof the fix landed
+# — the Code turn runs on the bench, and its result lands in
+# the walkthroughs, not here.
+
+_FIX_REQUEST_RE = re.compile(r"^-\s+(\S+(?:\s+\S+)?)\s+—\s+(.*)$")
+_FIX_SENT_RE = re.compile(r"^\s*Sent:\s*(.*)$")
+
+
+def _flatten_one_line(text: str) -> str:
+    """One line of text, newlines folded to spaces — a fix
+    request entry is one finding line plus one Sent line, never
+    a pasted multi-line turn."""
+    return " ".join((text or "").split())
+
+
+def record_fix_request(review_text: str, when: str,
+                       finding_text: str, sent: str) -> str:
+    """The review text with one fix-request entry recorded under
+    ## Fix requests at the end (the section is created when the
+    review has none). The entry is "- <when> — <finding line>"
+    plus an indented "Sent: <the prompt that went to Code mode>".
+    The original text is otherwise untouched — a review with no
+    Fix requests section keeps every byte outside the appended
+    section. Never raises."""
+    try:
+        text = review_text or ""
+        when = (when or "").strip() or "unknown time"
+        entry = (f"- {when} — {_flatten_one_line(finding_text)}\n"
+                 f"  Sent: {_flatten_one_line(sent)}\n")
+        body = section_body(text, "Fix requests")
+        if body is None:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            return text + f"\n## Fix requests\n\n{entry}"
+        # The section exists: append the entry after its last
+        # line. section_body cannot say where the section ends,
+        # so the append point is found by re-scanning the lines.
+        lines = text.splitlines(keepends=True)
+        in_section = False
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                if in_section:
+                    insert_at = i
+                    break
+                if stripped == "## Fix requests":
+                    in_section = True
+                continue
+        if insert_at == len(lines) and lines \
+                and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.insert(insert_at, entry)
+        return "".join(lines)
+    except Exception:
+        return review_text or ""
+
+
+def fix_requests(review_text: str) -> list[dict]:
+    """The recorded fix requests from a review's ## Fix requests
+    section, in file order: {when, finding, sent}. A Sent line
+    belongs to the entry above it; an entry without one records
+    sent as "". No section reads as []. Never raises."""
+    out: list[dict] = []
+    try:
+        body = section_body(review_text or "", "Fix requests")
+    except Exception:
+        return out
+    if not body:
+        return out
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = _FIX_REQUEST_RE.match(line)
+        if match:
+            out.append({"when": match.group(1).strip(),
+                        "finding": match.group(2).strip(),
+                        "sent": ""})
+            continue
+        sent = _FIX_SENT_RE.match(line)
+        if sent and out:
+            out[-1]["sent"] = sent.group(1).strip()
+    return out
+
+
+def fix_requested_for(review_text: str, finding_text: str):
+    """The latest "when" a fix was requested for this exact
+    finding line, or None when none was recorded. Never raises."""
+    try:
+        wanted = _flatten_one_line(finding_text)
+        latest = None
+        for request in fix_requests(review_text):
+            if request.get("finding") == wanted:
+                latest = request.get("when")
+        return latest
+    except Exception:
+        return None
+
+
+# ---------- Review walkthrough (CR3 — orientation first) ----------
+#
+# A Review report opens with a ## Walkthrough section (CodeRabbit
+# study, Tier 1 #3): what changed, the changes in dependency order
+# grouped by layer, an Effort line and a Risk line — the 30-second
+# orientation before the findings. The shape is instructed by the
+# Review prompt (forge/permissions.py) and declared by the review
+# skeleton above; reports written before CR3 have no Walkthrough
+# section, and every consumer treats a missing section as absent
+# (section_body returns None), never an error. The helpers below
+# are the counts half of CR3: the Review room's Findings heading
+# summarises its parsed findings by severity, legacy lines counted
+# under their mapped severities (parse_finding already mapped
+# them, so no second mapping lives here).
+
+def finding_severity_counts(parsed_findings) -> dict:
+    """{severity: count} over parse_finding results, in the
+    canonical FINDING_SEVERITIES order, zero counts included.
+    Findings with no parsed severity are not counted."""
+    counts = {severity: 0 for severity in FINDING_SEVERITIES}
+    for parsed in parsed_findings or []:
+        severity = (parsed or {}).get("severity")
+        if severity in counts:
+            counts[severity] += 1
+    return counts
+
+
+def finding_counts_text(parsed_findings) -> str:
+    """The counts as one line — '1 Critical · 2 Major · 0 Minor ·
+    0 Trivial' — or "" when no finding carried a severity (a
+    pre-format report of plain lines has no counts to show)."""
+    counts = finding_severity_counts(parsed_findings)
+    if not any(counts.values()):
+        return ""
+    return " · ".join(f"{counts[s]} {s}" for s in FINDING_SEVERITIES)
 
 
 def homework_note(mode: str, reads: list[str], project_files: list[str]) -> str:
@@ -484,7 +810,11 @@ def research_section_instruction(section: str, document_so_far: str,
             "Name where the research will look, one source type per "
             "line: the web (which kinds of sites), this project's "
             "files, or files the owner supplied. Name real places — "
-            "'the web' alone is not a source list.")
+            "'the web' alone is not a source list. Name the "
+            "authoritative source for each kind of question FIRST — "
+            "the official docs, the official API reference, the "
+            "project's own repository — before any copy, mirror, or "
+            "summary, with its address when you know it.")
     elif section == "Depth":
         parts.append(
             "Write exactly one word — Standard or Deep — followed "
@@ -532,6 +862,35 @@ def research_plan_steps(document: str) -> list[str]:
     return steps
 
 
+# Manus study M11 — authoritative sources: the one mechanical
+# rule in this item. "Authoritative" has no clean general
+# definition in code (the shell cannot know the docs domain of
+# an arbitrary subject), so the definition is narrow and
+# owner-grounded: a URL the owner-approved plan itself named in
+# its "Sources to search" section. The run instruction lists
+# those URLs first (below); everything else about authority
+# stays instruction, in MODE_GUIDANCE and the run instruction.
+_URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
+
+
+def authoritative_urls(document: str) -> list[str]:
+    """The http(s) URLs the research plan names in its "Sources to
+    search" section, in plan order, deduped — the plan's own
+    authoritative sources. [] when the section names none (the
+    instruction still applies; nothing is invented). Trailing
+    sentence punctuation is stripped; a URL named twice counts
+    once."""
+    body = section_body(document, "Sources to search")
+    if not body:
+        return []
+    seen: list[str] = []
+    for match in _URL_RE.finditer(body):
+        url = match.group(0).rstrip(".,;:!?")
+        if url and url not in seen:
+            seen.append(url)
+    return seen
+
+
 def research_depth(document: str) -> str:
     """The depth a research plan declares: "deep" when its Depth
     section leads with the word Deep, else "standard" — an
@@ -566,6 +925,13 @@ def research_work_instruction(document: str, steps: list[str],
     at the named path against the report skeleton."""
     lines = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(steps))
     skeleton = "\n".join(f"## {s}" for s in SKELETONS["research"])
+    # Manus study M11: the plan's own named sources, opened first.
+    named = authoritative_urls(document)
+    named_line = ""
+    if named:
+        named_line = (
+            "The approved plan names these authoritative sources — "
+            "open them first: " + ", ".join(named) + ". ")
     return (
         "The owner approved this research plan — it is now your "
         "working instruction. Run the research it describes:\n\n"
@@ -579,6 +945,12 @@ def research_work_instruction(document: str, steps: list[str],
         f"so on. This run's budget is {page_cap} page operations "
         f"({depth} depth) and one hour; the shell stops browsing "
         "at the budget, so spend it on the best sources first. "
+        "AUTHORITATIVE SOURCES FIRST (Manus study M11): open the "
+        "official docs, the official API reference, or the "
+        "project's own repository before any copy, mirror, or "
+        "summary. A scraped copy is second-class — cite it as a "
+        "copy, and when sources disagree the authoritative one "
+        "wins and the report says so. " + named_line +
         "When a sub-question stays unanswered after a round, note "
         "the gap and search again with different terms before "
         "giving up on it.\n\n"

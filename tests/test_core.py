@@ -4627,8 +4627,18 @@ class SkribeWorkerTests(unittest.TestCase):
 
     def test_restricted_mode_writes_are_graded_too(self):
         # Plan mode may write plan files; those writes pass the same gate.
+        # Manus study M5: the script now opens with the turn's
+        # homework pass (a read, then the text reply that ends it)
+        # before writing — the pre-M5 script wrote as its first
+        # action, which only worked because a scripted call could
+        # execute mid-homework against the pass's read-only design;
+        # the homework gate now refuses that at execution. The
+        # guarantee under test is unchanged: the plan-mode write
+        # lands and is graded.
         ws = Path(tempfile.mkdtemp())
-        script = [{"tool": "write_file", "args": {"path": "PLAN.md", "content": "# plan"}},
+        script = [{"tool": "list_directory", "args": {"path": "."}},
+                  {"content": "READY — empty project."},
+                  {"tool": "write_file", "args": {"path": "PLAN.md", "content": "# plan"}},
                   {"content": "planned"},
                   {"content": "SKRIBE-VERDICT file=PLAN.md fzi=92 decision=finalize"}]
         perms = {"rules": [], "mode": "plan", "classes": {}}
@@ -7408,7 +7418,13 @@ class _GateWorker:
                      "finished_text", "failed",
                      "plan_ready", "plan_goldfish", "plan_document",
                      "plan_revised", "plan_active",
-                     "plan_step_done", "plan_turn_done", "turn_changes"):
+                     "plan_step_done", "plan_turn_done", "turn_changes",
+                     # Manus study M10 added the skill_drafted
+                     # connection in _start_turn; the stand-in
+                     # must carry the signal or every _start_turn
+                     # test through it errors (M10 leftover, fixed
+                     # in the M12 copy).
+                     "skill_drafted"):
             setattr(self, name, _GateSignal())
         _GateWorker.instances.append(self)
 
@@ -8978,15 +8994,16 @@ class PlanningWorkerTests(unittest.TestCase):
         # tool call smuggled into the draft response.
         self.assertEqual(client.calls, 1)
         # Item #58 adaptation: the first generation is the HOMEWORK
-        # pass now, so it offers READ tools (the no-tools rule moved
-        # to the drafting generations). The plan text arrived in
-        # that same generation and was taken as the draft; the
+        # pass now (the no-tools rule moved to the drafting
+        # generations). Manus study M5: the pass offers the mode's
+        # full surface, not a read-only cut — the plan text arrived
+        # in that same generation and was taken as the draft; the
         # smuggled call dropped unread, exactly as the old no-tools
         # capture dropped it.
-        from forge import permissions as _perms
         offered = [s["function"]["name"] for s in client.schemas_seen[0]]
         self.assertTrue(offered)
-        self.assertTrue(all(_perms.tool_class(n) == "read" for n in offered))
+        self.assertEqual(offered, [s["function"]["name"]
+                                   for s in worker._schemas()])
         self.assertEqual(hits["n"], 0)
         self.assertEqual(seen["ready"][0], ["Write the file", "Verify it"])
         worker.resolve_plan("approve")
@@ -9047,15 +9064,16 @@ class PlanningWorkerTests(unittest.TestCase):
                         "markup-only draft never became a plan")
         self.assertEqual(client.calls, 2)                 # unusable pass + the draft
         # Item #58 adaptation: both generations are HOMEWORK
-        # generations now, so read tools are offered in each (the
-        # no-tools rule moved to the clarify/section drafting
-        # generations). The markup generation's parsed call was
-        # refused inside the pass; the second generation's plan
-        # text became the draft — markup still never stands.
-        from forge import permissions as _perms
+        # generations now (the no-tools rule moved to the
+        # clarify/section drafting generations). Manus study M5:
+        # each offers the mode's full surface, not a read-only cut.
+        # The markup generation's parsed call was refused inside
+        # the pass; the second generation's plan text became the
+        # draft — markup still never stands.
+        surface = [s["function"]["name"] for s in worker._schemas()]
         for offered_schemas in client.schemas_seen:
             names = [s["function"]["name"] for s in offered_schemas]
-            self.assertTrue(all(_perms.tool_class(n) == "read" for n in names))
+            self.assertEqual(names, surface)
         self.assertEqual(hits["n"], 0)                    # nothing executed
         self.assertEqual(seen["ready"][0], ["Write the file", "Verify it"])
         self.assertNotIn("<tool_call", "".join(tokens))   # never streamed raw
@@ -9584,13 +9602,14 @@ class TextToolCallParsingTests(unittest.TestCase):
         self.assertTrue(seen["ready"], "plan_ready never fired")
         self.assertEqual(seen["ready"][0], ["Write the file", "Verify it"])
         # Item #58 adaptation: the draft now arrives in the HOMEWORK
-        # generation, which offers READ tools — the no-tools rule
-        # moved to the drafting generations. The text call was
+        # generation — the no-tools rule moved to the drafting
+        # generations. Manus study M5: the pass offers the mode's
+        # full surface, not a read-only cut. The text call was
         # still discarded unread (the reply was taken as the
         # draft), exactly as the old capture discarded it.
-        from forge import permissions as _perms
         offered = [s["function"]["name"] for s in client.schemas_seen[0]]
-        self.assertTrue(all(_perms.tool_class(n) == "read" for n in offered))
+        self.assertEqual(offered, [s["function"]["name"]
+                                   for s in worker._schemas()])
         self.assertEqual(hits["n"], 0)
         worker.resolve_plan("approve")
         deadline = _time.time() + 10
@@ -13567,6 +13586,10 @@ class _RecordingApprovalDialog:
         self.description = description
         self.diff = diff
         self.workspace = workspace
+        # Manus study M13: record whether the gate offered
+        # Remember, so a proposal-driven gate can be pinned as
+        # never minting a remembered rule.
+        self.show_remember = show_remember
         self.approved = False
         self.remember = False
         self.seen_pending = "unset"
@@ -17582,7 +17605,10 @@ class _OptionsRecordingWorker:
                      "finished_text", "failed",
                      "plan_ready", "plan_goldfish", "plan_document",
                      "plan_revised", "plan_active",
-                     "plan_step_done", "plan_turn_done", "turn_changes"):
+                     "plan_step_done", "plan_turn_done", "turn_changes",
+                     # See _GateWorker: _start_turn connects
+                     # skill_drafted since M10 (same leftover).
+                     "skill_drafted"):
             setattr(self, name, _GateSignal())
         _OptionsRecordingWorker.instances.append(self)
 
@@ -20621,6 +20647,324 @@ class ProviderTests(unittest.TestCase):
             self.assertTrue(ua.startswith("CodeForge"), ua)
 
 
+class GeminiThoughtSignatureTests(unittest.TestCase):
+    """Gemini 3 thought signatures (hotfix 1 of 3, 2026-11-11):
+    Gemini 3 requires a replayed functionCall part to carry its
+    thoughtSignature verbatim, as a sibling of functionCall on the
+    SAME part — omitting it for the first functionCall part in any
+    step of the current turn is a 400 (Google Cloud "Thought
+    signatures", REST/manual handling). Forge captures the
+    signature onto the internal call (function.thought_signature)
+    and reattaches it in _to_gemini_payload; the key never leaks
+    into Groq/EXAONE (rebuilt from name+args) or Ollama (stripped
+    from the verbatim send). No network in any test: scripted
+    transports throughout."""
+
+    def _gemini_fake(self, captured, replies):
+        """A fake urlopen serving one SSE reply per chat call, in
+        order; captures every request payload. Each reply is a
+        list of SSE JSON lines."""
+
+        def fake_urlopen(req, timeout=None):
+            captured.setdefault("payloads", []).append(
+                json.loads(req.data.decode("utf-8")))
+            idx = len(captured["payloads"]) - 1
+            lines = replies[idx] if idx < len(replies) else replies[-1]
+            return _ProviderFakeResponse(_sse(lines))
+
+        return fake_urlopen
+
+    @staticmethod
+    def _signed_call_reply(name, args, sig):
+        part = {"functionCall": {"name": name, "args": args}}
+        if sig is not None:
+            part["thoughtSignature"] = sig
+        return [json.dumps({"candidates": [{"content": {"parts": [part]},
+                                           "finishReason": "STOP"}]})]
+
+    @staticmethod
+    def _text_reply(text="done"):
+        return [json.dumps({"candidates": [{"content": {"parts": [
+            {"text": text}]}, "finishReason": "STOP"}]})]
+
+    def test_round_trip_signature_captured_and_reattached(self):
+        from forge import providers as p
+        captured = {}
+        client = p.GeminiClient("g-key", urlopen=self._gemini_fake(
+            captured, [self._signed_call_reply(
+                "list_directory", {"path": "."}, "SIG-AAA"),
+                self._text_reply()]))
+        events = list(client.chat_stream(
+            "gemini:gemini-3.6-flash",
+            [{"role": "user", "content": "list it"}], {}, []))
+        calls = events[0]["message"]["tool_calls"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function"]["name"], "list_directory")
+        # The capture: the signature rides the internal call.
+        self.assertEqual(calls[0]["function"].get("thought_signature"),
+                         "SIG-AAA")
+        # The replay: the same call, plus its result, goes back in.
+        messages = [
+            {"role": "user", "content": "list it"},
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_name": "list_directory",
+             "content": "a.txt"},
+        ]
+        list(client.chat_stream("gemini:gemini-3.6-flash",
+                                messages, {}, []))
+        payload = captured["payloads"][1]
+        model = payload["contents"][1]
+        self.assertEqual(model["role"], "model")
+        part = model["parts"][0]
+        self.assertEqual(part["functionCall"]["name"], "list_directory")
+        self.assertEqual(part["functionCall"]["args"], {"path": "."})
+        # The reattach: verbatim, as a sibling of functionCall.
+        self.assertEqual(part.get("thoughtSignature"), "SIG-AAA")
+
+    def test_parallel_calls_only_first_carries_signature(self):
+        from forge import providers as p
+        captured = {}
+        parallel = [json.dumps({"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "read_file",
+                             "args": {"path": "a.txt"}},
+             "thoughtSignature": "SIG-FIRST"},
+            {"functionCall": {"name": "read_file",
+                             "args": {"path": "b.txt"}}}]},
+            "finishReason": "STOP"}]})]
+        client = p.GeminiClient("g-key", urlopen=self._gemini_fake(
+            captured, [parallel, self._text_reply()]))
+        events = list(client.chat_stream(
+            "gemini:gemini-3.6-flash",
+            [{"role": "user", "content": "read both"}], {}, []))
+        calls = events[0]["message"]["tool_calls"]
+        self.assertEqual(len(calls), 2)
+        # Per Google's rule, only the first parallel part carries one.
+        self.assertEqual(calls[0]["function"].get("thought_signature"),
+                         "SIG-FIRST")
+        self.assertNotIn("thought_signature", calls[1]["function"])
+        messages = [
+            {"role": "user", "content": "read both"},
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_name": "read_file", "content": "AAA"},
+            {"role": "tool", "tool_name": "read_file", "content": "BBB"},
+        ]
+        list(client.chat_stream("gemini:gemini-3.6-flash",
+                                messages, {}, []))
+        contents = captured["payloads"][1]["contents"]
+        model = contents[1]
+        self.assertEqual(len(model["parts"]), 2)
+        self.assertEqual(model["parts"][0].get("thoughtSignature"),
+                         "SIG-FIRST")
+        self.assertNotIn("thoughtSignature", model["parts"][1])
+        # Order: all calls before all responses (FC1, FC2, FR1, FR2)
+        # — interleaving them is a 400 per the same docs page.
+        batch = contents[2]
+        self.assertEqual(batch["role"], "user")
+        self.assertEqual(len(batch["parts"]), 2)
+        self.assertEqual(batch["parts"][0]["functionResponse"]["response"],
+                         {"result": "AAA"})
+        self.assertEqual(batch["parts"][1]["functionResponse"]["response"],
+                         {"result": "BBB"})
+
+    def test_sequential_steps_each_signature_reattached(self):
+        from forge import providers as p
+        captured = {}
+        client = p.GeminiClient("g-key", urlopen=self._gemini_fake(
+            captured, [self._text_reply()]))
+        # Two steps, each carrying its own signature.
+        messages = [
+            {"role": "user", "content": "do it"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "list_directory",
+                             "arguments": {"path": "."},
+                             "thought_signature": "SIG-A"}}]},
+            {"role": "tool", "tool_name": "list_directory",
+             "content": "a.txt"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "read_file",
+                             "arguments": {"path": "a.txt"},
+                             "thought_signature": "SIG-B"}}]},
+            {"role": "tool", "tool_name": "read_file",
+             "content": "body"},
+        ]
+        list(client.chat_stream("gemini:gemini-3.6-flash",
+                                messages, {}, []))
+        contents = captured["payloads"][0]["contents"]
+        # user, model(SIG-A), batch, model(SIG-B), batch.
+        self.assertEqual(contents[1]["parts"][0].get("thoughtSignature"),
+                         "SIG-A")
+        self.assertEqual(contents[3]["parts"][0].get("thoughtSignature"),
+                         "SIG-B")
+
+    def test_missing_signature_sends_no_empty_field(self):
+        from forge import providers as p
+        captured = {}
+        client = p.GeminiClient("g-key", urlopen=self._gemini_fake(
+            captured, [self._signed_call_reply(
+                "list_directory", {"path": "."}, None),
+                self._text_reply()]))
+        events = list(client.chat_stream(
+            "gemini:gemini-3.6-flash",
+            [{"role": "user", "content": "list it"}], {}, []))
+        calls = events[0]["message"]["tool_calls"]
+        # No signature sent means no key at all — never empty/null.
+        self.assertNotIn("thought_signature", calls[0]["function"])
+        messages = [
+            {"role": "user", "content": "list it"},
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_name": "list_directory",
+             "content": "a.txt"},
+        ]
+        list(client.chat_stream("gemini:gemini-3.6-flash",
+                                messages, {}, []))
+        part = captured["payloads"][1]["contents"][1]["parts"][0]
+        self.assertNotIn("thoughtSignature", part)
+        self.assertEqual(part["functionCall"]["name"], "list_directory")
+
+    def test_groq_payload_drops_signature(self):
+        from forge import providers as p
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [{"delta": {"content": "ok"},
+                                         "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        client = p.GroqClient("test-key", urlopen=fake_urlopen)
+        messages = [
+            {"role": "user", "content": "read it"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "read_file",
+                             "arguments": {"path": "a.txt"},
+                             "thought_signature": "SIG-LEAK"}}]},
+            {"role": "tool", "tool_name": "read_file",
+             "content": "file body"},
+        ]
+        list(client.chat_stream("groq:openai/gpt-oss-20b",
+                                messages, {}, []))
+        payload = captured["payload"]
+        fn = payload["messages"][1]["tool_calls"][0]["function"]
+        # Groq rebuilds its calls from name+args only.
+        self.assertEqual(set(fn.keys()), {"name", "arguments"})
+        self.assertNotIn("thought_signature", json.dumps(payload))
+
+    def test_exaone_payload_drops_signature(self):
+        from forge import providers as p
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [{"delta": {"content": "ok"},
+                                         "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        client = p.ExaoneClient("test-key", urlopen=fake_urlopen)
+        messages = [
+            {"role": "user", "content": "read it"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "read_file",
+                             "arguments": {"path": "a.txt"},
+                             "thought_signature": "SIG-LEAK"}}]},
+            {"role": "tool", "tool_name": "read_file",
+             "content": "file body"},
+        ]
+        list(client.chat_stream("exaone:k-exaone_v2.5",
+                                messages, {}, []))
+        payload = captured["payload"]
+        fn = payload["messages"][1]["tool_calls"][0]["function"]
+        self.assertEqual(set(fn.keys()), {"name", "arguments"})
+        self.assertNotIn("thought_signature", json.dumps(payload))
+
+    def test_ollama_payload_drops_signature_and_keeps_caller_messages(self):
+        from unittest import mock
+        from forge.ollama_client import OllamaClient
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _FakeHTTPResponse(
+                b'{"message": {"content": "ok"}}\n')
+
+        messages = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "read_file",
+                             "arguments": {"path": "a.txt"},
+                             "thought_signature": "SIG-KEEP"}}]},
+            {"role": "tool", "tool_name": "read_file",
+             "content": "body"},
+        ]
+        client = OllamaClient("http://127.0.0.1:11434")
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            list(client.chat_stream("m", messages, {}, []))
+        # The verbatim local send is stripped of the Gemini-only key.
+        self.assertNotIn("thought_signature",
+                         json.dumps(captured["payload"]))
+        # ...while the caller's own messages still carry it.
+        self.assertEqual(
+            messages[1]["tool_calls"][0]["function"]["thought_signature"],
+            "SIG-KEEP")
+
+    def test_worker_carries_signature_through_tool_flow(self):
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        from forge.worker import AgentWorker
+        seen = {"messages": []}
+
+        class _SignedClient:
+            """First generation yields a signed tool call; the
+            second answers in text. Records every request's
+            messages so the test can see what the next generation
+            was handed."""
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None):
+                import copy
+                seen["messages"].append(copy.deepcopy(messages))
+                self.calls += 1
+                if self.calls == 1:
+                    yield {"message": {"content": "", "tool_calls": [
+                        {"function": {"name": "ping_tool",
+                                     "arguments": {"word": "hi"},
+                                     "thought_signature": "SIG-WORKER"}}]},
+                           "done": True}
+                else:
+                    yield {"message": {"content": "done",
+                                       "tool_calls": []}, "done": True}
+
+        extra = {"ping_tool": (_ping_schema(), lambda args: "pong",
+                               False, "test")}
+        worker = AgentWorker(_SignedClient(), "fake",
+                             [{"role": "user", "content": "go"}], {},
+                             tempfile.mkdtemp(), extra_tools=extra)
+        worker.run()
+        # The stored assistant message keeps the signature.
+        assistant = [m for m in worker.messages
+                     if m.get("role") == "assistant"
+                     and m.get("tool_calls")]
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(
+            assistant[0]["tool_calls"][0]["function"]["thought_signature"],
+            "SIG-WORKER")
+        # And the next generation's request carried it back.
+        self.assertGreaterEqual(len(seen["messages"]), 2)
+        replay = [m for m in seen["messages"][1]
+                  if m.get("role") == "assistant"
+                  and m.get("tool_calls")]
+        self.assertEqual(len(replay), 1)
+        self.assertEqual(
+            replay[0]["tool_calls"][0]["function"]["thought_signature"],
+            "SIG-WORKER")
+
+
 class ProviderAllowlistTests(unittest.TestCase):
     """Provider allowlist (owner's order, 2026-11-10): Forge accepts
     ONLY the listed provider models — six at the order (three each
@@ -21338,7 +21682,7 @@ class TokensTests(unittest.TestCase):
     # The pinned STYLE literal: originally the pre-G7 snapshot;
     # regenerated programmatically from build_style(TOKENS) after
     # the 2026-11-09 palette re-base (do not hand-edit — regenerate).
-    EXPECTED_STYLE = "\nQWidget { background:#12100d; color:#eae6df; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }\nQMainWindow { background:#12100d; }\nQFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332e26, stop:0.05 #221f1a, stop:1 #201c17); border:0; }\nQFrame#sidebar { border-right:1px solid rgba(255,179,71,0.30); }\nQFrame#inspector { border-left:1px solid rgba(255,179,71,0.30); }\nQFrame#header { background:#221f1a; border-bottom:1px solid rgba(255,179,71,0.30); }\nQLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:#f3ede0; }\nQLabel#stamp { color:#c9aa7f; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }\nQLabel#muted { color:#a39a8b; }\nQLabel#section { color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQLabel#big { font-size:15px; font-weight:700; color:#f8f7f5; }\nQPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #38322a, stop:1 #2d2922); border:1px solid #554c3e; border-radius:7px; padding:8px 12px; color:#f0ede7; }\nQPushButton:hover { background:#433c31; border-color:rgba(255,179,71,0.45); }\nQPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c2611a, stop:1 #a34d12); border-color:#c2611a; color:white; font-weight:700; }\nQPushButton#primary:hover { background:#c2611a; }\nQPushButton#nav { text-align:left; background:transparent; border:0; padding:9px 10px; color:#c4bdae; }\nQPushButton#nav:hover { background:#312c25; color:white; }\nQPushButton#navActive { text-align:left; background:#2e2a20; border:1px solid #a34d12; border-radius:7px; padding:9px 10px; color:#ffd9ae; }\nQLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:#1b1814; border:1px solid #453e33; border-radius:7px; padding:9px; selection-background-color:#a34d12; }\nQLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:rgba(255,179,71,0.55); }\nQTextBrowser { background:#201d18; border:1px solid rgba(255,179,71,0.38); border-radius:12px; padding:12px; }\nQComboBox QAbstractItemView { background:#27231d; selection-background-color:#a34d12; }\nQProgressBar { background:#1b1814; border:1px solid rgba(255,179,71,0.18); border-radius:5px; height:10px; text-align:center; font-size:9px; color:#e0dacf; }\nQProgressBar::chunk { background:#b47f4a; border-radius:3px; }\nQProgressBar#hot::chunk { background:#d97a26; }\nQProgressBar#crit::chunk { background:#c0392b; }\nQStatusBar { background:#201c17; color:#a39a8b; }\nQSplitter::handle { background:#3f382e; width:1px; }\nQPushButton#accordion { text-align:left; background:transparent; border:0; padding:4px 2px; color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQPushButton#accordion:hover { color:#e2c9a9; background:transparent; }\nQPushButton#topbarBtn { padding:5px 10px; }\nQPushButton#topbarBtn:checked { background:#40392f; border-color:#a34d12; color:#ffd9ae; }\nQScrollArea#historyScroll { background:#201c17; border:0; }\nQWidget#historyContent { background:#201c17; }\nQMenu { background:#231f1a; border:1px solid #4a4236; }\nQMenu::item { padding:7px 22px 7px 12px; color:#eae6df; }\nQMenu::item:selected { background:#383229; }\nQMenu::separator { height:1px; background:#3f382e; margin:4px 8px; }\n"
+    EXPECTED_STYLE = "\nQWidget { background:#12100d; color:#eae6df; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }\nQMainWindow { background:#12100d; }\nQFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332e26, stop:0.05 #221f1a, stop:1 #201c17); border:0; }\nQFrame#sidebar { border-right:1px solid rgba(255,179,71,0.30); }\nQFrame#inspector { border-left:1px solid rgba(255,179,71,0.30); }\nQFrame#header { background:#221f1a; border-bottom:1px solid rgba(255,179,71,0.30); }\nQLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:#f3ede0; }\nQLabel#stamp { color:#c9aa7f; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }\nQLabel#muted { color:#a39a8b; }\nQLabel#section { color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQLabel#big { font-size:15px; font-weight:700; color:#f8f7f5; }\nQPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #38322a, stop:1 #2d2922); border:1px solid #554c3e; border-radius:7px; padding:8px 12px; color:#f0ede7; }\nQPushButton:hover { background:#433c31; border-color:rgba(255,179,71,0.45); }\nQPushButton:pressed { background:#201c17; }\nQPushButton:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c2611a, stop:1 #a34d12); border-color:#c2611a; color:white; font-weight:700; }\nQPushButton#primary:hover { background:#c2611a; }\nQPushButton#primary:pressed { background:#a34d12; }\nQPushButton#primary:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#nav { text-align:left; background:transparent; border:0; padding:9px 10px; color:#c4bdae; }\nQPushButton#nav:hover { background:#312c25; color:white; }\nQPushButton#nav:pressed { background:#2e2a20; }\nQPushButton#nav:disabled { color:#a39a8b; }\nQPushButton#navActive { text-align:left; background:#2e2a20; border:1px solid #a34d12; border-radius:7px; padding:9px 10px; color:#ffd9ae; }\nQPushButton#navActive:pressed { background:#201c17; }\nQPushButton#navActive:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:#1b1814; border:1px solid #453e33; border-radius:7px; padding:9px; selection-background-color:#a34d12; }\nQLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:rgba(255,179,71,0.55); }\nQTextBrowser { background:#201d18; border:1px solid rgba(255,179,71,0.38); border-radius:12px; padding:12px; }\nQComboBox QAbstractItemView { background:#27231d; selection-background-color:#a34d12; }\nQProgressBar { background:#1b1814; border:1px solid rgba(255,179,71,0.18); border-radius:5px; height:10px; text-align:center; font-size:9px; color:#e0dacf; }\nQProgressBar::chunk { background:#b47f4a; border-radius:3px; }\nQProgressBar#hot::chunk { background:#d97a26; }\nQProgressBar#crit::chunk { background:#c0392b; }\nQStatusBar { background:#201c17; color:#a39a8b; }\nQSplitter::handle { background:#3f382e; width:1px; }\nQScrollBar:vertical { background:#1b1814; width:10px; margin:0px; border:0; }\nQScrollBar:horizontal { background:#1b1814; height:10px; margin:0px; border:0; }\nQScrollBar::handle:vertical { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-height:20px; }\nQScrollBar::handle:horizontal { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-width:20px; }\nQScrollBar::handle:vertical:hover { background:#433c31; }\nQScrollBar::handle:horizontal:hover { background:#433c31; }\nQScrollBar::handle:vertical:pressed { background:#2d2922; }\nQScrollBar::handle:horizontal:pressed { background:#2d2922; }\nQScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }\nQScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }\nQScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; background:transparent; border:0; }\nQScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }\nQScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }\nQScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }\nQPushButton#accordion { text-align:left; background:transparent; border:0; padding:4px 2px; color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQPushButton#accordion:hover { color:#e2c9a9; background:transparent; }\nQPushButton#accordion:pressed { background:#312c25; }\nQPushButton#accordion:disabled { color:#a39a8b; }\nQPushButton#topbarBtn { padding:5px 10px; }\nQPushButton#topbarBtn:checked { background:#40392f; border-color:#a34d12; color:#ffd9ae; }\nQPushButton#topbarBtn:pressed { background:#201c17; }\nQPushButton#topbarBtn:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQScrollArea#historyScroll { background:#201c17; border:0; }\nQWidget#historyContent { background:#201c17; }\nQMenu { background:#231f1a; border:1px solid #4a4236; }\nQMenu::item { padding:7px 22px 7px 12px; color:#eae6df; }\nQMenu::item:selected { background:#383229; }\nQMenu::separator { height:1px; background:#3f382e; margin:4px 8px; }\n"
 
     # Tokens STYLE itself consumes (the template's placeholders).
     STYLE_TOKENS = ['accent_primary_bottom', 'accent_primary_top', 'border_button', 'border_input', 'border_menu', 'padding_accordion', 'padding_button', 'padding_chat', 'padding_input', 'padding_menu_item', 'padding_nav', 'padding_topbar', 'progress_chunk', 'progress_crit', 'progress_hot', 'radius_card', 'radius_chunk', 'radius_control', 'radius_progress', 'rim', 'rim_chat', 'rim_focus', 'rim_hover', 'rim_soft', 'surface_base', 'surface_button_bottom', 'surface_button_hover', 'surface_button_top', 'surface_chat', 'surface_combo_view', 'surface_glass_bottom', 'surface_glass_mid', 'surface_glass_top', 'surface_input', 'surface_menu', 'surface_menu_selected', 'surface_nav_active', 'surface_nav_hover', 'surface_splitter', 'surface_topbar_checked', 'text_accordion_hover', 'text_amber_light', 'text_base', 'text_big', 'text_brand', 'text_button', 'text_muted', 'text_nav', 'text_progress', 'text_section', 'text_white']
@@ -22245,11 +22589,15 @@ class HomeworkPhaseWorkerTests(unittest.TestCase):
             client, [{"role": "user", "content": "make a cat game"}])
         w.start()
         self.assertTrue(self._wait_ready(w, seen))
-        # The FIRST generation offered READ tools only — homework —
+        # The FIRST generation — homework — is offered the mode's
+        # full surface (Manus study M5: the offer no longer shrinks
+        # to read-class for the pass; the read-only discipline is
+        # enforced at execution, pinned in StableToolSurfaceTests),
         # and the drafting generations offer no tools at all.
         first = [s["function"]["name"] for s in client.schemas_seen[0]]
         self.assertIn("read_file", first)
-        self.assertTrue(all(tool_class(n) == "read" for n in first))
+        self.assertEqual(first, [s["function"]["name"]
+                                 for s in w._schemas()])
         self.assertEqual(client.schemas_seen[3], [])
         # ...and the read really ran through the tool pipeline: the
         # file's content is in the conversation as a tool message,
@@ -22490,12 +22838,17 @@ class InLoopHomeworkWorkerTests(unittest.TestCase):
         self._run_to_finish(w, seen)
         first = [s["function"]["name"] for s in client.schemas_seen[0]]
         self.assertIn("read_file", first)
-        self.assertNotIn("write_file", first)
-        self.assertTrue(all(tool_class(n) == "read" for n in first))
-        # After homework the drafting generation sees the FULL mode
-        # tool set — design mode may write its spec file.
+        # Manus study M5: homework no longer shrinks the offer to
+        # read-class — the first generation carries the mode's full
+        # surface, byte-identical to the drafting generation's
+        # (the pass's read-only discipline is enforced at
+        # execution; StableToolSurfaceTests pins the refusal).
+        self.assertIn("write_file", first)
+        # After homework the drafting generation sees the same FULL
+        # mode tool set — design mode may write its spec file.
         third = [s["function"]["name"] for s in client.schemas_seen[2]]
         self.assertIn("write_file", third)
+        self.assertEqual(first, third)
         notes = [m["content"] for m in w.messages
                  if m.get("role") == "system"
                  and m["content"].startswith("[Homework")]
@@ -30012,6 +30365,234 @@ class TerminalPullTests(unittest.TestCase):
 # Palette re-base guard — blue must not creep back (2026-11-09)
 # ------------------------------------------------------------------
 
+class StatesStyleTests(unittest.TestCase):
+    """T1 (GUIFX task list, 2026-11-11): button states. Before T1
+    the tree had ZERO :disabled and :pressed rules, so controls
+    that go dead during a run (Send, pull, dispatch) still looked
+    live. STYLE now carries :pressed (a deeper surface than the
+    hover) and :disabled (flattened to surface_input, dimmed
+    border_input rim, text_muted label) for the base QPushButton
+    and for every named variant whose own rule overrides
+    background/border/color and would otherwise mask the base
+    state rule (#primary, #nav, #navActive, #accordion, and
+    #topbarBtn via its :checked rule), plus the WindowHeader
+    overflow QToolButton, which is styled by its own inline
+    sheet rather than by STYLE. Every value in a state rule
+    resolves from TOKENS — T1 needed no new token. Assertions
+    are stylesheet-level, not pixel-level."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        import forge.main as main_mod
+        cls.main = main_mod
+
+    @staticmethod
+    def _rules(style):
+        """selector -> {property: value} for a Qt stylesheet."""
+        rules = {}
+        for chunk in style.split("}"):
+            if "{" not in chunk:
+                continue
+            selector, body = chunk.rsplit("{", 1)
+            decls = {}
+            for decl in body.split(";"):
+                if ":" in decl:
+                    prop, value = decl.split(":", 1)
+                    decls[prop.strip()] = value.strip()
+            rules[selector.strip()] = decls
+        return rules
+
+    def test_base_button_has_pressed_and_disabled(self):
+        rules = self._rules(self.main.STYLE)
+        t = self.main.TOKENS
+        self.assertIn("QPushButton:pressed", rules)
+        self.assertIn("QPushButton:disabled", rules)
+        pressed = rules["QPushButton:pressed"]
+        disabled = rules["QPushButton:disabled"]
+        # Pressed reads "in": a deeper surface than the hover.
+        self.assertEqual(pressed["background"],
+                         t["surface_glass_bottom"])
+        self.assertNotEqual(pressed["background"],
+                            rules["QPushButton:hover"]["background"])
+        # Disabled reads dead: flat surface, dim rim, muted label.
+        self.assertEqual(disabled["background"], t["surface_input"])
+        self.assertEqual(disabled["border-color"], t["border_input"])
+        self.assertEqual(disabled["color"], t["text_muted"])
+
+    def test_disabled_button_differs_from_enabled(self):
+        rules = self._rules(self.main.STYLE)
+        enabled = rules["QPushButton"]
+        disabled = rules["QPushButton:disabled"]
+        self.assertNotEqual(disabled["color"], enabled["color"])
+        self.assertNotEqual(disabled["background"],
+                            enabled["background"])
+
+    def test_primary_has_pressed_and_disabled(self):
+        rules = self._rules(self.main.STYLE)
+        t = self.main.TOKENS
+        self.assertEqual(
+            rules["QPushButton#primary:pressed"]["background"],
+            t["accent_primary_bottom"])
+        disabled = rules["QPushButton#primary:disabled"]
+        self.assertEqual(disabled["color"], t["text_muted"])
+        self.assertEqual(disabled["background"], t["surface_input"])
+        self.assertEqual(disabled["border-color"], t["border_input"])
+
+    def test_named_variants_carry_state_rules(self):
+        rules = self._rules(self.main.STYLE)
+        for name in ("nav", "navActive", "accordion", "topbarBtn"):
+            self.assertIn("QPushButton#%s:disabled" % name, rules)
+            self.assertIn("QPushButton#%s:pressed" % name, rules)
+            self.assertEqual(
+                rules["QPushButton#%s:disabled" % name]["color"],
+                self.main.TOKENS["text_muted"])
+
+    def test_states_present_in_compact_density_too(self):
+        compact = self._rules(self.main.build_style("compact"))
+        for selector in ("QPushButton:pressed", "QPushButton:disabled",
+                         "QPushButton#primary:disabled",
+                         "QPushButton#primary:pressed",
+                         "QPushButton#nav:disabled",
+                         "QPushButton#navActive:disabled",
+                         "QPushButton#accordion:disabled",
+                         "QPushButton#topbarBtn:pressed"):
+            self.assertIn(selector, compact)
+
+    def test_state_rules_use_only_token_values(self):
+        import re
+        token_values = set(self.main.TOKENS.values())
+        state_rules = {s: d for s, d in
+                       self._rules(self.main.STYLE).items()
+                       if ":pressed" in s or ":disabled" in s}
+        self.assertTrue(state_rules)
+        for selector, decls in state_rules.items():
+            for value in decls.values():
+                for literal in re.findall(
+                        r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)", value):
+                    self.assertIn(
+                        literal, token_values,
+                        "%s uses non-token literal %s"
+                        % (selector, literal))
+
+    def test_overflow_toolbutton_sheet_has_states(self):
+        from PySide6.QtWidgets import QWidget
+        parent = QWidget()
+        self.addCleanup(parent.close)
+        header = self.main.build_window_header(
+            parent, "T", overflow_actions=[("Act", lambda: None)])
+        sheet = header.overflow_btn.styleSheet()
+        t = self.main.TOKENS
+        self.assertIn("QToolButton:pressed", sheet)
+        self.assertIn("QToolButton:disabled", sheet)
+        self.assertIn(t["surface_glass_bottom"], sheet)
+        self.assertIn(t["text_muted"], sheet)
+        self.assertIn(t["border_input"], sheet)
+
+
+class ScrollbarStyleTests(unittest.TestCase):
+    """T2 (GUIFX task list, 2026-11-11): Forge had zero QScrollBar
+    rules anywhere in the tree, so every scrollable surface (chat,
+    sessions list, diff panes, run output, settings tabs) rendered
+    the platform-default bar. One rule family in the token-generated
+    STYLE template now styles them all: thin 10px bars, dark track,
+    warm thumb with hover/pressed states, arrow buttons hidden."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        import forge.main as main_mod
+        cls.main = main_mod
+
+    @staticmethod
+    def _scrollbar_lines(style):
+        return [ln for ln in style.splitlines() if "QScrollBar" in ln]
+
+    def test_vertical_and_horizontal_bars_present(self):
+        style = self.main.STYLE
+        vert = [ln for ln in self._scrollbar_lines(style)
+                if ln.startswith("QScrollBar:vertical {")]
+        horiz = [ln for ln in self._scrollbar_lines(style)
+                 if ln.startswith("QScrollBar:horizontal {")]
+        self.assertEqual(len(vert), 1)
+        self.assertEqual(len(horiz), 1)
+        self.assertIn("width:10px", vert[0])
+        self.assertIn("height:10px", horiz[0])
+
+    def test_handle_track_and_page_subcontrols_present(self):
+        rules = "\n".join(self._scrollbar_lines(self.main.STYLE))
+        for frag in ("::handle:vertical", "::handle:horizontal",
+                     "::add-page:vertical", "::sub-page:vertical",
+                     "::add-page:horizontal", "::sub-page:horizontal",
+                     "::add-line:vertical", "::sub-line:vertical",
+                     "::add-line:horizontal", "::sub-line:horizontal"):
+            self.assertIn(frag, rules,
+                          "missing QScrollBar sub-control %s" % frag)
+
+    def test_handle_hover_and_pressed_present(self):
+        style = self.main.STYLE
+        for frag in ("QScrollBar::handle:vertical:hover",
+                     "QScrollBar::handle:horizontal:hover",
+                     "QScrollBar::handle:vertical:pressed",
+                     "QScrollBar::handle:horizontal:pressed"):
+            self.assertIn(frag, style, "missing %s" % frag)
+
+    def test_handle_states_are_distinct_token_values(self):
+        import re
+        style = self.main.STYLE
+        tokens = self.main.TOKENS
+
+        def bg(fragment):
+            m = re.search(re.escape(fragment) + r" \{ background:([^;]+);",
+                          style)
+            self.assertIsNotNone(m, "no rule for %s" % fragment)
+            return m.group(1)
+
+        rest = bg("QScrollBar::handle:vertical")
+        hover = bg("QScrollBar::handle:vertical:hover")
+        pressed = bg("QScrollBar::handle:vertical:pressed")
+        self.assertEqual(rest, tokens["surface_button_top"])
+        self.assertEqual(hover, tokens["surface_button_hover"])
+        self.assertEqual(pressed, tokens["surface_button_bottom"])
+        self.assertNotEqual(rest, hover)
+        self.assertNotEqual(hover, pressed)
+
+    def test_arrow_subcontrols_are_zero_sized(self):
+        for ln in self._scrollbar_lines(self.main.STYLE):
+            if "arrow" in ln:
+                self.assertIn("0px", ln,
+                              "arrow rule not zero-sized: %s" % ln)
+        rules = "\n".join(self._scrollbar_lines(self.main.STYLE))
+        for frag in ("::up-arrow:vertical", "::down-arrow:vertical",
+                     "::left-arrow:horizontal", "::right-arrow:horizontal"):
+            self.assertIn(frag, rules,
+                          "missing arrow sub-control %s" % frag)
+
+    def test_scrollbar_colors_come_from_tokens(self):
+        import re
+        tokens = set(self.main.TOKENS.values())
+        for ln in self._scrollbar_lines(self.main.STYLE):
+            for raw in re.findall(r"#[0-9a-fA-F]{6}\b", ln):
+                self.assertIn(raw, tokens,
+                              "scrollbar color %s is not a TOKENS value"
+                              % raw)
+            for raw in re.findall(r"rgba?\([^)]*\)", ln):
+                self.assertIn(raw, tokens,
+                              "scrollbar color %s is not a TOKENS value"
+                              % raw)
+
+    def test_compact_density_keeps_scrollbar_rules(self):
+        compact = self.main.build_style("compact")
+        self.assertIn("QScrollBar:vertical {", compact)
+        self.assertIn("QScrollBar:horizontal {", compact)
+        self.assertIn("QScrollBar::handle:vertical:hover", compact)
+        self.assertIn("QScrollBar::handle:vertical:pressed", compact)
+
+
+
+
 class RebaseGuardTests(unittest.TestCase):
     """Palette re-base (GUIFX, 2026-11-09, owner's order): the
     app's original base theme carried a blue/slate cast the owner
@@ -30389,10 +30970,12 @@ def _browse_schema(name, required=()):
 class ResearchGateWorkerTests(unittest.TestCase):
     """Research mode's gate at the worker level: homework, the
     section-drafted plan document filed into .forge/research/,
-    nothing browsed before approval (not offered, and refused if
-    called), the run's budget enforced by the shell, and the
-    report's Sources consulted section maintained by the shell
-    from the pages actually opened."""
+    nothing browsed before approval (the browse verbs stay in the
+    offered surface all session — Manus study M5 — and a call
+    before approval is refused at execution), the run's budget
+    enforced by the shell, and the report's Sources consulted
+    section maintained by the shell from the pages actually
+    opened."""
 
     @classmethod
     def setUpClass(cls):
@@ -30472,13 +31055,17 @@ class ResearchGateWorkerTests(unittest.TestCase):
         worker.start()
         self.assertTrue(self._wait_for(lambda: seen["ready"]),
                         "research gate never opened")
-        # Parked at the gate: nothing browsed, and no generation so
-        # far was ever OFFERED a browse verb.
+        # Parked at the gate: nothing browsed — and (Manus study
+        # M5) every non-empty offer so far DID carry the browse
+        # verbs: the gate is enforced at execution now, not by
+        # withholding the definitions, so the surface never moved.
         self.assertEqual(hits, {"open": 0, "read": 0})
         for schemas in worker_client_schemas(worker):
+            if not schemas:
+                continue  # the no-tools drafting generations
             names = [s["function"]["name"] for s in schemas]
-            self.assertNotIn("browse_open", names)
-            self.assertNotIn("browse_read", names)
+            self.assertIn("browse_open", names)
+            self.assertIn("browse_read", names)
         self.assertEqual(seen["ready"][0],
                          ["What airspeed do swallows cruise at?",
                           "Does the figure differ by species?"])
@@ -30536,17 +31123,25 @@ class ResearchGateWorkerTests(unittest.TestCase):
         refusal = worker._research_refusal("browse_open")
         self.assertIn("budget reached", refusal)
 
-    def test_browse_schemas_gated_by_approval(self):
+    def test_browse_schemas_stable_across_approval(self):
+        # Manus study M5 (was test_browse_schemas_gated_by_approval):
+        # approval no longer changes the offered surface — the
+        # browse verbs are in the definitions before AND after the
+        # gate, byte-identical; what approval changes is whether a
+        # call executes (test_browse_refused_before_approval_and_
+        # at_budget pins that half).
+        import json as _json
         ws = Path(tempfile.mkdtemp())
         hits = {"open": 0, "read": 0}
         worker, seen = self._worker([], ws, hits)
-        before = [s["function"]["name"] for s in worker._schemas()]
-        self.assertNotIn("browse_open", before)
-        self.assertNotIn("browse_read", before)
+        before = worker._schemas()
+        names = [s["function"]["name"] for s in before]
+        self.assertIn("browse_open", names)
+        self.assertIn("browse_read", names)
         worker._research_approved = True
-        after = [s["function"]["name"] for s in worker._schemas()]
-        self.assertIn("browse_open", after)
-        self.assertIn("browse_read", after)
+        after = worker._schemas()
+        self.assertEqual(_json.dumps(before, sort_keys=True),
+                         _json.dumps(after, sort_keys=True))
 
 
 def worker_client_schemas(worker):
@@ -39054,3 +39649,6408 @@ class ResendReplyTests(unittest.TestCase):
         self.assertIs(self.win.messages, main)
         self.assertEqual(self.win.messages, snapshot)
         self.assertEqual(self.persist_calls, [])
+
+
+
+
+class FindingFormatTests(unittest.TestCase):
+    """CR2 (CodeRabbit Tier 1 #2, 2026-11-11): every Review finding
+    carries a severity, a type and a Source line. One shared parser
+    (forge.modes.parse_finding) reads the new bracket format and
+    the pre-format BLOCKER / SHOULD-FIX / NIT lines; the Review
+    prompt instructs the new shape; the Review room's Findings
+    list leads with severity + type and tooltips the Source, while
+    the Fix (CR-Upgrade) and Teach (CR1) flows keep acting on the
+    full finding line."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # -- the parser: new format ------------------------------------
+
+    def test_parser_reads_the_full_bracket_format(self):
+        from forge import modes as modes_mod
+        parsed = modes_mod.parse_finding(
+            "- [Major · Bug · Source: Reviewer judgment] "
+            "forge/worker.py:412 — the retry loop never exits — "
+            "Fix: cap the retries at 3")
+        self.assertEqual(parsed["severity"], "Major")
+        self.assertEqual(parsed["type"], "Bug")
+        self.assertEqual(parsed["source"], "Reviewer judgment")
+        self.assertFalse(parsed["legacy"])
+        self.assertTrue(parsed["text"].startswith("[Major · Bug"))
+        self.assertIn("forge/worker.py:412", parsed["text"])
+
+    def test_parser_covers_every_severity_and_type(self):
+        from forge import modes as modes_mod
+        for severity in modes_mod.FINDING_SEVERITIES:
+            parsed = modes_mod.parse_finding(
+                f"[{severity} · Bug · Source: Owner learning] "
+                "a.py:1 — x — Fix: y")
+            self.assertEqual(parsed["severity"], severity)
+        for ftype in modes_mod.FINDING_TYPES:
+            parsed = modes_mod.parse_finding(
+                f"[Minor · {ftype} · Source: SKRIBE rubric] "
+                "a.py:1 — x — Fix: y")
+            self.assertEqual(parsed["type"], ftype)
+            self.assertEqual(parsed["source"], "SKRIBE rubric")
+
+    def test_parser_is_case_tolerant_and_strips_bullets(self):
+        from forge import modes as modes_mod
+        parsed = modes_mod.parse_finding(
+            "2. [critical · security · Source: owner learning] "
+            "a.py:9 — x — Fix: y")
+        self.assertEqual(parsed["severity"], "Critical")
+        self.assertEqual(parsed["type"], "Security")
+        self.assertEqual(parsed["source"], "owner learning")
+
+    # -- the parser: legacy + plain lines ---------------------------
+
+    def test_parser_maps_the_legacy_severity_words(self):
+        from forge import modes as modes_mod
+        for word, mapped in (("BLOCKER", "Critical"),
+                             ("SHOULD-FIX", "Major"),
+                             ("NIT", "Trivial")):
+            parsed = modes_mod.parse_finding(f"{word}: a.py:1 — boom")
+            self.assertEqual(parsed["severity"], mapped, word)
+            self.assertIsNone(parsed["type"])
+            self.assertIsNone(parsed["source"])
+            self.assertTrue(parsed["legacy"])
+
+    def test_parser_plain_line_is_unspecified_not_an_error(self):
+        from forge import modes as modes_mod
+        parsed = modes_mod.parse_finding(
+            "- parser.py: empty input crashes the reader")
+        self.assertIsNone(parsed["severity"])
+        self.assertIsNone(parsed["type"])
+        self.assertIsNone(parsed["source"])
+        self.assertTrue(parsed["legacy"])
+        self.assertEqual(parsed["text"],
+                         "parser.py: empty input crashes the reader")
+        self.assertIsNone(modes_mod.parse_finding("   "))
+        self.assertIsNone(modes_mod.parse_finding(""))
+
+    # -- the parser: malformed brackets degrade, never raise ---------
+
+    def test_parser_malformed_brackets_degrade_gracefully(self):
+        from forge import modes as modes_mod
+        # Missing Source part: severity/type still land.
+        parsed = modes_mod.parse_finding(
+            "[Trivial · Nitpick] a.py:1 — x — Fix: y")
+        self.assertEqual(parsed["severity"], "Trivial")
+        self.assertEqual(parsed["type"], "Nitpick")
+        self.assertIsNone(parsed["source"])
+        self.assertFalse(parsed["legacy"])
+        # Unknown severity/type words: unspecified, line still kept.
+        parsed = modes_mod.parse_finding(
+            "[Huge · Whoa · Source: Reviewer judgment] a.py:1 — x")
+        self.assertIsNone(parsed["severity"])
+        self.assertIsNone(parsed["type"])
+        self.assertEqual(parsed["source"], "Reviewer judgment")
+        self.assertIn("a.py:1", parsed["text"])
+        # Junk headers never raise.
+        for junk in ("[] a.py", "[·] a.py", "[Source:] a.py",
+                     "[Critical] ", "[ a.py"):
+            parsed = modes_mod.parse_finding(junk)
+            self.assertIsNotNone(parsed, junk)
+
+    def test_display_leads_with_severity_and_type(self):
+        from forge import modes as modes_mod
+        parsed = modes_mod.parse_finding(
+            "[Major · Bug · Source: Reviewer judgment] "
+            "a.py:1 — boom — Fix: y")
+        display = modes_mod.finding_display(parsed)
+        self.assertTrue(display.startswith("Major · Bug — a.py:1"),
+                        display)
+        legacy = modes_mod.parse_finding("BLOCKER: a.py:2 — bad")
+        self.assertEqual(modes_mod.finding_display(legacy),
+                         "Critical — a.py:2 — bad")
+        plain = modes_mod.parse_finding("- a.py:3 — plain words")
+        self.assertEqual(modes_mod.finding_display(plain),
+                         "a.py:3 — plain words")
+
+    # -- the prompt ---------------------------------------------------
+
+    def test_review_prompt_instructs_the_new_format(self):
+        from forge.permissions import MODE_GUIDANCE
+        review = MODE_GUIDANCE["review"]
+        for needle in ("[SEVERITY · TYPE · Source: SOURCE]",
+                       "Critical, Major, Minor, Trivial",
+                       "Bug, Security, Performance, Refactor, Nitpick",
+                       "Reviewer judgment", "never invent a source"):
+            self.assertIn(needle, review)
+        # The disciplines around the format are untouched.
+        self.assertIn("COVERAGE — read:", review)
+        self.assertIn("HOMEWORK", review)
+
+    def test_other_mode_prompts_unchanged_by_cr2(self):
+        from forge.permissions import MODE_GUIDANCE
+        for mode, guidance in MODE_GUIDANCE.items():
+            if mode == "review":
+                continue
+            self.assertNotIn("SEVERITY · TYPE", guidance, mode)
+            self.assertNotIn("FINDING_SEVERITIES", guidance, mode)
+
+    def test_reviews_folder_prompt_names_the_format(self):
+        from forge import projects as proj_mod
+        text = proj_mod.FOLDER_PROMPTS["reviews"]
+        self.assertIn("Critical / Major / Minor / Trivial", text)
+        self.assertIn("Source", text)
+
+    # -- the Review room ----------------------------------------------
+
+    def _mixed_review_window(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "mixed-review.md").write_text(
+            "# Review\n\n## Findings\n"
+            "- [Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest\n"
+            "- BLOCKER: store.py:3 — save truncates before writing\n"
+            "- parser.py: empty input crashes the reader\n\n"
+            "## Coverage\nauth.py, store.py, parser.py.\n",
+            encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index("mixed-review.md")
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    def test_room_lists_mixed_findings_with_source_tooltips(self):
+        win, _owner = self._mixed_review_window()
+        self.assertEqual(win.findings_list.count(), 3)
+        first = win.findings_list.item(0)
+        self.assertTrue(first.text().startswith(
+            "Critical · Security — auth.py:12"), first.text())
+        self.assertEqual(first.toolTip(), "Source: Owner learning")
+        legacy = win.findings_list.item(1)
+        self.assertTrue(legacy.text().startswith("Critical — "),
+                        legacy.text())
+        self.assertEqual(legacy.toolTip(), "")
+        plain = win.findings_list.item(2)
+        self.assertEqual(plain.text(),
+                         "parser.py: empty input crashes the reader")
+        # The data the Fix/Teach flows act on is the FULL line.
+        self.assertTrue(win._finding_lines[0].startswith(
+            "[Critical · Security"))
+        win.close()
+
+    def test_fix_flow_sends_the_full_new_format_line(self):
+        win, owner = self._mixed_review_window()
+        win.findings_list.setCurrentRow(0)
+        win.fix_btn.click()
+        self.assertEqual(len(owner.send_calls), 1)
+        sent = owner.send_calls[0]
+        self.assertIn("[Critical · Security · Source: Owner "
+                      "learning] auth.py:12", sent)
+        self.assertIn("from review file mixed-review.md", sent)
+        win.close()
+
+    def test_teach_flow_still_files_a_learning_from_new_format(self):
+        from unittest import mock
+        import forge.main as main_mod
+        from forge import learnings as learnings_mod
+
+        class _FakeDialog:
+            @staticmethod
+            def getText(*args, **kwargs):
+                return ("Timing-safe compare is already enforced "
+                        "by the wrapper", True)
+
+        win, _owner = self._mixed_review_window()
+        win.findings_list.setCurrentRow(0)
+        with mock.patch.object(main_mod, "QInputDialog", _FakeDialog):
+            win.teach_btn.click()
+        self.assertEqual(
+            learnings_mod.list_learnings(self.root),
+            ["Timing-safe compare is already enforced by the wrapper"])
+        win.close()
+
+
+class WalkthroughTests(unittest.TestCase):
+    """CR3 (CodeRabbit Tier 1 #3, 2026-11-11): every Review report
+    opens with a Walkthrough — what changed, the changes in
+    dependency order grouped by layer, an Effort line and a Risk
+    line — before its Findings. The skeleton declares it first,
+    the Review prompt instructs its four parts, the reviews folder
+    prompt names it, and the Review room (whose viewer already
+    shows the full document) adds severity counts to its existing
+    Findings heading. Reports written before CR3 have no
+    Walkthrough and must behave exactly as before. Plans get NO
+    preface: a plan already carries Goal (what), Contents + Steps
+    in order (order, with Verify lines) and a Risks section, so a
+    preface would only duplicate them — pinned below."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # -- the skeleton -------------------------------------------------
+
+    def test_review_skeleton_starts_with_walkthrough(self):
+        from forge import modes as modes_mod
+        self.assertEqual(modes_mod.SKELETONS["review"],
+                         ["Walkthrough", "Findings", "Coverage"])
+        text = modes_mod.skeleton_text("review")
+        self.assertLess(text.index("## Walkthrough"),
+                        text.index("## Findings"))
+        self.assertLess(text.index("## Findings"),
+                        text.index("## Coverage"))
+
+    def test_walkthrough_section_reads_and_absence_is_tolerated(self):
+        from forge import modes as modes_mod
+        doc = ("# Review\n\n## Walkthrough\n"
+               "**What changed:** The login check moved.\n\n"
+               "## Findings\n- a.py:1 — boom\n")
+        body = modes_mod.section_body(doc, "Walkthrough")
+        self.assertIn("**What changed:**", body)
+        self.assertIn("The login check moved.", body)
+        old = "# Review\n\n## Findings\n- a.py:1 — boom\n"
+        self.assertIsNone(modes_mod.section_body(old, "Walkthrough"))
+        self.assertEqual(
+            modes_mod.section_body(old, "Findings").strip(),
+            "- a.py:1 — boom")
+
+    def test_plan_skeleton_has_no_walkthrough_preface(self):
+        # The CR3 plan decision, pinned: plans already orient via
+        # Goal / Contents / Steps / Risks — no preface is added.
+        from forge import modes as modes_mod
+        self.assertNotIn("Walkthrough", modes_mod.SKELETONS["plan"])
+
+    # -- the prompt -----------------------------------------------------
+
+    def test_review_prompt_instructs_the_walkthrough(self):
+        from forge.permissions import MODE_GUIDANCE
+        review = MODE_GUIDANCE["review"]
+        for needle in ("## Walkthrough", "before '## Findings'",
+                       "**What changed:**",
+                       "**Changes, in dependency order:**",
+                       "foundations first (data/schema/config)",
+                       "core logic", "UI/surface", "tests/docs",
+                       "FILE/AREA — what changed — why it matters",
+                       "**Effort:**", "Effort: Small — one file",
+                       "**Risk:**", "Risk: Low —",
+                       "no boilerplate", "a handful of"):
+            self.assertIn(needle, review)
+        # CR2's format and the disciplines around it are intact.
+        self.assertIn("[SEVERITY · TYPE · Source: SOURCE]", review)
+        self.assertIn("COVERAGE — read:", review)
+        self.assertIn("HOMEWORK", review)
+
+    def test_other_mode_prompts_have_no_walkthrough_instruction(self):
+        from forge.permissions import MODE_GUIDANCE
+        for mode, guidance in MODE_GUIDANCE.items():
+            if mode == "review":
+                continue
+            self.assertNotIn("## Walkthrough", guidance, mode)
+            self.assertNotIn("**What changed:**", guidance, mode)
+
+    def test_reviews_folder_prompt_names_the_walkthrough(self):
+        from forge import projects as proj_mod
+        text = proj_mod.FOLDER_PROMPTS["reviews"]
+        self.assertIn("Walkthrough", text)
+        self.assertIn("dependency order", text)
+        self.assertIn("Effort", text)
+        self.assertIn("Risk", text)
+
+    # -- the counts helpers ----------------------------------------------
+
+    def test_severity_counts_include_legacy_under_mapped_severities(self):
+        from forge import modes as modes_mod
+        parsed = [modes_mod.parse_finding(line) for line in (
+            "- [Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: compare_digest",
+            "- [Major · Bug · Source: Reviewer judgment] "
+            "store.py:3 — save truncates first — Fix: write temp, rename",
+            "- BLOCKER: cache.py:8 — stale reads served forever",
+            "- parser.py: a plain pre-format line")]
+        self.assertEqual(
+            modes_mod.finding_severity_counts(parsed),
+            {"Critical": 2, "Major": 1, "Minor": 0, "Trivial": 0})
+        self.assertEqual(modes_mod.finding_counts_text(parsed),
+                         "2 Critical · 1 Major · 0 Minor · 0 Trivial")
+        plain = [modes_mod.parse_finding("- parser.py: plain words")]
+        self.assertEqual(modes_mod.finding_counts_text(plain), "")
+        self.assertEqual(modes_mod.finding_counts_text([]), "")
+
+    # -- the Review room ---------------------------------------------------
+
+    def _review_window(self, name, text):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text, encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index(name)
+        listing.setCurrentRow(idx)
+        return win
+
+    def test_old_report_without_walkthrough_behaves_as_before(self):
+        win = self._review_window(
+            "old-review.md",
+            "# Review\n\n## Findings\n"
+            "- parser.py: empty input crashes the reader\n"
+            "- worker.py: timeout is not honoured\n\n"
+            "## Coverage\nparser.py and worker.py.\n")
+        self.assertEqual(
+            [win.findings_list.item(i).text()
+             for i in range(win.findings_list.count())],
+            ["parser.py: empty input crashes the reader",
+             "worker.py: timeout is not honoured"])
+        # No severities were parsed — the heading stays plain.
+        self.assertEqual(win.findings_label.text(), "Findings")
+        win.close()
+
+    def test_new_report_walkthrough_counts_and_findings(self):
+        from forge import modes as modes_mod
+        win = self._review_window(
+            "new-review.md",
+            "# Review\n\n## Walkthrough\n"
+            "**What changed:** Login tokens now expire after a day.\n"
+            "**Changes, in dependency order:**\n"
+            "- forge/auth.py — token expiry added — sessions can no "
+            "longer live forever\n"
+            "- tests/test_core.py — expiry cases — pins the new rule\n"
+            "**Effort:** Small — one file, no behavior change beyond "
+            "expiry.\n"
+            "**Risk:** Low — existing sessions are untouched until "
+            "they next refresh.\n\n"
+            "## Findings\n"
+            "- [Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest\n"
+            "- [Major · Bug · Source: Reviewer judgment] "
+            "store.py:3 — save truncates before writing — Fix: "
+            "write to a temp file, then rename\n"
+            "- BLOCKER: cache.py:8 — stale reads served forever\n\n"
+            "## Coverage\nauth.py, store.py, cache.py.\n")
+        _listing, viewer, _paths = win._doc_tabs["Reviews"]
+        shown = viewer.toPlainText()
+        # The viewer shows the whole document: the Walkthrough
+        # reads first, before the Findings.
+        self.assertLess(shown.index("## Walkthrough"),
+                        shown.index("## Findings"))
+        walk = modes_mod.section_body(shown, "Walkthrough")
+        for part in ("**What changed:**",
+                     "**Changes, in dependency order:**",
+                     "**Effort:**", "**Risk:**"):
+            self.assertIn(part, walk)
+        # The Walkthrough's own rows never leak into the findings.
+        self.assertEqual(win.findings_list.count(), 3)
+        self.assertTrue(win.findings_list.item(0).text().startswith(
+            "Critical · Security — auth.py:12"))
+        self.assertEqual(win.findings_list.item(0).toolTip(),
+                         "Source: Owner learning")
+        # Counts on the existing heading; the legacy BLOCKER counts
+        # as Critical, its mapped severity.
+        self.assertEqual(
+            win.findings_label.text(),
+            "Findings — 2 Critical · 1 Major · 0 Minor · 0 Trivial")
+        win.close()
+
+
+class GuidelineTests(unittest.TestCase):
+    """CR4 (CodeRabbit Tier 1 #4, 2026-11-11): a project's standard
+    instruction files (AGENTS.md, CLAUDE.md, .cursorrules,
+    .github/copilot-instructions.md) are detected — at the root or
+    up to two levels down — but apply ONLY once the owner approves
+    them, in the Artifacts window's Guideline files list or by
+    hand-editing .forge/guidelines-approved.txt. Nothing
+    unapproved ever reaches a prompt: a guideline file that
+    arrived with a cloned repo cannot steer the agent on its own.
+    Approved guidelines ride in Review and Plan turns only,
+    capped per file and in total, whole files only."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _write(self, rel, text):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    # -- detection ---------------------------------------------------
+
+    def test_detects_the_four_standard_files_at_root_in_order(self):
+        from forge import guidelines as g_mod
+        self._write(".github/copilot-instructions.md",
+                    "Copilot: prefer small functions.\n")
+        self._write(".cursorrules", "Cursor: tabs only.\n")
+        self._write("CLAUDE.md", "Claude: no semicolons.\n")
+        self._write("AGENTS.md", "Agents: run the tests.\n")
+        self.assertEqual(
+            g_mod.detect_guidelines(self.root),
+            ["AGENTS.md", "CLAUDE.md", ".cursorrules",
+             ".github/copilot-instructions.md"])
+
+    def test_nested_files_found_path_labelled_and_depth_bounded(self):
+        from forge import guidelines as g_mod
+        self._write("docs/AGENTS.md", "Docs: examples first.\n")
+        self._write("src/deep/CLAUDE.md", "Deep: no globals.\n")
+        self._write("a/b/c/AGENTS.md", "Too deep: must not appear.\n")
+        self._write(".forge/AGENTS.md", "Forge's own: must not appear.\n")
+        self._write(".git/AGENTS.md", "Git's own: must not appear.\n")
+        self.assertEqual(
+            g_mod.detect_guidelines(self.root),
+            ["docs/AGENTS.md", "src/deep/CLAUDE.md"])
+
+    def test_detection_never_raises_on_a_missing_workspace(self):
+        from forge import guidelines as g_mod
+        self.assertEqual(
+            g_mod.detect_guidelines(self.root / "no-such-project"), [])
+        self.assertEqual(
+            g_mod.pending_guidelines(self.root / "no-such-project"), [])
+        self.assertEqual(
+            g_mod.guidelines_block(self.root / "no-such-project"), "")
+
+    # -- the gate ------------------------------------------------------
+
+    def test_unapproved_files_never_reach_any_prompt(self):
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "Agents: never use recursion.\n")
+        self.assertEqual(
+            g_mod.pending_guidelines(self.root), ["AGENTS.md"])
+        self.assertEqual(g_mod.list_approved(self.root), [])
+        for mode in ("review", "plan", "code"):
+            self.win.settings["mode"] = mode
+            prompt = self.win.build_system_prompt()
+            self.assertNotIn("Project guidelines", prompt)
+            self.assertNotIn("never use recursion", prompt)
+
+    def test_approve_refuses_a_path_that_was_not_detected(self):
+        from forge import guidelines as g_mod
+        with self.assertRaises(ValueError):
+            g_mod.approve_guideline(self.root, "src/evil.py")
+        with self.assertRaises(ValueError):
+            g_mod.approve_guideline(self.root, "../outside.md")
+        self.assertEqual(g_mod.list_approved(self.root), [])
+
+    def test_approve_then_block_carries_the_rules_in_review_and_plan(self):
+        from forge import guidelines as g_mod
+        from forge import learnings as learnings_mod
+        self._write("AGENTS.md", "Agents: never use recursion.\n")
+        g_mod.approve_guideline(self.root, "AGENTS.md")
+        self.assertEqual(g_mod.list_approved(self.root), ["AGENTS.md"])
+        self.assertEqual(g_mod.pending_guidelines(self.root), [])
+        block = g_mod.guidelines_block(self.root)
+        self.assertIn("Project guidelines — rules the OWNER approved",
+                      block)
+        self.assertIn("--- AGENTS.md ---", block)
+        self.assertIn("never use recursion", block)
+        # CR1 still works alongside: learnings and guidelines ride
+        # together in a Review turn.
+        learnings_mod.add_learning(
+            self.root, "Handled higher up — the caller validates")
+        self.win.settings["mode"] = "review"
+        prompt = self.win.build_system_prompt()
+        self.assertIn("never use recursion", prompt)
+        self.assertIn("Handled higher up — the caller validates", prompt)
+        # Plan turns carry guidelines too; Code turns do not.
+        self.win.settings["mode"] = "plan"
+        self.assertIn("never use recursion",
+                      self.win.build_system_prompt())
+        self.win.settings["mode"] = "code"
+        self.assertNotIn("never use recursion",
+                         self.win.build_system_prompt())
+
+    def test_revoke_takes_the_rules_back_out(self):
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "Agents: never use recursion.\n")
+        g_mod.approve_guideline(self.root, "AGENTS.md")
+        self.assertTrue(g_mod.revoke_guideline(self.root, "AGENTS.md"))
+        self.assertFalse(g_mod.revoke_guideline(self.root, "AGENTS.md"))
+        self.assertEqual(g_mod.list_approved(self.root), [])
+        self.assertEqual(g_mod.guidelines_block(self.root), "")
+        self.assertEqual(
+            g_mod.pending_guidelines(self.root), ["AGENTS.md"])
+
+    def test_approved_but_deleted_file_stops_applying_silently(self):
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "Agents: never use recursion.\n")
+        g_mod.approve_guideline(self.root, "AGENTS.md")
+        (self.root / "AGENTS.md").unlink()
+        self.assertEqual(g_mod.guidelines_block(self.root), "")
+
+    # -- caps and unreadable files -------------------------------------
+
+    def test_long_file_truncates_with_a_truthful_marker(self):
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "x" * 4500 + "\n")
+        g_mod.approve_guideline(self.root, "AGENTS.md")
+        block = g_mod.guidelines_block(self.root)
+        self.assertIn("truncated at 4000 chars", block)
+        self.assertLess(len(block), 5000)
+
+    def test_total_cap_leaves_later_files_whole_and_counts_them(self):
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "A" * 60 + "\n")
+        self._write("CLAUDE.md", "B" * 60 + "\n")
+        g_mod.approve_guideline(self.root, "AGENTS.md")
+        g_mod.approve_guideline(self.root, "CLAUDE.md")
+        block = g_mod.guidelines_block(self.root, cap_chars=120)
+        self.assertIn("A" * 60, block)
+        self.assertNotIn("B" * 60, block)
+        self.assertIn("+1 approved guideline file(s) not shown", block)
+        self.assertIn("CLAUDE.md", block)
+
+    def test_empty_and_binary_files_contribute_nothing(self):
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "\n\n")
+        self._write("CLAUDE.md", "")
+        (self.root / ".cursorrules").write_bytes(
+            b"\x00\x01binary\x00junk")
+        for rel in ("AGENTS.md", "CLAUDE.md", ".cursorrules"):
+            g_mod.approve_guideline(self.root, rel)
+        self.assertEqual(g_mod.guidelines_block(self.root), "")
+
+    # -- the Review guidance -------------------------------------------
+
+    def test_review_guidance_names_approved_guidelines(self):
+        from forge import permissions as perm_mod
+        guidance = perm_mod.MODE_GUIDANCE["review"]
+        self.assertIn("AGENTS.md", guidance)
+        self.assertIn("cite the file as the Source", guidance)
+        self.assertNotIn("Guideline files the owner approved",
+                         perm_mod.MODE_GUIDANCE["code"])
+
+    # -- the gate UI -----------------------------------------------------
+
+    def test_gate_ui_lists_pending_and_approves_from_the_list(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import ArtifactsWindow
+        from forge import guidelines as g_mod
+        self._write("AGENTS.md", "Agents: never use recursion.\n")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        win = ArtifactsWindow(owner)
+        win._refresh_guidelines()
+        self.assertEqual(win.guidelines_label.text(),
+                         "Guideline files — 1 waiting · 0 approved")
+        self.assertEqual(win.guidelines_list.count(), 1)
+        # Reading before approving: the head shows in the viewer.
+        win.guidelines_list.setCurrentRow(0)
+        self.assertIn("never use recursion",
+                      win.artifact_view.toPlainText())
+        # Approve from the list, the way the owner would.
+        win._approve_guideline()
+        self.assertEqual(win.guidelines_label.text(),
+                         "Guideline files — 0 waiting · 1 approved")
+        self.assertIn("Approved", win.guidelines_status.text())
+        self.assertEqual(g_mod.list_approved(self.root), ["AGENTS.md"])
+        self.assertIn("never use recursion",
+                      g_mod.guidelines_block(self.root))
+        # Revoke from the same list takes it back out.
+        win.guidelines_list.setCurrentRow(0)
+        win._revoke_guideline()
+        self.assertEqual(win.guidelines_label.text(),
+                         "Guideline files — 1 waiting · 0 approved")
+        self.assertEqual(g_mod.guidelines_block(self.root), "")
+        win.close()
+        owner.close()
+
+
+class ReviewProfileTests(unittest.TestCase):
+    """CR5 (CodeRabbit Tier 1 #5, 2026-11-11): Review turns have
+    three voices — Quiet, Chill, Assertive — picked in Settings
+    or in the Review room's Voice switch, both writing the one
+    "review_profile" setting. The finding format, the Walkthrough
+    and the severity scale never change; only how much the review
+    says and how hard it pushes. Chill is the default and is the
+    base review guidance byte-for-byte."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self._old_voice = self.win.settings.get("review_profile")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        if self._old_voice is None:
+            self.win.settings.pop("review_profile", None)
+        else:
+            self.win.settings["review_profile"] = self._old_voice
+        self.temp.cleanup()
+
+    # -- the profile values --------------------------------------------
+
+    def test_normalize_accepts_each_voice_and_defaults_the_rest(self):
+        from forge import permissions as perm_mod
+        self.assertEqual(perm_mod.normalize_review_profile("quiet"),
+                         "quiet")
+        self.assertEqual(perm_mod.normalize_review_profile("CHILL"),
+                         "chill")
+        self.assertEqual(
+            perm_mod.normalize_review_profile("  Assertive  "),
+            "assertive")
+        for bad in (None, "", "loud", 7, ["chill"]):
+            self.assertEqual(perm_mod.normalize_review_profile(bad),
+                             "chill")
+
+    def test_chill_is_the_base_guidance_byte_for_byte(self):
+        from forge import permissions as perm_mod
+        self.assertEqual(
+            perm_mod.review_guidance("chill"),
+            perm_mod.MODE_GUIDANCE["review"])
+        self.assertEqual(perm_mod.review_guidance(),
+                         perm_mod.MODE_GUIDANCE["review"])
+        self.assertEqual(perm_mod.review_guidance("bogus"),
+                         perm_mod.MODE_GUIDANCE["review"])
+
+    def test_quiet_reports_only_what_matters_and_stays_terse(self):
+        from forge import permissions as perm_mod
+        text = perm_mod.review_guidance("quiet")
+        self.assertIn("only Critical and Major findings", text)
+        self.assertIn("skip Minor, Trivial and nitpicks", text)
+        self.assertIn("Terse throughout", text)
+        # The base guidance — Walkthrough, finding format,
+        # COVERAGE — is still all there underneath.
+        self.assertIn("## Walkthrough", text)
+        self.assertIn("SEVERITY · TYPE · Source: SOURCE", text)
+        self.assertIn("COVERAGE", text)
+
+    def test_assertive_reports_everything_and_does_not_soften(self):
+        from forge import permissions as perm_mod
+        text = perm_mod.review_guidance("assertive")
+        self.assertIn("including Minor, Trivial and nitpicks", text)
+        self.assertIn("do not soften Critical findings", text)
+        self.assertIn("## Walkthrough", text)
+        self.assertIn("SEVERITY · TYPE · Source: SOURCE", text)
+
+    # -- the prompt seam -------------------------------------------------
+
+    def test_review_prompt_carries_the_picked_voice(self):
+        self.win.settings["mode"] = "review"
+        self.win.settings["review_profile"] = "quiet"
+        self.assertIn("Review voice: QUIET",
+                      self.win.build_system_prompt())
+        self.win.settings["review_profile"] = "assertive"
+        self.assertIn("Review voice: ASSERTIVE",
+                      self.win.build_system_prompt())
+
+    def test_chill_prompt_has_no_voice_block_and_other_modes_ignore_it(self):
+        self.win.settings["mode"] = "review"
+        self.win.settings["review_profile"] = "chill"
+        self.assertNotIn("Review voice:",
+                         self.win.build_system_prompt())
+        # A voice set for Review never leaks into another mode.
+        self.win.settings["mode"] = "code"
+        self.win.settings["review_profile"] = "assertive"
+        self.assertNotIn("Review voice:",
+                         self.win.build_system_prompt())
+        self.win.settings["mode"] = "plan"
+        self.assertNotIn("Review voice:",
+                         self.win.build_system_prompt())
+
+    def test_unknown_stored_voice_falls_back_to_chill_in_the_prompt(self):
+        self.win.settings["mode"] = "review"
+        self.win.settings["review_profile"] = "loud"
+        self.assertNotIn("Review voice:",
+                         self.win.build_system_prompt())
+
+    # -- Settings ----------------------------------------------------------
+
+    def test_settings_dialog_round_trips_the_voice(self):
+        from forge.main import SettingsDialog
+        dlg = SettingsDialog(None, {})
+        try:
+            self.assertEqual(dlg.values()["review_profile"], "chill")
+            self.assertEqual(dlg.review_profile.currentData(), "chill")
+            dlg.review_profile.setCurrentIndex(
+                dlg.review_profile.findData("assertive"))
+            self.assertEqual(dlg.values()["review_profile"],
+                             "assertive")
+        finally:
+            dlg.close()
+        dlg2 = SettingsDialog(None, {"review_profile": "quiet"})
+        try:
+            self.assertEqual(dlg2.review_profile.currentData(), "quiet")
+        finally:
+            dlg2.close()
+
+    # -- the Review room switch ---------------------------------------------
+
+    def _review_window(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.settings = {"review_profile": "quiet"}
+        owner.save_calls = []
+        owner.save_settings = lambda: owner.save_calls.append(True)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        return win, owner
+
+    def test_room_switch_reads_and_writes_the_same_setting(self):
+        win, owner = self._review_window()
+        try:
+            # The room opens on the stored voice.
+            self.assertEqual(win.voice_combo.currentData(), "quiet")
+            # Picking another voice writes the one settings key
+            # and persists it, the way Settings does.
+            win.voice_combo.setCurrentIndex(
+                win.voice_combo.findData("assertive"))
+            self.assertEqual(owner.settings["review_profile"],
+                             "assertive")
+            self.assertEqual(owner.save_calls, [True])
+            # Focus buttons are untouched by the voice switch.
+            self.assertEqual(sorted(win.focus_btns),
+                             ["All three", "Correctness", "Performance",
+                              "Safety"])
+        finally:
+            win.close()
+
+
+class IncrementalReviewTests(unittest.TestCase):
+    """CR6 (CodeRabbit Tier 1 #6, 2026-11-11): reviews go
+    incremental. The Review room remembers what was reviewed —
+    "Mark reviewed" snapshots the project's file fingerprints,
+    "Review what's new" loads only what changed since then into
+    the composer, and each filed report updates the running
+    summary (.forge/reviews/summary.md, newest first). Nothing
+    marks itself: only the owner says a review is done. State
+    reads never raise — no state reads as "never reviewed"."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _write(self, rel, text):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    # -- the state -------------------------------------------------------
+
+    def test_no_state_reads_as_never_reviewed(self):
+        from forge import review_state as rs_mod
+        result = rs_mod.changed_since(self.root)
+        self.assertFalse(result["ever"])
+        self.assertEqual(result["changed"], [])
+        self.assertEqual(result["removed"], [])
+        self.assertIsNone(result["last_review"])
+        self.assertEqual(rs_mod.read_summary(self.root), "")
+
+    def test_corrupt_state_reads_as_never_reviewed(self):
+        from forge import review_state as rs_mod
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "state.json").write_text("{not json", encoding="utf-8")
+        result = rs_mod.changed_since(self.root)
+        self.assertFalse(result["ever"])
+        # Recording over the corrupt file repairs it.
+        rs_mod.record_review(self.root)
+        self.assertTrue(rs_mod.changed_since(self.root)["ever"])
+
+    def test_mark_then_change_lists_only_what_changed(self):
+        from forge import review_state as rs_mod
+        self._write("a.py", "print(1)\n")
+        self._write("b.py", "print(2)\n")
+        state = rs_mod.record_review(self.root)
+        self.assertEqual(state["review_count"], 1)
+        self.assertEqual(
+            rs_mod.changed_since(self.root)["changed"], [])
+        # Edit one file, add one, delete one.
+        self._write("a.py", "print(10)\n")
+        self._write("c.py", "print(3)\n")
+        (self.root / "b.py").unlink()
+        result = rs_mod.changed_since(self.root)
+        self.assertTrue(result["ever"])
+        self.assertEqual(result["changed"], ["a.py", "c.py"])
+        self.assertEqual(result["removed"], ["b.py"])
+        # A second mark resets the baseline.
+        rs_mod.record_review(self.root)
+        self.assertEqual(
+            rs_mod.changed_since(self.root)["changed"], [])
+        self.assertEqual(
+            rs_mod.changed_since(self.root)["removed"], [])
+
+    def test_forge_own_files_never_count_as_changed(self):
+        from forge import review_state as rs_mod
+        rs_mod.record_review(self.root)
+        self._write(".forge/learnings.md", "# Review learnings\n")
+        self._write(".forge/reviews/state.json", "x")
+        result = rs_mod.changed_since(self.root)
+        self.assertEqual(result["changed"], [])
+
+    # -- the summary -------------------------------------------------------
+
+    def test_summary_entry_shape_is_newest_first(self):
+        from forge import review_state as rs_mod
+        entry = rs_mod.format_summary_entry(
+            "2026-11-11", "auth-review.md",
+            "Login tokens now expire after a day.",
+            "1 Critical · 0 Major · 2 Minor · 0 Trivial")
+        self.assertEqual(
+            entry,
+            "## 2026-11-11 — auth-review.md\n"
+            "What changed: Login tokens now expire after a day.\n"
+            "Findings: 1 Critical · 0 Major · 2 Minor · 0 Trivial\n")
+
+    def test_review_guidance_and_folder_prompt_name_the_summary(self):
+        from forge import permissions as perm_mod
+        from forge import projects as proj_mod
+        guidance = perm_mod.MODE_GUIDANCE["review"]
+        self.assertIn("INCREMENTAL REVIEW", guidance)
+        self.assertIn("review ONLY those files", guidance)
+        self.assertIn(".forge/reviews/summary.md", guidance)
+        self.assertIn("newest first", guidance)
+        self.assertIn("summary.md", proj_mod.FOLDER_PROMPTS["reviews"])
+        self.assertIn("Incremental reviews",
+                      proj_mod.FOLDER_PROMPTS["reviews"])
+        # Other modes carry no incremental instruction.
+        self.assertNotIn("INCREMENTAL REVIEW",
+                         perm_mod.MODE_GUIDANCE["code"])
+
+    # -- the Review room -----------------------------------------------------
+
+    def _review_window(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.settings = {}
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        return win
+
+    def test_room_flow_mark_then_change_then_incremental(self):
+        win = self._review_window()
+        try:
+            # No baseline: the room says so plainly.
+            win._review_whats_new()
+            self.assertIn("No review baseline",
+                          win.review_state_status.text())
+            self.assertEqual(win.composer.toPlainText(), "")
+            # Mark reviewed, change one file, add one.
+            self._write("a.py", "print(1)\n")
+            win._mark_reviewed()
+            self.assertIn("Marked reviewed",
+                          win.review_state_status.text())
+            self._write("a.py", "print(10)\n")
+            self._write("b.py", "print(2)\n")
+            win._review_whats_new()
+            composer = win.composer.toPlainText()
+            self.assertTrue(composer.startswith("Incremental review"))
+            self.assertIn("- a.py", composer)
+            self.assertIn("- b.py", composer)
+            self.assertIn("Do not re-review unchanged files.",
+                          composer)
+            self.assertIn("2 file(s) changed",
+                          win.review_state_status.text())
+            # Nothing new after a fresh mark.
+            win._mark_reviewed()
+            win._review_whats_new()
+            self.assertIn("Nothing new",
+                          win.review_state_status.text())
+        finally:
+            win.close()
+
+    def test_summary_file_shows_in_the_reviews_tab(self):
+        from forge import review_state as rs_mod
+        entry = rs_mod.format_summary_entry(
+            "2026-11-11", "auth-review.md",
+            "Login tokens now expire after a day.",
+            "1 Critical · 0 Major · 0 Minor · 0 Trivial")
+        (self.root / ".forge" / "reviews").mkdir(
+            parents=True, exist_ok=True)
+        (self.root / ".forge" / "reviews" / "summary.md").write_text(
+            entry, encoding="utf-8")
+        win = self._review_window()
+        try:
+            _listing, _viewer, paths = win._doc_tabs["Reviews"]
+            self.assertIn("summary.md", [p.name for p in paths])
+        finally:
+            win.close()
+
+
+class DriverPromptTests(unittest.TestCase):
+    """CR7 (CodeRabbit Tier 1 #7, 2026-11-11): every finding in a
+    review carries a "Prompt for the Driver" — one indented line
+    starting "Driver:" under the finding, a self-contained
+    instruction for Code mode to fix exactly that finding (file,
+    exact change, how to verify). A Driver line is a continuation,
+    never a finding of its own: it pairs with the finding above
+    it, and the Review room's Fix flow sends it (finding line as
+    context). Reports written before CR7 have no Driver lines and
+    fix exactly as before."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    # -- the driver line ---------------------------------------------------
+
+    def test_parse_driver_line(self):
+        from forge import modes as modes_mod
+        self.assertEqual(
+            modes_mod.parse_driver_line(
+                "  Driver: In auth.py, use hmac.compare_digest; "
+                "then run the login test and confirm it passes."),
+            "In auth.py, use hmac.compare_digest; then run the "
+            "login test and confirm it passes.")
+        self.assertEqual(
+            modes_mod.parse_driver_line("- driver: fix it"),
+            "fix it")
+        self.assertIsNone(modes_mod.parse_driver_line("Driver:"))
+        self.assertIsNone(modes_mod.parse_driver_line("Driver:   "))
+        self.assertIsNone(
+            modes_mod.parse_driver_line(
+                "- [Critical · Bug] auth.py:1 — bad compare"))
+        self.assertIsNone(modes_mod.parse_driver_line(""))
+        self.assertIsNone(modes_mod.parse_driver_line(
+            "The driver should check this later."))
+
+    def test_body_pairs_drivers_with_the_finding_above(self):
+        from forge import modes as modes_mod
+        body = (
+            "- [Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest\n"
+            "  Driver: In auth.py, use hmac.compare_digest; then "
+            "run the login test and confirm it passes.\n"
+            "- BLOCKER: store.py:3 — save truncates before writing\n"
+            "- parser.py: empty input crashes the reader\n"
+            "  Driver: In parser.py, guard empty input at the top "
+            "of the reader and return an empty result; verify with "
+            "an empty file.\n")
+        parsed = modes_mod.parse_findings_body(body)
+        self.assertEqual(len(parsed), 3)
+        self.assertEqual(
+            parsed[0]["driver"],
+            "In auth.py, use hmac.compare_digest; then run the "
+            "login test and confirm it passes.")
+        self.assertEqual(parsed[0]["severity"], "Critical")
+        self.assertIsNone(parsed[1]["driver"])
+        self.assertEqual(parsed[1]["severity"], "Critical")
+        self.assertEqual(
+            parsed[2]["driver"],
+            "In parser.py, guard empty input at the top of the "
+            "reader and return an empty result; verify with an "
+            "empty file.")
+
+    def test_orphan_driver_line_is_ignored_never_listed(self):
+        from forge import modes as modes_mod
+        body = ("  Driver: With no finding above, this goes nowhere.\n"
+                "- parser.py: empty input crashes the reader\n")
+        parsed = modes_mod.parse_findings_body(body)
+        self.assertEqual(len(parsed), 1)
+        self.assertIsNone(parsed[0]["driver"])
+        self.assertEqual(
+            modes_mod.parse_findings_body(""), [])
+        self.assertEqual(
+            modes_mod.parse_findings_body(None), [])
+
+    def test_second_driver_line_replaces_the_first(self):
+        from forge import modes as modes_mod
+        body = ("- parser.py: empty input crashes the reader\n"
+                "  Driver: First version.\n"
+                "  Driver: Second version wins.\n")
+        parsed = modes_mod.parse_findings_body(body)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["driver"], "Second version wins.")
+
+    # -- the guidance --------------------------------------------------------
+
+    def test_review_guidance_instructs_the_driver_line(self):
+        from forge import permissions as perm_mod
+        from forge import projects as proj_mod
+        guidance = perm_mod.MODE_GUIDANCE["review"]
+        self.assertIn("Driver:", guidance)
+        self.assertIn("Prompt for the Driver", guidance)
+        self.assertIn("self-contained", guidance)
+        self.assertIn("how to verify it", guidance)
+        self.assertIn("cap the retry loop at 3 attempts", guidance)
+        self.assertIn("Driver:", proj_mod.FOLDER_PROMPTS["reviews"])
+        self.assertNotIn("Prompt for the Driver",
+                         perm_mod.MODE_GUIDANCE["code"])
+
+    # -- the Review room -------------------------------------------------------
+
+    def _driver_review_window(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "driver-review.md").write_text(
+            "# Review\n\n## Findings\n"
+            "- [Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest\n"
+            "  Driver: In auth.py, use hmac.compare_digest; then "
+            "run the login test and confirm it passes.\n"
+            "- BLOCKER: store.py:3 — save truncates before writing\n"
+            "\n## Coverage\nauth.py, store.py.\n",
+            encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index("driver-review.md")
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    def test_driver_lines_are_not_listed_as_findings(self):
+        win, _owner = self._driver_review_window()
+        try:
+            # Two findings — the Driver line is not a third.
+            self.assertEqual(win.findings_list.count(), 2)
+            first = win.findings_list.item(0)
+            self.assertTrue(first.text().startswith(
+                "Critical · Security — auth.py:12"), first.text())
+            self.assertIn("Source: Owner learning", first.toolTip())
+            self.assertIn(
+                "Driver: In auth.py, use hmac.compare_digest",
+                first.toolTip())
+            second = win.findings_list.item(1)
+            self.assertEqual(second.toolTip(), "")
+            self.assertEqual(
+                win._finding_drivers,
+                ["In auth.py, use hmac.compare_digest; then run "
+                 "the login test and confirm it passes.", None])
+        finally:
+            win.close()
+
+    def test_fix_sends_the_driver_prompt_when_present(self):
+        win, owner = self._driver_review_window()
+        try:
+            win.findings_list.setCurrentRow(0)
+            win.fix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            sent = owner.send_calls[0]
+            self.assertTrue(
+                sent.startswith(
+                    "In auth.py, use hmac.compare_digest; then run "
+                    "the login test and confirm it passes."),
+                sent)
+            self.assertIn("Finding from review file driver-review.md",
+                          sent)
+            self.assertIn("auth.py:12", sent)
+        finally:
+            win.close()
+
+    def test_fix_without_a_driver_line_behaves_as_before(self):
+        win, owner = self._driver_review_window()
+        try:
+            win.findings_list.setCurrentRow(1)
+            win.fix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            sent = owner.send_calls[0]
+            self.assertTrue(
+                sent.startswith(
+                    "Fix this review finding: BLOCKER: store.py:3"),
+                sent)
+            self.assertIn("from review file driver-review.md", sent)
+        finally:
+            win.close()
+
+
+class GateChecksTests(unittest.TestCase):
+    """CR8 (CodeRabbit Tier 1 #8, 2026-11-11): natural-language
+    pre-merge checks in the plan gate. The owner writes checks in
+    plain words in .forge/gate-checks.md; the gate shows each as
+    PASS / FAIL / CAN'T CHECK before Approve. Forge evaluates
+    only what its own record can answer (latest review findings,
+    review currency, summary currency) — an unmapped line is
+    CAN'T CHECK, never silently passed. Advisory only: nothing
+    here blocks Approve."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _write_checks(self, text):
+        (self.root / ".forge" / "gate-checks.md").write_text(
+            text, encoding="utf-8")
+
+    def _write_review(self, name, findings):
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(
+            "# Review\n\n## Walkthrough\nWhat changed: a fix.\n\n"
+            "## Findings\n" + findings + "\n\n## Coverage\nx.py.\n",
+            encoding="utf-8")
+
+    # -- loading and matching ----------------------------------------------
+
+    def test_load_checks_skips_headings_and_blanks(self):
+        from forge import gate_checks as gc_mod
+        self.assertEqual(gc_mod.load_checks(self.root), [])
+        self._write_checks(
+            "# Gate checks\n\n- No Critical findings open\n"
+            "2. Review is current\n\nAn unmapped line\n")
+        self.assertEqual(
+            gc_mod.load_checks(self.root),
+            ["No Critical findings open", "Review is current",
+             "An unmapped line"])
+
+    def test_match_check_maps_the_plain_words(self):
+        from forge import gate_checks as gc_mod
+        self.assertIs(gc_mod.match_check("No Critical findings open"),
+                      gc_mod._check_no_critical)
+        self.assertIs(gc_mod.match_check("Zero Major findings"),
+                      gc_mod._check_no_major)
+        self.assertIs(gc_mod.match_check(
+            "No critical or major findings open"),
+            gc_mod._check_no_critical_or_major)
+        self.assertIs(gc_mod.match_check("All findings fixed"),
+                      gc_mod._check_no_findings)
+        self.assertIs(gc_mod.match_check("No findings open"),
+                      gc_mod._check_no_findings)
+        self.assertIs(gc_mod.match_check("Review is current"),
+                      gc_mod._check_review_current)
+        self.assertIs(gc_mod.match_check("Summary is up to date"),
+                      gc_mod._check_summary_current)
+        # A statement, not a check — "critical findings exist"
+        # names no absence to enforce.
+        self.assertIsNone(
+            gc_mod.match_check("Critical findings exist"))
+        self.assertIsNone(gc_mod.match_check("Make it faster"))
+        self.assertIsNone(gc_mod.match_check(""))
+        self.assertIsNone(gc_mod.match_check(None))
+
+    # -- the evaluators ------------------------------------------------------
+
+    def test_findings_checks_read_the_latest_review(self):
+        from forge import gate_checks as gc_mod
+        self._write_checks(
+            "No Critical findings open\nNo Major findings open\n"
+            "All findings fixed\n")
+        # No review on file yet: nothing to count — uncheckable,
+        # never a vacuous pass.
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(
+            [r["status"] for r in results],
+            ["uncheckable"] * 3)
+        self._write_review(
+            "review-1.md",
+            "- [Critical · Security · Source: Reviewer judgment] "
+            "auth.py:12 — bad compare — Fix: use compare_digest\n"
+            "- [Major · Bug · Source: Reviewer judgment] "
+            "store.py:3 — truncates — Fix: write then rename\n")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(
+            [r["status"] for r in results],
+            ["fail", "fail", "fail"])
+        self.assertIn("1 Critical", results[0]["detail"])
+        self.assertIn("review-1.md", results[0]["detail"])
+        # A newer review with no Critical: only its findings count.
+        self._write_review(
+            "review-2.md",
+            "- [Minor · Nitpick · Source: Reviewer judgment] "
+            "x.py:1 — typo — Fix: fix the typo\n")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(
+            [r["status"] for r in results],
+            ["pass", "pass", "fail"])
+        self.assertIn("1 finding", results[2]["detail"])
+
+    def test_review_current_follows_the_cr6_baseline(self):
+        from forge import gate_checks as gc_mod
+        from forge import review_state as rs_mod
+        self._write_checks("Review is current\n")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(results[0]["status"], "uncheckable")
+        self.assertIn("baseline", results[0]["detail"])
+        rs_mod.record_review(self.root)
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(results[0]["status"], "pass")
+        (self.root / "x.py").write_text("print(1)\n",
+                                         encoding="utf-8")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(results[0]["status"], "fail")
+        self.assertIn("1 file(s) changed", results[0]["detail"])
+
+    def test_summary_current_names_the_latest_review(self):
+        from forge import gate_checks as gc_mod
+        self._write_checks("Summary is up to date\n")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(results[0]["status"], "uncheckable")
+        self._write_review(
+            "review-1.md",
+            "- [Minor · Nitpick · Source: Reviewer judgment] "
+            "x.py:1 — typo — Fix: fix the typo\n")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(results[0]["status"], "fail")
+        (self.root / ".forge" / "reviews" / "summary.md").write_text(
+            "## 2026-11-11 — review-1.md\nWhat changed: a fix.\n",
+            encoding="utf-8")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(results[0]["status"], "pass")
+
+    def test_unmapped_line_is_cant_check_never_passed(self):
+        from forge import gate_checks as gc_mod
+        self._write_checks("Make the UI prettier\n")
+        results = gc_mod.run_checks(self.root)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "uncheckable")
+        self.assertIn("check it yourself", results[0]["detail"])
+        text = gc_mod.format_results(results)
+        self.assertIn("? CAN'T CHECK", text)
+        self.assertIn("Make the UI prettier", text)
+
+    def test_format_results_points_at_the_file_when_empty(self):
+        from forge import gate_checks as gc_mod
+        self.assertIn("gate-checks.md", gc_mod.format_results([]))
+        self.assertIn("No Critical findings open",
+                      gc_mod.format_results([]))
+
+    # -- the gate itself -------------------------------------------------------
+
+    def test_plan_gate_shows_the_checks(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import PlanWindow
+        self._write_checks(
+            "No Critical findings open\nMake the UI prettier\n")
+        self._write_review(
+            "review-1.md",
+            "- [Critical · Security · Source: Reviewer judgment] "
+            "auth.py:12 — bad compare — Fix: use compare_digest\n")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner._plan_gate_action = lambda action: None
+        win = PlanWindow(owner)
+        try:
+            win.set_project(str(self.root))
+            text = win.gate_checks_view.toPlainText()
+            self.assertIn(
+                "✗ FAIL — No Critical findings open", text)
+            self.assertIn("1 Critical", text)
+            self.assertIn(
+                "? CAN'T CHECK — Make the UI prettier", text)
+            # The ForgeWindow aliases the same view.
+            self.assertIs(self.win.plan_win.gate_checks_view,
+                          self.win.gate_checks_view)
+        finally:
+            win.close()
+            owner.close()
+
+    def test_plan_gate_with_no_checks_points_at_the_file(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import PlanWindow
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner._plan_gate_action = lambda action: None
+        win = PlanWindow(owner)
+        try:
+            win.set_project(str(self.root))
+            self.assertIn(
+                "gate-checks.md",
+                win.gate_checks_view.toPlainText())
+        finally:
+            win.close()
+            owner.close()
+
+
+class FixWithDriverTests(unittest.TestCase):
+    """CR9 (CodeRabbit Tier 1 #9, 2026-11-11): the per-finding
+    "Fix with Driver" action. The Review room's Fix button (and
+    double-clicking a finding) runs a Code turn on that one
+    finding, using its Prompt for the Driver — and the request is
+    recorded in the review itself under ## Fix requests, so the
+    findings list shows which findings already have a fix on the
+    way. The record is of asking, not of the fix landing."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _review_text(self, findings):
+        return ("# Review\n\n## Findings\n" + findings +
+                "\n\n## Coverage\nauth.py, store.py.\n")
+
+    # -- the record ----------------------------------------------------------
+
+    def test_record_creates_the_section_and_round_trips(self):
+        from forge import modes as modes_mod
+        text = self._review_text(
+            "- [Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest\n")
+        updated = modes_mod.record_fix_request(
+            text, "2026-11-11 16:50",
+            "[Critical · Security · Source: Owner learning] "
+            "auth.py:12 — tokens compared with == — Fix: use "
+            "hmac.compare_digest",
+            "In auth.py, use hmac.compare_digest; then run the "
+            "login test and confirm it passes.")
+        # The original text is untouched outside the new section.
+        self.assertTrue(updated.startswith(text))
+        self.assertIn("## Fix requests", updated)
+        requests = modes_mod.fix_requests(updated)
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["when"], "2026-11-11 16:50")
+        self.assertTrue(requests[0]["finding"].startswith(
+            "[Critical · Security"))
+        self.assertIn("hmac.compare_digest", requests[0]["sent"])
+        self.assertEqual(
+            modes_mod.fix_requested_for(
+                updated,
+                "[Critical · Security · Source: Owner learning] "
+                "auth.py:12 — tokens compared with == — Fix: use "
+                "hmac.compare_digest"),
+            "2026-11-11 16:50")
+        self.assertIsNone(modes_mod.fix_requested_for(
+            updated, "some other finding"))
+        self.assertEqual(modes_mod.fix_requests(text), [])
+
+    def test_second_request_appends_after_the_first(self):
+        from forge import modes as modes_mod
+        text = self._review_text("- x.py:1 — typo\n")
+        once = modes_mod.record_fix_request(
+            text, "2026-11-11 16:50", "x.py:1 — typo", "Fix the typo.")
+        twice = modes_mod.record_fix_request(
+            once, "2026-11-11 16:55", "x.py:1 — typo",
+            "Fix the typo, again.")
+        requests = modes_mod.fix_requests(twice)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[1]["when"], "2026-11-11 16:55")
+        self.assertEqual(
+            modes_mod.fix_requested_for(twice, "x.py:1 — typo"),
+            "2026-11-11 16:55")
+        # The Findings section still parses as one finding — the
+        # Fix requests section never leaks into it.
+        body = modes_mod.section_body(twice, "Findings")
+        self.assertEqual(len(modes_mod.parse_findings_body(body)), 1)
+
+    def test_record_before_a_following_section_stays_inside_it(self):
+        from forge import modes as modes_mod
+        text = self._review_text("- x.py:1 — typo\n")
+        once = modes_mod.record_fix_request(
+            text, "2026-11-11 16:50", "x.py:1 — typo", "Fix it.")
+        # A section filed after the Fix requests section: the
+        # next request still lands inside Fix requests, before it.
+        with_following = once + "\n## Notes\nLater notes.\n"
+        twice = modes_mod.record_fix_request(
+            with_following, "2026-11-11 16:55", "x.py:1 — typo",
+            "Fix it, again.")
+        self.assertLess(twice.index("## Fix requests"),
+                        twice.index("## Notes"))
+        self.assertLess(twice.index("16:55"),
+                        twice.index("## Notes"))
+        self.assertEqual(len(modes_mod.fix_requests(twice)), 2)
+
+    # -- the room --------------------------------------------------------------
+
+    def _driver_review_window(self):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "fix-review.md").write_text(
+            self._review_text(
+                "- [Critical · Security · Source: Owner learning] "
+                "auth.py:12 — tokens compared with == — Fix: use "
+                "hmac.compare_digest\n"
+                "  Driver: In auth.py, use hmac.compare_digest; "
+                "then run the login test and confirm it passes.\n"
+                "- BLOCKER: store.py:3 — save truncates before "
+                "writing\n"),
+            encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index("fix-review.md")
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    def test_fix_button_is_named_fix_with_driver(self):
+        win, _owner = self._driver_review_window()
+        try:
+            self.assertEqual(win.fix_btn.text(), "Fix with Driver")
+            self.assertEqual(win.findings_list.count(), 2)
+        finally:
+            win.close()
+
+    def test_fix_records_the_request_in_the_review(self):
+        win, owner = self._driver_review_window()
+        try:
+            win.findings_list.setCurrentRow(0)
+            win.fix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            self.assertTrue(owner.send_calls[0].startswith(
+                "In auth.py, use hmac.compare_digest"))
+            recorded = (self.root / ".forge" / "reviews"
+                        / "fix-review.md").read_text(encoding="utf-8")
+            from forge import modes as modes_mod
+            requests = modes_mod.fix_requests(recorded)
+            self.assertEqual(len(requests), 1)
+            self.assertIn("auth.py:12", requests[0]["finding"])
+            self.assertIn("hmac.compare_digest", requests[0]["sent"])
+            # The list now shows the request on that finding.
+            item = win.findings_list.item(0)
+            self.assertIn("↻ fix requested", item.text())
+            self.assertIn("Fix requested", item.toolTip())
+            # The other finding is untouched.
+            self.assertNotIn("fix requested",
+                             win.findings_list.item(1).text())
+            self.assertIn("recorded in the review",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_double_click_runs_the_same_fix(self):
+        win, owner = self._driver_review_window()
+        try:
+            item = win.findings_list.item(1)
+            win.findings_list.setCurrentRow(1)
+            win.findings_list.itemDoubleClicked.emit(item)
+            self.assertEqual(len(owner.send_calls), 1)
+            self.assertTrue(owner.send_calls[0].startswith(
+                "Fix this review finding: BLOCKER: store.py:3"))
+            recorded = (self.root / ".forge" / "reviews"
+                        / "fix-review.md").read_text(encoding="utf-8")
+            from forge import modes as modes_mod
+            self.assertEqual(
+                len(modes_mod.fix_requests(recorded)), 1)
+        finally:
+            win.close()
+
+    def test_reviews_prompt_names_the_fix_requests_section(self):
+        from forge import projects as proj_mod
+        self.assertIn("Fix requests",
+                      proj_mod.FOLDER_PROMPTS["reviews"])
+
+
+class ContextRankCompressTests(unittest.TestCase):
+    """CR10 (CodeRabbit Tier 1 #10, 2026-11-11): context rank +
+    compress before the model. The system prompt is built as
+    named parts with a tier each (0 core — never dropped; 1 the
+    owner's words; 2 project state; 3 generated indexes — first
+    to go) and compressed to half the window. When everything
+    fits, the prompt is unchanged — no footer, no reordering.
+    When something is dropped or truncated, the prompt carries a
+    footer naming what was lost. The history fold (Note 14) is
+    untouched — this is the system-prompt half that never
+    folded."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self._old_num_ctx = self.win.settings.get("num_ctx")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        if self._old_num_ctx is None:
+            self.win.settings.pop("num_ctx", None)
+        else:
+            self.win.settings["num_ctx"] = self._old_num_ctx
+        self.temp.cleanup()
+
+    def _part(self, label, tier, chars):
+        return (label, tier, "x" * chars)
+
+    # -- the compressor ------------------------------------------------------
+
+    def test_everything_fitting_returns_unchanged(self):
+        from forge import context as ctx_mod
+        parts = [self._part("base prompt", 0, 100),
+                 self._part("project hints", 1, 100),
+                 self._part("project map", 3, 100)]
+        kept, report = ctx_mod.compress_system_parts(parts, 1000)
+        self.assertEqual(kept, [p[2] for p in parts])
+        self.assertEqual(report["dropped"], [])
+        self.assertEqual(report["truncated"], [])
+        self.assertEqual(ctx_mod.compression_note(report), "")
+
+    def test_generated_indexes_drop_first_then_state_then_words(self):
+        from forge import context as ctx_mod
+        # Each part ~29 tokens (100 chars / 3.5); budget 60 keeps
+        # the core (29) + the owner's hints (29), and drops the
+        # lower tiers in tier order.
+        parts = [self._part("project map", 3, 100),
+                 self._part("project brief", 2, 100),
+                 self._part("project hints", 1, 100),
+                 self._part("base prompt", 0, 100)]
+        kept, report = ctx_mod.compress_system_parts(parts, 60)
+        self.assertEqual(len(kept), 2)
+        self.assertIn("x" * 100, kept)
+        self.assertEqual(report["dropped"],
+                         ["project brief", "project map"])
+        note = ctx_mod.compression_note(report)
+        self.assertIn("dropped: project brief, project map", note)
+
+    def test_kept_parts_stay_in_original_order(self):
+        from forge import context as ctx_mod
+        parts = [("project map", 3, "MAP"),
+                 ("base prompt", 0, "BASE"),
+                 ("project hints", 1, "HINTS")]
+        # MAP ~1 token, BASE ~2, HINTS ~2; budget 4 keeps BASE +
+        # HINTS in their original order and drops MAP — the kept
+        # prompt reads the same, just shorter.
+        kept, report = ctx_mod.compress_system_parts(parts, 4)
+        self.assertEqual(kept, ["BASE", "HINTS"])
+        self.assertEqual(report["dropped"], ["project map"])
+
+    def test_core_alone_over_budget_truncates_with_a_marker(self):
+        from forge import context as ctx_mod
+        parts = [self._part("base prompt", 0, 1000)]
+        kept, report = ctx_mod.compress_system_parts(parts, 10)
+        self.assertEqual(len(kept), 1)
+        self.assertIn("chars omitted to fit the context window",
+                      kept[0])
+        self.assertEqual(len(report["truncated"]), 1)
+        self.assertEqual(report["truncated"][0][0], "base prompt")
+        self.assertGreater(report["truncated"][0][1], 0)
+        self.assertEqual(report["dropped"], [])
+        self.assertIn("truncated: base prompt",
+                      ctx_mod.compression_note(report))
+
+    def test_compressor_never_raises_on_bad_input(self):
+        from forge import context as ctx_mod
+        kept, report = ctx_mod.compress_system_parts(None, 100)
+        self.assertEqual(kept, [])
+        kept, report = ctx_mod.compress_system_parts([], 100)
+        self.assertEqual(kept, [])
+        self.assertEqual(ctx_mod.compression_note({}), "")
+        self.assertEqual(ctx_mod.compression_note(None), "")
+
+    # -- the wired prompt ------------------------------------------------------
+
+    def test_small_project_prompt_is_uncompressed(self):
+        prompt = self.win.build_system_prompt()
+        self.assertNotIn("Context note", prompt)
+        self.assertIn("house rules", prompt.lower())
+        self.assertIn("Self-extension", prompt)
+
+    def test_huge_hints_drop_under_a_small_window(self):
+        # A 20,000-char hints file (~5,700 tokens) against a 2048
+        # window (budget 1024): the owner's hints cannot fit, so
+        # they drop whole — and the prompt says so.
+        (self.root / ".forge" / "hints.md").write_text(
+            "Hint: " + "x" * 20000, encoding="utf-8")
+        self.win.settings["num_ctx"] = 2048
+        prompt = self.win.build_system_prompt()
+        self.assertNotIn("Hint: " + "x" * 100, prompt)
+        self.assertIn("Context note", prompt)
+        self.assertIn("dropped: project hints", prompt)
+        # The core survives: the model still gets its instructions.
+        self.assertIn("Self-extension", prompt)
+        self.assertIn("house rules", prompt.lower())
+
+
+class LearningsTests(unittest.TestCase):
+    """CR1 (CodeRabbit Learnings loop, 2026-11-11): the owner's
+    plain-language dismissal of a review finding persists as a
+    learning — project (.forge/learnings.md) or global (a path
+    parameter standing in for the app-data file) — and rides in
+    Review turns only. The store is owner text only: no model
+    writes here, reads never raise, and a project with no
+    learnings prompts byte-identically to before."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self.global_path = self.root / "global-learnings.md"
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    # -- the store ------------------------------------------------
+
+    def test_add_list_roundtrip_project(self):
+        from forge import learnings as learnings_mod
+        path = learnings_mod.add_learning(
+            self.root, "Handled higher up — the caller validates",
+            source="parser-review.md")
+        self.assertEqual(path, self.root / ".forge" / "learnings.md")
+        body = path.read_text(encoding="utf-8")
+        self.assertTrue(body.startswith("# Review learnings"))
+        self.assertIn("· Filed:", body)
+        self.assertIn("· From: parser-review.md", body)
+        learnings_mod.add_learning(self.root, "We prefer early returns")
+        self.assertEqual(
+            learnings_mod.list_learnings(self.root),
+            ["Handled higher up — the caller validates",
+             "We prefer early returns"])
+        # A source-less add carries no From part.
+        second = [l for l in path.read_text(encoding="utf-8").splitlines()
+                  if "We prefer early returns" in l][0]
+        self.assertNotIn("From:", second)
+
+    def test_add_list_roundtrip_global(self):
+        from forge import learnings as learnings_mod
+        path = learnings_mod.add_learning(
+            self.root, "Never re-raise style nits on generated files",
+            scope="global", global_path=self.global_path)
+        self.assertEqual(path, self.global_path)
+        self.assertEqual(
+            learnings_mod.list_learnings(
+                self.root, "global", global_path=self.global_path),
+            ["Never re-raise style nits on generated files"])
+        # Global writes never touch the project file.
+        self.assertEqual(learnings_mod.list_learnings(self.root), [])
+        self.assertFalse((self.root / ".forge" / "learnings.md").exists())
+
+    def test_dedupe_is_case_insensitive(self):
+        from forge import learnings as learnings_mod
+        learnings_mod.add_learning(self.root, "Prefer early returns")
+        again = learnings_mod.add_learning(
+            self.root, "  prefer EARLY returns  ")
+        self.assertEqual(again, self.root / ".forge" / "learnings.md")
+        self.assertEqual(learnings_mod.list_learnings(self.root),
+                         ["Prefer early returns"])
+
+    def test_empty_text_rejected_and_files_nothing(self):
+        from forge import learnings as learnings_mod
+        for bad in ("", "   ", None):
+            with self.assertRaises(ValueError):
+                learnings_mod.add_learning(self.root, bad)
+        self.assertFalse((self.root / ".forge" / "learnings.md").exists())
+
+    def test_cap_enforced_oldest_kept(self):
+        from forge import learnings as learnings_mod
+        path = self.root / ".forge" / "learnings.md"
+        lines = ["# Review learnings", ""]
+        lines += [f"- learning {i} · Filed: 2026-11-11 09:00"
+                  for i in range(learnings_mod.MAX_LEARNINGS)]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            learnings_mod.add_learning(self.root, "one too many")
+        kept = learnings_mod.list_learnings(self.root)
+        self.assertEqual(len(kept), learnings_mod.MAX_LEARNINGS)
+        self.assertEqual(kept[0], "learning 0")
+
+    def test_missing_and_malformed_files_read_empty(self):
+        from forge import learnings as learnings_mod
+        self.assertEqual(learnings_mod.list_learnings(self.root), [])
+        self.assertEqual(
+            learnings_mod.learnings_block(
+                self.root, global_path=self.global_path), "")
+        path = self.root / ".forge" / "learnings.md"
+        path.write_text("not a learnings file at all\njust prose\n",
+                        encoding="utf-8")
+        self.assertEqual(learnings_mod.list_learnings(self.root), [])
+
+    def test_block_orders_global_first_and_caps_with_tail(self):
+        from forge import learnings as learnings_mod
+        learnings_mod.add_learning(
+            self.root, "global rule", scope="global",
+            global_path=self.global_path)
+        for i in range(6):
+            learnings_mod.add_learning(
+                self.root, f"project rule number {i} with some length")
+        block = learnings_mod.learnings_block(
+            self.root, global_path=self.global_path, cap_chars=80)
+        lines = block.splitlines()
+        self.assertTrue(lines[0].startswith(
+            "Owner's review learnings — apply these"))
+        self.assertEqual(lines[1], "- global rule")
+        self.assertLess(block.index("global rule"),
+                        block.index("project rule number 0"))
+        # The cap held: not every project rule is shown, and the
+        # dropped ones are counted, not silently lost.
+        shown = [l for l in lines if l.startswith("- project")]
+        dropped = 6 - len(shown)
+        self.assertGreater(dropped, 0)
+        self.assertEqual(lines[-1],
+                         f"+{dropped} more in .forge/learnings.md")
+
+    def test_block_empty_without_learnings(self):
+        from forge import learnings as learnings_mod
+        self.assertEqual(
+            learnings_mod.learnings_block(
+                self.root, global_path=self.global_path), "")
+
+    # -- the prompt seam (build_system_prompt) ---------------------
+
+    def test_review_prompt_carries_learnings(self):
+        from forge import learnings as learnings_mod
+        learnings_mod.add_learning(
+            self.root, "Handled higher up — the caller validates")
+        self.win.settings["mode"] = "review"
+        prompt = self.win.build_system_prompt()
+        self.assertIn("Owner's review learnings — apply these",
+                      prompt)
+        self.assertIn("- Handled higher up — the caller validates",
+                      prompt)
+
+    def test_prompt_unchanged_when_no_learnings(self):
+        from forge import learnings as learnings_mod
+        # Review mode, nothing taught: no learnings block at all.
+        self.win.settings["mode"] = "review"
+        prompt = self.win.build_system_prompt()
+        self.assertNotIn("review learnings", prompt)
+        # Another mode, WITH a learning on file: the prompt is
+        # byte-identical to the same mode without one — learnings
+        # ride in Review turns only.
+        self.win.settings["mode"] = "code"
+        before = self.win.build_system_prompt()
+        learnings_mod.add_learning(self.root, "Review-only knowledge")
+        after = self.win.build_system_prompt()
+        self.assertEqual(before, after)
+        self.assertNotIn("Review-only knowledge", after)
+
+    # -- the Review room teach flow --------------------------------
+
+    def _review_window(self):
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "parser-review.md").write_text(
+            "# Review\n\n## Findings\n"
+            "- parser.py: empty input crashes the reader\n"
+            "- worker.py: timeout is not honoured\n",
+            encoding="utf-8")
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        # The scaffold's PROMPT.md shares the Reviews tab — select
+        # the review file itself, as the owner would by clicking it.
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index("parser-review.md")
+        listing.setCurrentRow(idx)
+        self.assertEqual(win.findings_list.count(), 2)
+        return win
+
+    def _fake_dialog(self, result):
+        import forge.main as main_mod
+
+        class _FakeDialog:
+            calls = []
+
+            @staticmethod
+            def getText(*args, **kwargs):
+                _FakeDialog.calls.append((args, kwargs))
+                return result
+
+        return main_mod, _FakeDialog
+
+    def test_teach_files_a_learning_from_the_selected_finding(self):
+        from unittest import mock
+        from forge import learnings as learnings_mod
+        win = self._review_window()
+        win.findings_list.setCurrentRow(0)
+        main_mod, fake = self._fake_dialog(
+            ("Handled higher up — caller validates", True))
+        with mock.patch.object(main_mod, "QInputDialog", fake):
+            win.teach_btn.click()
+        self.assertEqual(len(fake.calls), 1)
+        label = fake.calls[0][0][2]
+        self.assertIn("Why is this not a finding?", label)
+        self.assertIn("parser.py: empty input crashes the reader",
+                      label)
+        self.assertEqual(
+            learnings_mod.list_learnings(self.root),
+            ["Handled higher up — caller validates"])
+        body = (self.root / ".forge" / "learnings.md").read_text(
+            encoding="utf-8")
+        self.assertIn("· From: parser-review.md", body)
+        self.assertIn("Learning saved", win.composer_status.text())
+        win.close()
+
+    def test_end_to_end_teach_then_prompt_and_council_carry_it(self):
+        """CR1 perfection pass — verify like the user, end to end:
+        a finding in a real review file is taught from the real
+        ReviewWindow; the learning lands in .forge/learnings.md;
+        a Review-mode system prompt for the project then carries
+        it; and the Council reviewer's messages for the same
+        workspace carry the same block."""
+        from unittest import mock
+        from forge import council as council_mod
+        from forge import learnings as learnings_mod
+        win = self._review_window()
+        win.findings_list.setCurrentRow(0)
+        main_mod, fake = self._fake_dialog(
+            ("Handled higher up — caller validates", True))
+        with mock.patch.object(main_mod, "QInputDialog", fake):
+            win.teach_btn.click()
+        body = (self.root / ".forge" / "learnings.md").read_text(
+            encoding="utf-8")
+        self.assertIn("Handled higher up — caller validates", body)
+        self.win.settings["mode"] = "review"
+        prompt = self.win.build_system_prompt()
+        self.assertIn("- Handled higher up — caller validates",
+                      prompt)
+        msgs = council_mod.build_review_messages(
+            "review the parser", "done", [], "rev-model",
+            workspace=str(self.root))
+        self.assertIn("Owner's review learnings — apply these",
+                      msgs[1]["content"])
+        self.assertIn("- Handled higher up — caller validates",
+                      msgs[1]["content"])
+        win.close()
+
+    def test_teach_without_selection_writes_nothing(self):
+        from forge import learnings as learnings_mod
+        win = self._review_window()
+        win.findings_list.setCurrentRow(-1)
+        win.teach_btn.click()
+        self.assertIn("Pick a finding", win.composer_status.text())
+        self.assertEqual(learnings_mod.list_learnings(self.root), [])
+        win.close()
+
+    def test_teach_cancelled_or_empty_writes_nothing(self):
+        from unittest import mock
+        from forge import learnings as learnings_mod
+        win = self._review_window()
+        win.findings_list.setCurrentRow(1)
+        main_mod, fake = self._fake_dialog(("", False))
+        with mock.patch.object(main_mod, "QInputDialog", fake):
+            win.teach_btn.click()
+        self.assertIn("Nothing was saved", win.composer_status.text())
+        main_mod2, fake2 = self._fake_dialog(("   ", True))
+        with mock.patch.object(main_mod2, "QInputDialog", fake2):
+            win.teach_btn.click()
+        self.assertIn("Nothing was saved", win.composer_status.text())
+        self.assertEqual(learnings_mod.list_learnings(self.root), [])
+        self.assertFalse((self.root / ".forge" / "learnings.md").exists())
+        win.close()
+
+
+class LearningsHardeningTests(unittest.TestCase):
+    """CR1 perfection pass (2026-11-11): the learnings store under
+    the owner's hand — hand-edited files, odd text shapes, dedupe
+    variants, atomic appends, honest cap math and tail lines, the
+    real global path, and plain errors for a bad scope."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self.global_path = self.root / "global-learnings.md"
+        self.path = self.root / ".forge" / "learnings.md"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    # -- hand edits ------------------------------------------------
+
+    def test_hand_edit_markers_and_clutter_are_tolerated(self):
+        self.path.write_text(
+            "My own heading, not yours\n"
+            "\n"
+            "* star bullet rule\n"
+            "+ plus bullet rule\n"
+            "• unicode bullet rule\n"
+            "1. numbered rule\n"
+            "some prose that is not a learning\n"
+            "\n"
+            "- dash rule · Filed: 2026-11-11 09:00\n",
+            encoding="utf-8")
+        from forge import learnings as lm
+        self.assertEqual(
+            lm.list_learnings(self.root),
+            ["star bullet rule", "plus bullet rule",
+             "unicode bullet rule", "numbered rule", "dash rule"])
+
+    def test_append_lands_when_heading_gone_and_no_trailing_newline(self):
+        self.path.write_text("- owner rule one", encoding="utf-8")
+        from forge import learnings as lm
+        lm.add_learning(self.root, "second rule")
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["owner rule one", "second rule"])
+        body = self.path.read_text(encoding="utf-8")
+        self.assertIn("- owner rule one\n- second rule", body)
+
+    def test_reworded_bullet_reads_as_new_words_and_dedupes(self):
+        self.path.write_text(
+            "# Review learnings\n\n- prefer early returns always\n",
+            encoding="utf-8")
+        from forge import learnings as lm
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["prefer early returns always"])
+        lm.add_learning(self.root, "Prefer Early Returns Always")
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["prefer early returns always"])
+
+    def test_bom_and_crlf_files_read_and_append_cleanly(self):
+        self.path.write_bytes(
+            "# Review learnings\r\n\r\n"
+            "- crlf rule · Filed: 2026-11-11 09:00\r\n".encode("utf-8-sig"))
+        from forge import learnings as lm
+        self.assertEqual(lm.list_learnings(self.root), ["crlf rule"])
+        lm.add_learning(self.root, "appended after crlf")
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["crlf rule", "appended after crlf"])
+
+    # -- text shape --------------------------------------------------
+
+    def test_multiline_reason_is_flattened_to_one_line(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "first line\nsecond line\r\nthird")
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["first line second line third"])
+        bullets = [l for l in self.path.read_text(
+            encoding="utf-8").splitlines() if l.startswith("- ")]
+        self.assertEqual(len(bullets), 1)
+
+    def test_overlong_learning_rejected_plainly_and_not_truncated(self):
+        from forge import learnings as lm
+        with self.assertRaises(ValueError) as cm:
+            lm.add_learning(self.root, "x" * (lm.MAX_TEXT_CHARS + 1))
+        self.assertIn(str(lm.MAX_TEXT_CHARS), str(cm.exception))
+        self.assertFalse(self.path.exists())
+        lm.add_learning(self.root, "x" * lm.MAX_TEXT_CHARS)
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["x" * lm.MAX_TEXT_CHARS])
+
+    def test_unicode_and_emoji_roundtrip(self):
+        from forge import learnings as lm
+        text = "Ne pas re-signaler — déjà géré 🔥 café"
+        lm.add_learning(self.root, text)
+        self.assertEqual(lm.list_learnings(self.root), [text])
+
+    def test_text_containing_filed_marker_keeps_its_words(self):
+        from forge import learnings as lm
+        text = "the stamp reads · Filed: in the middle of my sentence"
+        lm.add_learning(self.root, text)
+        self.assertEqual(lm.list_learnings(self.root), [text])
+        # …and dedupe sees the same whole text, not a truncation.
+        lm.add_learning(self.root, text)
+        self.assertEqual(lm.list_learnings(self.root), [text])
+
+    # -- dedupe --------------------------------------------------------
+
+    def test_dedupe_whitespace_and_case_variants(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "prefer   early\treturns")
+        lm.add_learning(self.root, "Prefer early returns")
+        lm.add_learning(self.root, "prefer early returns in parsers")
+        self.assertEqual(
+            lm.list_learnings(self.root),
+            ["prefer early returns", "prefer early returns in parsers"])
+
+    # -- atomicity -----------------------------------------------------
+
+    def test_two_adds_in_a_row_both_land_and_no_temp_left(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "rule one")
+        lm.add_learning(self.root, "rule two")
+        self.assertEqual(lm.list_learnings(self.root),
+                         ["rule one", "rule two"])
+        leftovers = [p.name for p in self.path.parent.iterdir()
+                     if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
+
+    def test_owner_content_survives_an_add_byte_for_byte(self):
+        original = "# Mine\n\n- keep me exactly · Filed: 2026-01-01 08:00\n"
+        self.path.write_text(original, encoding="utf-8")
+        from forge import learnings as lm
+        lm.add_learning(self.root, "new rule")
+        body = self.path.read_text(encoding="utf-8")
+        self.assertTrue(body.startswith(original))
+        self.assertIn("- new rule", body)
+
+    # -- learnings_block cap + tail ------------------------------------
+
+    def _bullet_sum(self, block):
+        return sum(len(l) for l in block.splitlines()
+                   if l.startswith("- "))
+
+    def test_block_never_exceeds_cap_by_more_than_framing_and_tail(self):
+        from forge import learnings as lm
+        for i in range(8):
+            lm.add_learning(self.root, f"rule {i} " + "y" * 30)
+        block = lm.learnings_block(self.root,
+                                   global_path=self.global_path,
+                                   cap_chars=100)
+        self.assertLessEqual(self._bullet_sum(block), 100)
+        lines = block.splitlines()
+        # Every shown bullet is whole, and the tail line is whole.
+        for line in lines[1:]:
+            self.assertTrue(line.startswith("- rule ")
+                            or line.startswith("+"))
+        self.assertTrue(lines[-1].startswith("+"))
+        self.assertIn("more in .forge/learnings.md", lines[-1])
+
+    def test_block_first_bullet_too_big_for_cap_shows_tail_only(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "a fairly long single learning here")
+        block = lm.learnings_block(self.root,
+                                   global_path=self.global_path,
+                                   cap_chars=10)
+        self.assertEqual(self._bullet_sum(block), 0)
+        self.assertIn("+1 more in .forge/learnings.md", block)
+
+    def test_block_tail_names_global_file_when_only_global_dropped(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "global rule one is long",
+                        scope="global", global_path=self.global_path)
+        lm.add_learning(self.root, "global rule two is long",
+                        scope="global", global_path=self.global_path)
+        block = lm.learnings_block(self.root,
+                                   global_path=self.global_path,
+                                   cap_chars=30)
+        tail = block.splitlines()[-1]
+        self.assertIn("the global learnings file", tail)
+        self.assertNotIn(".forge/learnings.md", tail)
+
+    def test_block_tail_names_both_files_when_both_scopes_dropped(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "g one", scope="global",
+                        global_path=self.global_path)
+        lm.add_learning(self.root, "a global rule of some length",
+                        scope="global", global_path=self.global_path)
+        lm.add_learning(self.root, "a project rule of some length")
+        block = lm.learnings_block(self.root,
+                                   global_path=self.global_path,
+                                   cap_chars=20)
+        tail = block.splitlines()[-1]
+        self.assertIn("the global learnings file", tail)
+        self.assertIn(".forge/learnings.md", tail)
+
+    # -- paths and scope -------------------------------------------------
+
+    def test_default_global_path_matches_main_app_dir(self):
+        from PySide6.QtWidgets import QApplication
+        _app = QApplication.instance() or QApplication([])
+        import forge.main as main_mod
+        from forge import learnings as lm
+        self.assertEqual(lm.default_global_path(),
+                         main_mod.APP_DIR / "learnings.md")
+
+    def test_invalid_scope_is_a_plain_value_error(self):
+        from forge import learnings as lm
+        with self.assertRaises(ValueError):
+            lm.add_learning(self.root, "some rule", scope="everywhere")
+        with self.assertRaises(ValueError):
+            lm.list_learnings(self.root, scope="everywhere")
+        self.assertFalse(self.path.exists())
+
+
+class CouncilLearningsTests(unittest.TestCase):
+    """CR1 perfection pass: the Council reviewer's pass carries the
+    same learnings block when a workspace is threaded through, and
+    is byte-identical to before when it is not — or when the
+    project has taught nothing."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _messages(self, **kw):
+        from forge import council as c
+        return c.build_review_messages(
+            "do X", "did X", ["write_file → a.py"], "rev-model", **kw)
+
+    def test_no_workspace_is_byte_identical_to_before(self):
+        from forge import council as c
+        legacy = c.build_review_messages(
+            "do X", "did X", ["write_file → a.py"], "rev-model")
+        self.assertEqual(self._messages(), legacy)
+        self.assertNotIn("review learnings",
+                         self._messages()[1]["content"])
+
+    def test_workspace_without_learnings_is_byte_identical(self):
+        legacy = self._messages()
+        with_ws = self._messages(workspace=str(self.root))
+        self.assertEqual(with_ws, legacy)
+
+    def test_workspace_with_learnings_carries_the_block(self):
+        from forge import learnings as lm
+        lm.add_learning(self.root, "Handled higher up — caller validates")
+        msgs = self._messages(workspace=str(self.root))
+        self.assertIn("Owner's review learnings — apply these",
+                      msgs[1]["content"])
+        self.assertIn("- Handled higher up — caller validates",
+                      msgs[1]["content"])
+        # The block sits before the final instruction, and the
+        # system message is untouched.
+        self.assertLess(msgs[1]["content"].index("Handled higher up"),
+                        msgs[1]["content"].index("Write your review now"))
+        legacy = self._messages()
+        self.assertEqual(msgs[0], legacy[0])
+
+
+class StablePrefixTests(unittest.TestCase):
+    """Manus study M1 — stable-prefix discipline.
+
+    The prompt prefix (system prompt + tool definitions) is the
+    part of every request the engine can reuse across turns; on a
+    CPU-only box that reuse is the prefill time of every turn after
+    the first. Three guarantees, all against the shipped code:
+
+    (a) build_system_prompt() in unchanged session state returns
+        byte-identical text on repeated builds — the send path
+        rebuilds messages[0] on EVERY send, so any drift here is a
+        prefix change on every turn;
+    (b) the built prefix carries no turn-volatile timestamp (no
+        time-of-day, no ISO datetime, not even today's date — a
+        value that changes while a session sits open has no place
+        ahead of the conversation);
+    (c) the model-facing wire serialization is deterministic: the
+        same conversation built with its dicts in a different
+        insertion order (a history restored from storage, a tool
+        call parsed back from a reply) serializes to the same
+        bytes at the Ollama client, in the provider message
+        conversion, and in the fold's span rendering.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        # The scaffold seeds brief.md with the project's creation
+        # date — a STABLE project fact, not a volatile timestamp:
+        # it never changes while a session sits open, so it does
+        # not break prefix reuse. Pin it to a fixed date here so
+        # the (b) test below still catches any injection of
+        # TODAY's date anywhere in the prompt.
+        from datetime import date as _date
+        brief = self.root / ".forge" / "brief.md"
+        brief.write_text(brief.read_text().replace(
+            f"Created: {_date.today().isoformat()}",
+            "Created: 2026-01-15"))
+        (self.root / "app.py").write_text(
+            "def main():\n    return 1\n")
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(self.root)
+        self._old_settings = {k: self.win.settings.get(k)
+                              for k in ("system_prompt", "repo_map", "mode")}
+        self.win.settings["repo_map"] = True
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        for key, value in self._old_settings.items():
+            if value is None:
+                self.win.settings.pop(key, None)
+            else:
+                self.win.settings[key] = value
+        self.temp.cleanup()
+
+    # -- (a) byte-identical rebuilds in unchanged state -------------
+    def test_build_system_prompt_twice_is_byte_identical(self):
+        first = self.win.build_system_prompt()
+        second = self.win.build_system_prompt()
+        self.assertEqual(first, second)
+        self.assertEqual(first.encode("utf-8"), second.encode("utf-8"))
+        # The fixture exercises the file-derived sections (project
+        # map over app.py, .forge/ area present), so the equality
+        # above is not two empty strings agreeing.
+        self.assertIn("PROJECT MAP", first)
+        self.assertIn("app.py", first)
+
+    # -- (b) no turn-volatile timestamp in the prefix ---------------
+    def test_build_system_prompt_has_no_volatile_timestamp(self):
+        import re
+        from datetime import datetime
+        prompt = self.win.build_system_prompt()
+        self.assertIsNone(re.search(r"\b\d{2}:\d{2}:\d{2}\b", prompt))
+        self.assertIsNone(
+            re.search(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}", prompt))
+        self.assertNotIn(datetime.now().strftime("%Y-%m-%d"), prompt)
+
+    # -- (c) deterministic model-facing serialization ---------------
+    def _ollama_payload_bytes(self, messages, options, tools):
+        from unittest import mock
+        from forge.ollama_client import OllamaClient
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["data"] = req.data
+            return _FakeHTTPResponse(
+                b'{"message": {"content": "ok"}}\n')
+
+        client = OllamaClient("http://127.0.0.1:11434")
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            list(client.chat_stream("m", messages, options, tools))
+        return captured["data"]
+
+    def test_ollama_payload_bytes_ignore_dict_insertion_order(self):
+        messages_a = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "read_file",
+                              "arguments": {"path": "a.txt",
+                                            "offset": 3}}}]},
+            {"role": "tool", "tool_name": "read_file",
+             "content": "body"},
+        ]
+        messages_b = [
+            {"content": "sys", "role": "system"},
+            {"content": "go", "role": "user"},
+            {"tool_calls": [
+                {"function": {"arguments": {"offset": 3,
+                                            "path": "a.txt"},
+                              "name": "read_file"}}],
+             "content": "", "role": "assistant"},
+            {"content": "body", "tool_name": "read_file",
+             "role": "tool"},
+        ]
+        options_a = {"num_ctx": 8192, "temperature": 0.7,
+                     "num_predict": 2048}
+        options_b = {"num_predict": 2048, "temperature": 0.7,
+                     "num_ctx": 8192}
+        tools_a = [{"type": "function", "function": {
+            "name": "read_file", "description": "read",
+            "parameters": {"type": "object",
+                           "properties": {"path": {"type": "string"}},
+                           "required": ["path"]}}}]
+        tools_b = [{"function": {
+            "parameters": {"required": ["path"],
+                           "properties": {"path": {"type": "string"}},
+                           "type": "object"},
+            "name": "read_file", "description": "read"},
+            "type": "function"}]
+        bytes_a = self._ollama_payload_bytes(messages_a, options_a,
+                                             tools_a)
+        bytes_b = self._ollama_payload_bytes(messages_b, options_b,
+                                             tools_b)
+        self.assertEqual(bytes_a, bytes_b)
+        # And a repeat of the same call is stable, byte for byte.
+        self.assertEqual(
+            bytes_a,
+            self._ollama_payload_bytes(messages_a, options_a, tools_a))
+
+    def test_groq_tool_arguments_ignore_dict_insertion_order(self):
+        from forge.providers import _to_groq_messages
+        base = {"role": "user", "content": "go"}
+
+        def converted(args):
+            msg = {"role": "assistant", "content": "",
+                   "tool_calls": [{"function": {
+                       "name": "read_file", "arguments": args}}]}
+            out = _to_groq_messages([base, msg])
+            return out[1]["tool_calls"][0]["function"]["arguments"]
+
+        self.assertEqual(converted({"path": "a.txt", "offset": 3}),
+                         converted({"offset": 3, "path": "a.txt"}))
+
+    def test_render_span_tool_call_args_ignore_insertion_order(self):
+        from forge import context as ctx
+
+        def rendered(args):
+            span = [{"role": "assistant", "content": "",
+                     "tool_calls": [{"function": {
+                         "name": "read_file", "arguments": args}}]}]
+            return ctx.render_span(span)
+
+        self.assertEqual(rendered({"path": "a.txt", "offset": 3}),
+                         rendered({"offset": 3, "path": "a.txt"}))
+
+
+
+
+class FilesystemContextTests(unittest.TestCase):
+    """Manus study M2 — restorable folds: filesystem as context.
+
+    The fold's summary replaces a span of the conversation, and the
+    summarizer only ever sees that span clipped (tool results to 800
+    chars). M2's rule: the FULL span is archived inside the project
+    BEFORE the render clips it, the summary carries a pointer to the
+    archive, and if the archive cannot be written the fold does not
+    happen at all — content is never dropped without a pointer.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _history_with_big_tool_result(self, big=None):
+        from forge import context as ctx  # noqa: F401  (fixture parity)
+        big = big if big is not None else "R" * 5000
+        msgs = [{"role": "system", "content": "standing orders"}]
+        for i in range(6):
+            msgs.append({"role": "user",
+                         "content": f"question {i} " + "x" * 300})
+            if i == 0:
+                msgs.append({"role": "assistant", "content": "",
+                             "tool_calls": [{"function": {
+                                 "name": "read_file",
+                                 "arguments": {"path": "big.txt"}}}]})
+                msgs.append({"role": "tool", "content": big})
+            else:
+                msgs.append({"role": "assistant",
+                             "content": f"answer {i} " + "y" * 300})
+        return msgs
+
+    def test_fold_archives_full_span_and_summary_points_at_it(self):
+        from forge import context as ctx
+        big = "R" * 5000
+        msgs = self._history_with_big_tool_result(big)
+        plan = ctx.plan_fold(msgs, 1500)
+        self.assertIsNotNone(plan)
+        # The summarizer's render clips the big tool result — that
+        # loss is exactly what the archive exists to reverse.
+        rendered = ctx.render_span(plan["span"])
+        self.assertNotIn(big, rendered)
+        self.assertIn("clipped for the summary request", rendered)
+        rel = ctx.archive_span(plan["span"], str(self.root))
+        self.assertEqual(rel, ".forge/context/fold-1.json")
+        archive_file = self.root / ".forge" / "context" / "fold-1.json"
+        self.assertTrue(archive_file.is_file())
+        stored = json.loads(archive_file.read_text(encoding="utf-8"))
+        self.assertEqual(stored, plan["span"])          # whole span kept
+        tool_msgs = [m for m in stored if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertEqual(tool_msgs[0]["content"], big)  # byte-exact
+        folded, count = ctx.apply_fold(msgs, plan, "summary text",
+                                       archive_rel=rel)
+        self.assertIsNotNone(folded)
+        self.assertEqual(count, len(plan["span"]))
+        summary = folded[1]
+        self.assertTrue(summary["summary"])
+        self.assertIn(rel, summary["content"])
+        self.assertIn("read_file", summary["content"])
+        self.assertEqual(summary["fold_archive"], rel)
+        self.assertLess(ctx.estimate_messages(folded),
+                        ctx.estimate_messages(msgs))
+
+    def test_archive_reads_back_through_read_file(self):
+        from forge import context as ctx
+        big = "R" * 5000
+        msgs = self._history_with_big_tool_result(big)
+        plan = ctx.plan_fold(msgs, 1500)
+        rel = ctx.archive_span(plan["span"], str(self.root))
+        # The project's normal file read path — the same read_file
+        # tool the model would use, jailed to the workspace.
+        back = execute_tool("read_file", {"path": rel}, str(self.root))
+        stored = json.loads(back)
+        self.assertEqual(stored, plan["span"])
+        tool_msgs = [m for m in stored if m.get("role") == "tool"]
+        self.assertEqual(tool_msgs[0]["content"], big)
+
+    def test_archive_span_raises_on_unwritable_target(self):
+        from forge import context as ctx
+        blocker = self.root / "afile"
+        blocker.write_text("not a directory", encoding="utf-8")
+        with self.assertRaises(OSError):
+            ctx.archive_span([{"role": "user", "content": "hi"}],
+                             str(blocker))
+
+    def test_archive_failure_means_no_fold_in_worker(self):
+        # The guarantee at the caller: archive write fails -> the
+        # mid-turn fold refuses, history untouched, failure logged.
+        from unittest import mock
+        from forge import context as ctx
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        client = _ContinuityClient()
+        msgs = []
+        for i in range(3):
+            msgs.append({"role": "user",
+                         "content": f"earlier request {i}"})
+            msgs.append({"role": "assistant", "content": "A" * 16000})
+        for i in range(3, 6):
+            msgs.append({"role": "user",
+                         "content": f"recent request {i}"})
+            msgs.append({"role": "assistant", "content": "done"})
+        msgs.append({"role": "user", "content": "go"})
+        worker = AgentWorker(client, "fake", msgs, {"num_ctx": 8000},
+                             str(self.root), eventlog=log)
+        before = list(worker.messages)
+        with mock.patch.object(ctx, "archive_span",
+                               side_effect=OSError("disk full")):
+            landed = worker._try_mid_turn_fold(8000, [])
+        self.assertFalse(landed)
+        self.assertEqual(worker.messages, before)
+        self.assertFalse(any(m.get("summary") for m in worker.messages))
+        self.assertIn("context_fold_mid_turn_failed", log.kinds())
+
+    def test_worker_mid_turn_fold_archives_and_points(self):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        client = _ContinuityClient()
+        msgs = []
+        for i in range(3):
+            msgs.append({"role": "user",
+                         "content": f"earlier request {i}"})
+            msgs.append({"role": "assistant", "content": "A" * 16000})
+        for i in range(3, 6):
+            msgs.append({"role": "user",
+                         "content": f"recent request {i}"})
+            msgs.append({"role": "assistant", "content": "done"})
+        msgs.append({"role": "user", "content": "go"})
+        worker = AgentWorker(client, "fake", msgs, {"num_ctx": 8000},
+                             str(self.root), eventlog=log)
+        landed = worker._try_mid_turn_fold(8000, [])
+        self.assertTrue(landed)
+        archive_file = self.root / ".forge" / "context" / "fold-1.json"
+        self.assertTrue(archive_file.is_file())
+        stored = json.loads(archive_file.read_text(encoding="utf-8"))
+        self.assertTrue(any("A" * 16000 == (m.get("content") or "")
+                            for m in stored))
+        summaries = [m for m in worker.messages if m.get("summary")]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn(".forge/context/fold-1.json",
+                      summaries[0]["content"])
+        folds = [f for k, f in log.events
+                 if k == "context_fold_mid_turn"]
+        self.assertEqual(folds[0]["archive"],
+                         ".forge/context/fold-1.json")
+
+    def test_no_project_fold_is_exactly_as_before(self):
+        from forge import context as ctx
+        msgs = _ctx_history(6)
+        plan = ctx.plan_fold(msgs, 3000)
+        folded, _n = ctx.apply_fold(msgs, plan, "plain summary")
+        self.assertIsNotNone(folded)
+        self.assertEqual(folded[1]["content"],
+                         ctx.SUMMARY_PREFIX + "plain summary")
+        self.assertNotIn("fold_archive", folded[1])
+        self.assertNotIn("archived at", folded[1]["content"])
+        self.assertFalse((self.root / ".forge" / "context").exists())
+
+    def test_second_fold_keeps_a_working_pointer_chain(self):
+        from forge import context as ctx
+        msgs = self._history_with_big_tool_result()
+        plan = ctx.plan_fold(msgs, 1500)
+        rel1 = ctx.archive_span(plan["span"], str(self.root))
+        folded, _n = ctx.apply_fold(msgs, plan, "first summary",
+                                    archive_rel=rel1)
+        grown = list(folded)
+        for i in range(6, 11):
+            grown += _ctx_exchange(i)
+        plan2 = ctx.plan_fold(grown, 1500)
+        self.assertIsNotNone(plan2)
+        self.assertTrue(any(m.get("summary") for m in plan2["span"]))
+        rel2 = ctx.archive_span(plan2["span"], str(self.root))
+        self.assertEqual(rel2, ".forge/context/fold-2.json")
+        stored2 = json.loads(
+            (self.root / ".forge" / "context" / "fold-2.json")
+            .read_text(encoding="utf-8"))
+        # The first summary — pointer line included — is archived
+        # whole into the second archive: the chain back to the
+        # original bytes stays walkable.
+        chained = [m for m in stored2 if m.get("summary")]
+        self.assertEqual(len(chained), 1)
+        self.assertIn(rel1, chained[0]["content"])
+        folded2, _n2 = ctx.apply_fold(grown, plan2, "second summary",
+                                      archive_rel=rel2)
+        summaries = [m for m in folded2 if m.get("summary")]
+        self.assertEqual(len(summaries), 1)
+        self.assertIn(rel2, summaries[0]["content"])
+
+
+class RecitationTests(unittest.TestCase):
+    """Manus study M3 — programmatic recitation: while an approved
+    plan executes, EVERY main-loop generation request ends with a
+    compact plan-state block the PROGRAM builds fresh from the live
+    checklist state (_plan_steps / _plan_done). The block rides the
+    outgoing request copy only — it is never written into the stored
+    conversation — and no other generation (homework, drafting,
+    non-plan turns) carries one. The D39 stored reminder
+    ("[Plan progress …", every three cycles) is a different text and
+    is untouched by this class."""
+
+    PLAN = "Plan:\n1. Alpha step\n2. Beta step\n3. Gamma step"
+    DOC = ("# Plan\n\n"
+           "## Goal\nBuild the parser.\n\n"
+           "## Steps\n"
+           "1. Create a.py — with the parser in it\n"
+           "   Verify: it imports cleanly.\n"
+           "2. Edit b.py — wire the parser in\n"
+           "   Verify: the suite passes.\n\n"
+           "## Success criteria\n"
+           "Done means the parser imports cleanly.\n"
+           "Done means the suite passes end to end.\n")
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _worker(self, script, hits, log=None, planning=True):
+        from forge.worker import AgentWorker
+        schema = {"type": "function",
+                  "function": {"name": "ping_tool", "description": "test",
+                               "parameters": {"type": "object",
+                                              "properties": {"word": {"type": "string"}}}}}
+
+        def handler(args):
+            hits["n"] += 1
+            return "pong"
+
+        extra = {"ping_tool": (schema, handler, False, "test")}
+        client = _ProgressClient(script)
+        worker = AgentWorker(
+            client, "fake-model",
+            [{"role": "user", "content": "build it"}], {},
+            tempfile.mkdtemp(), extra_tools=extra,
+            eventlog=log if log is not None else _FakeEventLog(),
+            permissions={"rules": [],
+                         "mode": "plan" if planning else "code",
+                         "classes": {}},
+            planning=planning)
+        seen = {"ready": [], "finished": []}
+        worker.plan_ready.connect(seen["ready"].append)
+        worker.finished_text.connect(
+            lambda text, msgs: seen["finished"].append(text))
+        return worker, client, seen
+
+    def _wait_for(self, cond, timeout=10.0):
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            self.app.processEvents()
+            if cond():
+                return True
+            _time.sleep(0.01)
+        return cond()
+
+    def _drive_approved(self, worker, seen):
+        worker.start()
+        self.assertTrue(self._wait_for(lambda: seen["ready"]),
+                        "plan_ready never fired")
+        worker.resolve_plan("approve")
+        self.assertTrue(self._wait_for(lambda: seen["finished"]),
+                        "turn never finished")
+        worker.wait(3000)
+
+    @staticmethod
+    def _tail(client, call_idx):
+        messages = client.messages_seen[call_idx]
+        return messages[-1].get("content", "") if messages else ""
+
+    @staticmethod
+    def _blocks_in(messages):
+        return [m.get("content", "") for m in messages
+                if "[Current plan —" in str(m.get("content", ""))]
+
+    def _scripted_run(self):
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        script = [
+            {"content": self.PLAN},
+            {"content": "STEP 1 DONE", "tool": "ping_tool",
+             "args": {"word": "a"}},
+            {"content": "working", "tool": "ping_tool",
+             "args": {"word": "b"}},
+            {"content": "STEP 2 DONE", "tool": "ping_tool",
+             "args": {"word": "c"}},
+            {"content": "STEP 3 DONE"},
+        ]
+        worker, client, seen = self._worker(script, hits, log=log)
+        self._drive_approved(worker, seen)
+        return worker, client, log
+
+    # -- (a) every execution request ends with the block ------------
+    def test_every_execution_request_ends_with_the_block(self):
+        worker, client, _log = self._scripted_run()
+        # Call 0 is the homework/draft generation — before approval,
+        # so no block anywhere in it.
+        self.assertEqual(self._blocks_in(client.messages_seen[0]), [])
+        # Execution calls 1-4 each END with the recitation block.
+        for call_idx in (1, 2, 3, 4):
+            tail = self._tail(client, call_idx)
+            self.assertTrue(tail.startswith("[Current plan —"),
+                            f"call {call_idx} tail is not the block")
+        first = self._tail(client, 1)
+        self.assertIn("[Current plan — build it — step 1 of 3]", first)
+        self.assertIn("→ 1. Alpha step", first)
+        self.assertIn("· 2. Beta step", first)
+        self.assertIn("· 3. Gamma step", first)
+        # A bare-list plan has no Success criteria section, so the
+        # block carries no criteria line.
+        self.assertNotIn("Success criteria:", first)
+
+    # -- (b) freshness across cycles + history stays clean ----------
+    def test_block_tracks_step_done_and_never_enters_history(self):
+        worker, client, log = self._scripted_run()
+        second = self._tail(client, 2)
+        self.assertIn("[Current plan — build it — step 2 of 3]", second)
+        self.assertIn("✓ 1. Alpha step", second)
+        self.assertIn("→ 2. Beta step", second)
+        fourth = self._tail(client, 4)
+        self.assertIn("✓ 1. Alpha step", fourth)
+        self.assertIn("✓ 2. Beta step", fourth)
+        self.assertIn("→ 3. Gamma step", fourth)
+        # Request-time only: across all four execution cycles the
+        # stored conversation gained NO recitation block at all.
+        self.assertEqual(self._blocks_in(worker.messages), [])
+        # One recitation record per execution generation, with the
+        # done-count as it stood when that request was assembled.
+        records = [f for k, f in log.events if k == "plan_recited"]
+        self.assertEqual([(r["done"], r["total"]) for r in records],
+                         [(0, 3), (1, 3), (1, 3), (2, 3)])
+
+    # -- (c) no active plan → requests are exactly as before --------
+    def test_non_plan_turn_requests_carry_no_block(self):
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        script = [{"content": f"working {i}", "tool": "ping_tool",
+                   "args": {"word": f"w{i}"}} for i in range(4)]
+        script.append({"content": "done"})
+        worker, client, seen = self._worker(script, hits, log=log,
+                                            planning=False)
+        worker.run()
+        self.assertTrue(seen["finished"])
+        for call in client.messages_seen:
+            self.assertEqual(self._blocks_in(call), [])
+        self.assertEqual(self._blocks_in(worker.messages), [])
+        records = [f for k, f in log.events if k == "plan_recited"]
+        self.assertEqual(records, [])
+
+    # -- (d) the C7 Success criteria line ---------------------------
+    def test_success_criteria_line_rides_the_block(self):
+        hits = {"n": 0}
+        script = [
+            {"content": self.DOC},
+            {"content": "STEP 1 DONE", "tool": "ping_tool",
+             "args": {"word": "a"}},
+            {"content": "STEP 2 DONE"},
+        ]
+        worker, client, seen = self._worker(script, hits)
+        self._drive_approved(worker, seen)
+        tail = self._tail(client, 1)
+        self.assertTrue(tail.startswith("[Current plan —"))
+        self.assertIn("→ 1. Create a.py — with the parser in it "
+                      "Verify: it imports cleanly.", tail)
+        self.assertIn("· 2. Edit b.py — wire the parser in "
+                      "Verify: the suite passes.", tail)
+        # The document's two criteria sentences collapse onto the
+        # block's one criteria line, in the plan's own words.
+        self.assertIn("Success criteria: Done means the parser "
+                      "imports cleanly. Done means the suite passes "
+                      "end to end.", tail)
+
+    # -- (e) rebuilt fresh, zero model actions ----------------------
+    def test_block_rebuilt_fresh_without_any_model_action(self):
+        hits = {"n": 0}
+        script = [{"content": "one"}, {"content": "two"},
+                  {"content": "three"}]
+        worker, client, _seen = self._worker(script, hits)
+        worker._plan_steps = ["Alpha step", "Beta step"]
+        worker._plan_done = set()
+        worker._plan_title = "build it"
+        worker._plan_success = ""
+        worker._generate([], recite_plan=True)
+        first = self._tail(client, 0)
+        self.assertIn("[Current plan — build it — step 1 of 2]", first)
+        self.assertIn("→ 1. Alpha step", first)
+        # Mutate the plan state directly — no generation, no model
+        # action — and the NEXT request already reflects it: the
+        # block is rebuilt at assembly time, never cached.
+        worker._plan_done.add(0)
+        worker._generate([], recite_plan=True)
+        second = self._tail(client, 1)
+        self.assertIn("[Current plan — build it — step 2 of 2]", second)
+        self.assertIn("✓ 1. Alpha step", second)
+        self.assertIn("→ 2. Beta step", second)
+        # Without the main loop's flag, the same state recites
+        # nothing — phases keep the pre-M3 request shape.
+        worker._generate([])
+        self.assertEqual(self._blocks_in(client.messages_seen[2]), [])
+        # And through all three calls the stored history was never
+        # given a block: it is still exactly the seeded conversation.
+        self.assertEqual(worker.messages,
+                         [{"role": "user", "content": "build it"}])
+
+    # -- the pure text: shape, clip, empty --------------------------
+    def test_recitation_text_shape_and_clip(self):
+        from forge.planning import plan_recitation_text
+        self.assertEqual(plan_recitation_text([], set()), "")
+        text = plan_recitation_text(["x" * 200, "Short"], set(),
+                                    title="build it")
+        lines = text.splitlines()
+        self.assertEqual(lines[0],
+                         "[Current plan — build it — step 1 of 2]")
+        # The step line is clipped to the cap (plus mark + number).
+        self.assertLessEqual(len(lines[1]), len("→ 1. ") + 120)
+        self.assertIn("…", lines[1])
+        self.assertEqual(lines[2], "· 2. Short")
+        # No criteria section → no criteria line, not even an empty
+        # one; with one, it is a single collapsed line.
+        self.assertNotIn("Success criteria:", text)
+        text = plan_recitation_text(["Alpha"], set(), success=(
+            "Done means X.\nDone means Y."))
+        self.assertIn("Success criteria: Done means X. Done means Y.",
+                      text)
+
+
+class _M4RecordingClient(_ScriptedClient):
+    """_ScriptedClient that also keeps every request's messages, so
+    a test can prove what the NEXT generation actually saw."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.requests = []
+
+    def chat_stream(self, model, messages, options, schemas,
+                    keep_alive=None):
+        self.requests.append([dict(m) for m in messages])
+        yield from super().chat_stream(model, messages, options,
+                                       schemas, keep_alive=keep_alive)
+
+
+class KeepErrorsInTests(unittest.TestCase):
+    """Manus study M4 — keep the wrong stuff in. The audit found the
+    error plumbing mostly honest already (authored ToolError
+    messages, run_command's exit code + output, the verify loop's
+    appended failures, Item 11's failure-streak notice); the one
+    place a failure was flattened into near-invisibility was an
+    UNEXPECTED exception escaping dispatch: type and raising frame
+    existed nowhere. These tests pin the fix and the pre-existing
+    honest paths alike."""
+
+    def _run(self, script, extra=None, workspace=None, client=None):
+        from forge.worker import AgentWorker
+        worker = AgentWorker(
+            client or _ScriptedClient(script), "fake",
+            [{"role": "user", "content": "go"}], {},
+            workspace or tempfile.mkdtemp(), extra_tools=extra or {})
+
+        def _approve(*a):
+            worker.resolve_approval(True)
+
+        worker.approval_needed.connect(_approve)
+        worker.run()
+        return worker
+
+    def _tool_contents(self, worker):
+        return [str(m.get("content", "")) for m in worker.messages
+                if m.get("role") == "tool"]
+
+    # -- (a) an unexpected failure reaches the next request ---------
+    def test_unexpected_failure_reaches_next_request_with_type(self):
+        def _explode(args):
+            raise RuntimeError("handler exploded")
+
+        extra = {"boom_tool": (_ping_schema(), _explode, False, "test")}
+        client = _M4RecordingClient(
+            [{"tool": "boom_tool", "args": {"word": "x"}},
+             {"content": "done"}])
+        worker = self._run(None, extra=extra, client=client)
+        results = self._tool_contents(worker)
+        self.assertEqual(len(results), 1)
+        # Identifiable as failed, message present — the pre-M4 part.
+        self.assertTrue(results[0].startswith(
+            "Tool error: handler exploded"), results[0])
+        # The M4 part: the exception TYPE and the raising frame ride
+        # the message copy — a bare message alone steers blind.
+        self.assertIn("[Failure detail: RuntimeError: handler "
+                      "exploded — raised at", results[0])
+        self.assertIn("in _explode]", results[0])
+        # And it is in the NEXT generation's request, not just the
+        # stored history: request 2 is built from that history.
+        self.assertGreaterEqual(len(client.requests), 2)
+        seen = [str(m.get("content", ""))
+                for m in client.requests[1] if m.get("role") == "tool"]
+        self.assertTrue(any("Failure detail: RuntimeError" in s
+                            for s in seen), seen)
+        # The stash was consumed: the worker carries nothing stale.
+        self.assertIsNone(worker._failure_detail)
+
+    def test_failure_detail_helper_shapes(self):
+        from forge.tools import failure_detail, ToolError
+        try:
+            raise KeyError("config")
+        except KeyError as exc:
+            detail = failure_detail(exc)
+        # The case that motivated M4: a bare KeyError used to read
+        # as just "'config'" — now the type leads.
+        self.assertTrue(detail.startswith(
+            "[Failure detail: KeyError: 'config' — raised at "), detail)
+        self.assertIn("in test_failure_detail_helper_shapes]", detail)
+        # An authored ToolError message IS the diagnostic — no line.
+        try:
+            raise ToolError("File does not exist: x")
+        except ToolError as exc:
+            self.assertEqual(failure_detail(exc), "")
+        # No traceback (never raised): type + message still land.
+        self.assertEqual(failure_detail(ValueError("plain")),
+                         "[Failure detail: ValueError: plain]")
+
+    def test_execute_log_carries_type_and_trace_return_unchanged(self):
+        from forge.worker import AgentWorker
+        worker = AgentWorker(_ScriptedClient([]), "fake",
+                             [{"role": "user", "content": "go"}], {},
+                             tempfile.mkdtemp(),
+                             eventlog=_FakeEventLog(),
+                             skribe_writes=False)
+        worker._dispatch = lambda name, args: (_ for _ in ()).throw(
+            RuntimeError("kaboom"))
+        result = worker._execute("read_file", {"path": "a"})
+        # _execute's return keeps its exact pinned shape.
+        self.assertEqual(result, "Tool error: kaboom")
+        errors = [f for k, f in worker.eventlog.events
+                  if k == "tool_execute_error"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["error"], "kaboom")
+        self.assertEqual(errors[0]["error_type"], "RuntimeError")
+        self.assertIn("RuntimeError: kaboom", errors[0]["trace"])
+
+    # -- the authored path stays exact (already correct, pinned) ----
+    def test_tool_error_authored_message_carries_no_detail_line(self):
+        worker = self._run(
+            [{"tool": "read_file", "args": {"path": "missing.txt"}},
+             {"content": "done"}])
+        results = self._tool_contents(worker)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].startswith(
+            "Tool error: File does not exist:"), results[0])
+        self.assertNotIn("Failure detail", results[0])
+
+    # -- (b) repeat visibility --------------------------------------
+    def test_repeat_failure_marked_and_different_call_unmarked(self):
+        def _explode(args):
+            raise RuntimeError("kaboom")
+
+        def _explode_other(args):
+            raise ValueError("other broke")
+
+        extra = {"boom_tool": (_ping_schema(), _explode, False, "test"),
+                 "other_tool": (_ping_schema(), _explode_other, False,
+                                "test")}
+        call_a = {"tool": "boom_tool", "args": {"word": "x"}}
+        call_b = {"tool": "other_tool", "args": {"word": "x"}}
+        worker = self._run([call_a, call_b, call_a, {"content": "done"}],
+                           extra=extra)
+        results = self._tool_contents(worker)
+        self.assertEqual(len(results), 3)
+        # First failure of A: visible + detailed, NOT marked repeat.
+        self.assertIn("Tool error: kaboom", results[0])
+        self.assertIn("Failure detail: RuntimeError", results[0])
+        self.assertNotIn("Tool notice", results[0])
+        # First failure of a DIFFERENT call: its own detail, and no
+        # repeat marking borrowed from A's failure.
+        self.assertIn("Tool error: other broke", results[1])
+        self.assertIn("Failure detail: ValueError", results[1])
+        self.assertNotIn("Tool notice", results[1])
+        # Second failure of A in the same turn: Item 11's streak
+        # notice marks it as a repeat, detail still attached.
+        self.assertIn("has failed twice", results[2])
+        self.assertIn("Failure detail: RuntimeError", results[2])
+
+    # -- (c) the repeat counter resets next turn --------------------
+    def test_repeat_counter_resets_next_turn(self):
+        def _explode(args):
+            raise RuntimeError("kaboom")
+
+        extra = {"boom_tool": (_ping_schema(), _explode, False, "test")}
+        call = {"tool": "boom_tool", "args": {"word": "x"}}
+        first = self._run([call, call, {"content": "done"}], extra=extra)
+        turn1 = self._tool_contents(first)
+        self.assertNotIn("Tool notice", turn1[0])
+        self.assertIn("has failed twice", turn1[1])
+        # A fresh turn: the same call's first failure is a FIRST
+        # failure again — unmarked, though still detailed.
+        second = self._run([call, {"content": "done"}], extra=extra)
+        turn2 = self._tool_contents(second)
+        self.assertEqual(len(turn2), 1)
+        self.assertNotIn("Tool notice", turn2[0])
+        self.assertIn("Failure detail: RuntimeError", turn2[0])
+
+    # -- (d) the tester seat's inner failures ------------------------
+    def _tester_rig(self, stream, execute):
+        import importlib.util
+        path = (Path(__file__).resolve().parent.parent
+                / "plugins" / "tester" / "plugin.py")
+        spec = importlib.util.spec_from_file_location(
+            "tester_plugin_m4", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class _FakeClient:
+            def __init__(self, base_url, timeout=None):
+                self.timeout = timeout
+
+            def tags(self):
+                return [{"name": "eriktonon/bonsai-2-uncensored:2b"}]
+
+            def chat_stream(self, model, messages, options, tools,
+                            keep_alive=None):
+                yield from stream(model, messages, options, tools)
+
+        module.OllamaClient = _FakeClient
+        module.execute_tool = execute
+        return module
+
+    def test_tester_inner_failure_carries_detail(self):
+        seen = []
+
+        def stream(model, messages, options, tools):
+            seen.append([dict(m) for m in messages])
+            if len(seen) == 1:
+                yield {"message": {"content": "", "tool_calls": [
+                    {"function": {"name": "read_file",
+                                  "arguments": {"path": "a.py"}}}]}}
+            else:
+                yield {"message": {
+                    "content": "VERDICT: FAIL\nthe read blew up",
+                    "tool_calls": []}}
+
+        def fake_execute(name, args, workspace, cancel_event=None):
+            raise RuntimeError("inner blew up")
+
+        module = self._tester_rig(stream, fake_execute)
+        ctx = PluginContext(
+            workspace=tempfile.mkdtemp(),
+            tester_model="eriktonon/bonsai-2-uncensored:2b")
+        module.run_tester({"task": "check it"}, ctx)
+        # The tester's SECOND request carries the failure — flattened
+        # message plus the M4 detail line.
+        tool_msgs = [str(m.get("content", "")) for m in seen[1]
+                     if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 1)
+        self.assertIn("Tool error: inner blew up", tool_msgs[0])
+        self.assertIn("[Failure detail: RuntimeError: inner blew "
+                      "up — raised at", tool_msgs[0])
+
+    def test_tester_failure_evidence_reaches_driver(self):
+        # Audit point 5, pinned: a failing inner run's output reaches
+        # the tester's context verbatim, and the tester's FAIL report
+        # is what run_tester returns — the driver's own tool result.
+        seen = []
+
+        def stream(model, messages, options, tools):
+            seen.append([dict(m) for m in messages])
+            if len(seen) == 1:
+                yield {"message": {"content": "", "tool_calls": [
+                    {"function": {"name": "run_command",
+                                  "arguments": {"command": "run tests"}}}]}}
+            else:
+                yield {"message": {
+                    "content": "VERDICT: FAIL\n1 test failed",
+                    "tool_calls": []}}
+
+        def fake_execute(name, args, workspace, cancel_event=None):
+            return "Exit code: 1\nFAILED test_x — assert 1 == 2"
+
+        module = self._tester_rig(stream, fake_execute)
+        ctx = PluginContext(
+            workspace=tempfile.mkdtemp(),
+            tester_model="eriktonon/bonsai-2-uncensored:2b")
+        report = module.run_tester({"task": "check it"}, ctx)
+        tool_msgs = [str(m.get("content", "")) for m in seen[1]
+                     if m.get("role") == "tool"]
+        self.assertIn("Exit code: 1", tool_msgs[0])
+        self.assertIn("FAILED test_x", tool_msgs[0])
+        self.assertTrue(report.startswith("TESTER REPORT"), report)
+        self.assertIn("VERDICT: FAIL", report)
+
+    # -- audit point 4: folds keep failures identifiable -------------
+    def test_render_span_keeps_failure_identifiable(self):
+        from forge.context import render_span
+        long_error = "Tool error: " + ("x" * 5000)
+        span = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"function": {
+                     "name": "read_file",
+                     "arguments": {"path": "a.py"}}}]},
+                {"role": "tool", "tool_name": "read_file",
+                 "content": long_error},
+                {"role": "tool", "tool_name": "run_command",
+                 "content": "Exit code: 1\nFAILED test_x"}]
+        text = render_span(span)
+        # The failure LEADS its rendered line, so the 800-char clip
+        # (which states itself) can never neutralise it; the full
+        # bytes live in M2's archive regardless.
+        tool_lines = [ln for ln in text.splitlines()
+                      if ln.startswith("Tool result:")]
+        self.assertTrue(tool_lines[0].startswith(
+            "Tool result: Tool error:"), tool_lines[0])
+        # The clip states itself, on the line right after.
+        self.assertIn("chars clipped for the summary request", text)
+        self.assertIn("Tool result: Exit code: 1", tool_lines[1])
+
+    # -- (e) success paths are byte-identical -------------------------
+    def test_success_result_byte_identical(self):
+        extra = {"ping_tool": (_ping_schema(),
+                               lambda args: "pong", False, "test")}
+        worker = self._run(
+            [{"tool": "ping_tool", "args": {"word": "a"}},
+             {"content": "done"}], extra=extra)
+        results = self._tool_contents(worker)
+        self.assertEqual(results, ["pong"])
+        # Direct seam too: a successful _execute returns the
+        # handler's string untouched (str-coercion of non-strings is
+        # Chunk C's pin, not M4's concern).
+        self.assertEqual(worker._execute("ping_tool", {"word": "a"}),
+                         "pong")
+
+
+class StableToolSurfaceTests(unittest.TestCase):
+    """Manus study M5 — mask, don't remove. The offered tool
+    surface is fixed by the session's configuration: Forge-internal
+    state (phase, budget) never rebuilds or shrinks it. The phase
+    gates that used to subset the offer — the homework pass's
+    read-only cut and Research's pre-approval browse withholding —
+    moved to execution refusals in the transcript; an owner's
+    configuration change (between turns, or the Plan gate's
+    approval promotion mid-turn) is logged as a surface change.
+    Two terminal closes are pinned AS-IS by the last test: the
+    B18 budget wrap-up and the sweep R11 SKRIBE grading
+    round-close still empty the offer, because there the empty
+    offer is the mechanism that ends the turn."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _pump_until(self, pred, timeout=10.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.app.processEvents()
+            if pred():
+                return True
+            time.sleep(0.02)
+        return pred()
+
+    class _RecordingClient(_ScriptedClient):
+        """_ScriptedClient + the schemas of every generation."""
+
+        def __init__(self, script):
+            super().__init__(script)
+            self.schemas_seen = []
+
+        def chat_stream(self, model, messages, options, schemas,
+                        keep_alive=None):
+            self.schemas_seen.append(list(schemas or []))
+            yield from super().chat_stream(
+                model, messages, options, schemas,
+                keep_alive=keep_alive)
+
+    @staticmethod
+    def _canon(schemas) -> str:
+        import json
+        return json.dumps(schemas, sort_keys=True, default=str)
+
+    def _ping_extra(self, hits):
+        def handler(args):
+            hits["n"] += 1
+            return "pong"
+        return {"ping_tool": (_ping_schema(), handler, False, "test")}
+
+    # -- (a) byte-identical surface across a session's phases --
+
+    def test_surface_byte_identical_across_code_turn_cycles(self):
+        from forge.worker import AgentWorker
+        hits = {"n": 0}
+        client = self._RecordingClient([
+            {"tool": "ping_tool", "args": {"word": "a"}},
+            {"tool": "ping_tool", "args": {"word": "b"}},
+            {"content": "all done"},
+        ])
+        worker = AgentWorker(client, "fake",
+                             [{"role": "user", "content": "go"}], {},
+                             tempfile.mkdtemp(),
+                             extra_tools=self._ping_extra(hits))
+        worker.approval_needed.connect(
+            lambda *a: worker.resolve_approval(True))
+        finished = []
+        worker.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        worker.run()
+        self.assertEqual(hits["n"], 2)
+        self.assertTrue(finished)
+        offers = {self._canon(s) for s in client.schemas_seen}
+        self.assertEqual(len(client.schemas_seen), 3)
+        self.assertEqual(offers, {self._canon(worker._schemas())})
+
+    def test_surface_byte_identical_across_plan_homework_and_execution(self):
+        from forge.worker import AgentWorker
+        script = [
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY — the project has src/demo.py."},
+            {"content": "PROCEED"},
+            {"content": "A tapping game for the owner's cat."},
+            {"content": "The project has src/demo.py and nothing else."},
+            {"content": "game.py — new file; README.md — update."},
+            {"content": "1. Write game.py — the tap targets and scoring\n"
+                        "   Verify: it runs and scores a tap.\n"
+                        "2. Update README.md — how to play\n"
+                        "   Verify: it names the controls."},
+            {"content": "The cat may ignore it entirely."},
+            {"content": "Assumed: it runs on the touchscreen PC."},
+            {"content": "Done means a tap scores on screen and the "
+                        "README names the controls."},
+            {"content": "Not doing: online leaderboards or accounts."},
+            {"tool": "ping_tool", "args": {"word": "go"}},
+            {"content": "STEP DONE: 1\nSTEP DONE: 2\nfinished"},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "src").mkdir()
+            (root / "src" / "demo.py").write_text(
+                "def existing_fn():\n    return 1\n", encoding="utf-8")
+            hits = {"n": 0}
+            client = _PlanClient(script)
+            log = _FakeEventLog()
+            worker = AgentWorker(
+                client, "fake-model",
+                [{"role": "user", "content": "make a cat game"}],
+                {"num_predict": 512}, str(root),
+                extra_tools=self._ping_extra(hits),
+                permissions={"rules": [], "mode": "plan", "classes": {}},
+                planning=True, skribe_writes=False, eventlog=log)
+            worker.approval_needed.connect(
+                lambda *a: worker.resolve_approval(True))
+            seen = {"ready": [], "finished": []}
+            at_gate = {}
+            worker.plan_ready.connect(
+                lambda steps: (seen["ready"].append(steps),
+                               at_gate.setdefault(
+                                   "n", len(client.schemas_seen))))
+            worker.finished_text.connect(
+                lambda text, msgs: seen["finished"].append(text))
+            worker.start()
+            self.assertTrue(self._pump_until(lambda: seen["ready"]),
+                            "plan gate never opened")
+            drafting = self._canon(worker._schemas())
+            # The homework generation (the first offer of the turn)
+            # carried the SAME bytes as the drafting surface — the
+            # pass no longer shrinks the offer to read-class.
+            self.assertEqual(self._canon(client.schemas_seen[0]),
+                             drafting)
+            worker.resolve_plan("approve")
+            self.assertTrue(self._pump_until(lambda: seen["finished"]),
+                            "plan turn never finished")
+            self.assertTrue(worker.wait(3000))
+            self.assertEqual(hits["n"], 1)
+            execution = client.schemas_seen[at_gate["n"]:]
+            self.assertTrue(execution)
+            # Execution runs under the gate-promoted Code surface
+            # (the owner's approval lifts the Plan restrictions —
+            # the documented design at the promotion site): stable
+            # across every execution cycle, different from the
+            # drafting surface, and logged as a surface change
+            # caused by that approval.
+            promoted = self._canon(worker._schemas())
+            self.assertNotEqual(promoted, drafting)
+            self.assertEqual({self._canon(s) for s in execution},
+                             {promoted})
+            changes = [f for k, f in log.events
+                       if k == "tool_surface_changed"]
+            self.assertEqual(len(changes), 1)
+            self.assertEqual(changes[0]["mode"], "code")
+            self.assertEqual(changes[0]["previous"],
+                             worker._surface_fingerprint(
+                                 client.schemas_seen[0]))
+
+    # -- (b) an out-of-phase call meets a structured refusal --
+
+    def _homework_worker(self, td, log):
+        from forge.worker import AgentWorker
+        worker = AgentWorker(
+            _ScriptedClient([]), "fake",
+            [{"role": "user", "content": "go"}], {}, td,
+            permissions={"rules": [], "mode": "design", "classes": {}},
+            eventlog=log)
+        worker.approval_needed.connect(
+            lambda *a: worker.resolve_approval(True))
+        return worker
+
+    def test_homework_write_call_refused_and_tool_stays_offered(self):
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "notes.txt").write_text(
+                "fact one\n", encoding="utf-8")
+            log = _FakeEventLog()
+            worker = self._homework_worker(td, log)
+            # design mode would ALLOW this write (a .md path) after
+            # approval — the homework gate is the only thing that
+            # can refuse it, which is what makes this M5's case.
+            call = {"function": {"name": "write_file",
+                                 "arguments": {"path": "spec.md",
+                                               "content": "draft"}}}
+            worker._homework_active = True
+            worker._execute_call_batch([dict(call)], {}, {})
+            results = [m["content"] for m in worker.messages
+                       if m.get("role") == "tool"]
+            self.assertIn("homework pass", results[-1])
+            self.assertIn("write_file", results[-1])
+            self.assertFalse((Path(td) / "spec.md").exists())
+            self.assertIn("homework_block", log.kinds())
+            # The tool never left the definitions.
+            names = [s["function"]["name"] for s in worker._schemas()]
+            self.assertIn("write_file", names)
+            # A read in the same pass proceeds exactly as before.
+            read = {"function": {"name": "read_file",
+                                 "arguments": {"path": "notes.txt"}}}
+            worker._execute_call_batch([read], {}, {})
+            results = [m["content"] for m in worker.messages
+                       if m.get("role") == "tool"]
+            self.assertIn("fact one", results[-1])
+            # The phase pass (_homework_phase) gates identically.
+            worker._homework_active = False
+            worker._homework_phase_active = True
+            worker._execute_call_batch([dict(call)], {}, {})
+            results = [m["content"] for m in worker.messages
+                       if m.get("role") == "tool"]
+            self.assertIn("homework pass", results[-1])
+            self.assertFalse((Path(td) / "spec.md").exists())
+            # And once no pass is active the same call executes.
+            worker._homework_phase_active = False
+            worker._execute_call_batch([dict(call)], {}, {})
+            self.assertTrue((Path(td) / "spec.md").exists())
+
+    def test_research_browse_offered_before_approval_but_refused(self):
+        from forge.worker import AgentWorker
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            return "page text"
+        extra = {"browse_open": (_browse_schema("browse_open", ("url",)),
+                                 handler, True, "test"),
+                 "browse_read": (_browse_schema("browse_read"),
+                                 handler, False, "test")}
+        classes = {"browse_open": "write", "browse_read": "read"}
+        with tempfile.TemporaryDirectory() as td:
+            worker = AgentWorker(
+                _ScriptedClient([]), "fake",
+                [{"role": "user", "content": "research this"}], {}, td,
+                extra_tools=extra,
+                permissions={"rules": [], "mode": "research",
+                             "classes": classes},
+                researching=True, skribe_writes=False)
+            worker.approval_needed.connect(
+                lambda *a: worker.resolve_approval(True))
+            names = [s["function"]["name"] for s in worker._schemas()]
+            self.assertIn("browse_open", names)
+            self.assertIn("browse_read", names)
+            call = {"function": {"name": "browse_open",
+                                 "arguments": {"url": "https://example.com/"}}}
+            worker._execute_call_batch([call], {}, {})
+            results = [m["content"] for m in worker.messages
+                       if m.get("role") == "tool"]
+            self.assertIn("gated", results[-1])
+            self.assertEqual(hits["n"], 0)
+
+    # -- (c) an owner configuration change is logged as one --
+
+    def test_owner_mode_change_logs_surface_change(self):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        shared: dict = {}
+        with tempfile.TemporaryDirectory() as td:
+            def run_turn(**kw):
+                worker = AgentWorker(
+                    _ScriptedClient([{"content": "hi"}]), "fake",
+                    [{"role": "user", "content": "go"}], {}, td,
+                    eventlog=log, surface_state=shared, **kw)
+                worker.run()
+                return worker
+            first = run_turn()
+            self.assertIn("tool_surface", log.kinds())
+            self.assertNotIn("tool_surface_changed", log.kinds())
+            baseline_fp = shared["fingerprint"]
+            self.assertEqual(baseline_fp, first._surface_fingerprint())
+            # The owner switches mode: a NEW surface, logged as a
+            # change from the baseline fingerprint.
+            run_turn(permissions={"rules": [], "mode": "ask",
+                                  "classes": {}})
+            changes = [f for k, f in log.events
+                       if k == "tool_surface_changed"]
+            self.assertEqual(len(changes), 1)
+            self.assertEqual(changes[0]["previous"], baseline_fp)
+            self.assertEqual(changes[0]["mode"], "ask")
+            self.assertNotEqual(changes[0]["fingerprint"], baseline_fp)
+            # A further turn under the SAME configuration changes
+            # nothing and logs nothing new.
+            run_turn(permissions={"rules": [], "mode": "ask",
+                                  "classes": {}})
+            changes = [f for k, f in log.events
+                       if k == "tool_surface_changed"]
+            self.assertEqual(len(changes), 1)
+
+    # -- (d) allowed calls are byte-identical to the pre-M5 shape --
+
+    def test_allowed_calls_execute_byte_identically(self):
+        hits = {"n": 0}
+        from forge.worker import AgentWorker
+        worker = AgentWorker(
+            _ScriptedClient([]), "fake",
+            [{"role": "user", "content": "go"}], {},
+            tempfile.mkdtemp(), extra_tools=self._ping_extra(hits))
+        worker.approval_needed.connect(
+            lambda *a: worker.resolve_approval(True))
+        self.assertEqual(worker._execute("ping_tool", {"word": "a"}),
+                         "pong")
+        worker._execute_call_batch(
+            [{"function": {"name": "ping_tool",
+                           "arguments": {"word": "b"}}}], {}, {})
+        results = [m["content"] for m in worker.messages
+                   if m.get("role") == "tool"]
+        self.assertEqual(results, ["pong"])
+        self.assertEqual(hits["n"], 2)
+
+    # -- (e) the flagged terminal closes, pinned as-is --
+
+    def test_budget_wrapup_still_closes_the_offer(self):
+        # FLAGGED for the owner's decision, not converted (see the
+        # class docstring): at the B18 stop fraction the wrap-up
+        # still offers NO tools, nothing further executes, and the
+        # turn settles in text — the behaviour ContextBudgetTests
+        # pins, locked here under M5 as well so the decision is
+        # the owner's with the behaviour unchanged either way.
+        from forge.worker import AgentWorker
+        hits = {"n": 0}
+
+        def big(args):
+            hits["n"] += 1
+            return "R" * 20000
+        schema = {"type": "function",
+                  "function": {"name": "big_tool", "description": "test",
+                               "parameters": {"type": "object",
+                                              "properties": {
+                                                  "n": {"type": "integer"}}}}}
+        extra = {"big_tool": (schema, big, False, "test")}
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            client = _BudgetClient()
+            worker = AgentWorker(client, "fake",
+                                 [{"role": "user", "content": "go"}],
+                                 {"num_ctx": 2000}, td,
+                                 extra_tools=extra, eventlog=log)
+            finished = []
+            worker.finished_text.connect(
+                lambda text, msgs: finished.append(text))
+            worker.run()
+            self.assertTrue(client.schemas_seen[0])
+            self.assertEqual(client.schemas_seen[1], [])
+            self.assertEqual(hits["n"], 1)
+            self.assertIn("context_budget_stop", log.kinds())
+            self.assertTrue(finished)
+
+
+class AntiRutTests(unittest.TestCase):
+    """Manus study M6 — anti-rut. The pre-M6 guards covered a repeat
+    whose RESULT stays byte-identical (Note 17 refusal) and a repeat
+    that keeps FAILING (Item 11 streak), but a call that SUCCEEDS
+    with a fresh result every time reset the identical-result count
+    on every new digest and could repeat all turn, steered by
+    nothing until the 40-cycle soft prompt. The rut guard counts
+    identical successes per turn regardless of digest: notice from
+    the 3rd success, refusal once 5 successes are on record. Half B:
+    the Goldfish stages carry one deterministic per-stage framing
+    line.
+    """
+
+    def _run(self, script, handler=None, workspace=None, log=None):
+        from forge.worker import AgentWorker
+        extra = {}
+        if handler is not None:
+            extra = {"flaky_tool": (_ping_schema(), handler, False, "test")}
+        worker = AgentWorker(_ScriptedClient(script), "fake",
+                             [{"role": "user", "content": "go"}], {},
+                             workspace or tempfile.mkdtemp(),
+                             extra_tools=extra, eventlog=log)
+
+        def _approve(*a):
+            worker.resolve_approval(True)
+
+        worker.approval_needed.connect(_approve)
+        worker.run()
+        return [m.get("content", "") for m in worker.messages
+                if m.get("role") == "tool"]
+
+    # -- (a) the seeded loop: changing results, caught and broken --
+
+    def test_changing_result_loop_is_noticed_then_broken(self):
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            return f"reading {hits['n']}"  # a fresh result every time
+
+        log = _FakeEventLog()
+        call = {"tool": "flaky_tool", "args": {"word": "x"}}
+        results = self._run([call] * 8 + [{"content": "done"}],
+                            handler, log=log)
+        # Executions 1–5 ran (the 3rd, 4th and 5th carrying the
+        # notice — the identical-result guard's own convention:
+        # the break refuses once RUT_BREAK_AT successes are on
+        # record); attempts 6–8 were refused without executing.
+        self.assertEqual(hits["n"], 5)
+        self.assertEqual(len(results), 8)
+        self.assertNotIn("Tool notice", results[0])
+        self.assertNotIn("Tool notice", results[1])
+        self.assertIn("succeeded 3 times", results[2])
+        self.assertIn("succeeded 4 times", results[3])
+        self.assertIn("succeeded 5 times", results[4])
+        for r in results[5:]:
+            self.assertIn("will not run it again this turn", r)
+        self.assertIn("tool_rut_notice", log.kinds())
+        self.assertIn("tool_rut_broken", log.kinds())
+        # Broken by the guard — never reached the soft cycle prompt.
+        self.assertNotIn("cycle_prompt", log.kinds())
+
+    def test_alternating_rut_with_changing_results_is_noticed(self):
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            return f"{args['word']} reading {hits['n']}"
+
+        a = {"tool": "flaky_tool", "args": {"word": "a"}}
+        b = {"tool": "flaky_tool", "args": {"word": "b"}}
+        results = self._run([a, b] * 3 + [{"content": "done"}], handler)
+        self.assertEqual(hits["n"], 6)  # nothing refused this early
+        # Each key's third success (results 4 and 5) carries the
+        # notice; the first two rounds are plain.
+        for r in results[:4]:
+            self.assertNotIn("Tool notice", r)
+        self.assertIn("succeeded 3 times", results[4])
+        self.assertIn("succeeded 3 times", results[5])
+
+    # -- (b) varying the call continues normally; counts are per-turn --
+
+    def test_varied_call_after_notice_runs_plain(self):
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            return f"{args['word']} reading {hits['n']}"
+
+        call = {"tool": "flaky_tool", "args": {"word": "x"}}
+        other = {"tool": "flaky_tool", "args": {"word": "y"}}
+        results = self._run([call] * 3 + [other, {"content": "done"}],
+                            handler)
+        self.assertIn("succeeded 3 times", results[2])
+        # The varied call executed, with no notice of its own and
+        # no lingering penalty from the first call's count.
+        self.assertEqual(hits["n"], 4)
+        self.assertEqual(results[3], "y reading 4")
+
+    def test_rut_count_resets_next_turn(self):
+        def handler(args):
+            handler.n += 1
+            return f"reading {handler.n}"
+        handler.n = 0
+        call = {"tool": "flaky_tool", "args": {"word": "x"}}
+        script = [call] * 3 + [{"content": "done"}]
+        first = self._run(list(script), handler)
+        self.assertIn("succeeded 3 times", first[2])
+        second = self._run(list(script), handler)
+        self.assertNotIn("Tool notice", second[0])
+        self.assertNotIn("Tool notice", second[1])
+        self.assertIn("succeeded 3 times", second[2])
+
+    # -- (c) varied honest work never triggers --
+
+    def test_distinct_and_below_threshold_work_is_untouched(self):
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            return f"{args['word']} reading {hits['n']}"
+
+        script = [{"tool": "flaky_tool", "args": {"word": w}}
+                  for w in ("a", "b", "c", "d", "e", "f")]
+        # A fresh call twice stays below the notice threshold.
+        script += [{"tool": "flaky_tool", "args": {"word": "z"}}] * 2
+        results = self._run(script + [{"content": "done"}], handler)
+        self.assertEqual(hits["n"], 8)
+        for r in results:
+            self.assertNotIn("Tool notice", r)
+
+    # -- (d) failures belong to the fail-streak alone --
+
+    def test_failing_call_gets_no_rut_marks(self):
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            raise RuntimeError("kaboom")
+
+        call = {"tool": "flaky_tool", "args": {"word": "x"}}
+        results = self._run([call] * 4 + [{"content": "done"}], handler)
+        self.assertEqual(hits["n"], 4)  # failures always execute
+        self.assertIn("has failed twice", results[1])
+        for r in results:
+            self.assertNotIn("succeeded", r)
+            self.assertNotIn("will not run it again", r)
+
+    def test_failure_then_success_is_a_plain_success(self):
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            if hits["n"] <= 2:
+                raise RuntimeError("kaboom")
+            return "recovered"
+
+        call = {"tool": "flaky_tool", "args": {"word": "x"}}
+        results = self._run([call] * 3 + [{"content": "done"}], handler)
+        self.assertEqual(results[2], "recovered")
+
+    # -- (e) Goldfish stage diversity: one rotated framing line --
+
+    def test_goldfish_framing_rotates_by_stage_and_is_deterministic(self):
+        from forge import goldfish
+        plan = "1. Write app.py — create the app.\n2. Test it."
+        users = {}
+        for stage in goldfish.STAGES:
+            first = goldfish.build_stage_messages(stage, plan)
+            second = goldfish.build_stage_messages(stage, plan)
+            self.assertEqual(first, second)  # deterministic
+            users[stage] = first[-1]["content"]
+            # The stage's own framing rides exactly once, and the
+            # other stage's framing is absent.
+            self.assertEqual(
+                users[stage].count(goldfish.stage_framing(stage)), 1)
+            for other in goldfish.STAGES:
+                if other != stage:
+                    self.assertNotIn(goldfish.stage_framing(other),
+                                     users[stage])
+        # The two stages' framings actually differ…
+        framings = [goldfish.stage_framing(s) for s in goldfish.STAGES]
+        self.assertEqual(len(set(framings)), len(framings))
+        # …and with the framing lines removed, the stages' user
+        # content is byte-identical: task content untouched.
+        stripped = []
+        for stage in goldfish.STAGES:
+            lines = [ln for ln in users[stage].splitlines()
+                     if ln != goldfish.stage_framing(stage)]
+            stripped.append("\n".join(lines))
+        self.assertEqual(stripped[0], stripped[1])
+        self.assertIn("THE PLAN UNDER REVIEW:", stripped[0])
+        self.assertIn(plan, stripped[0])
+
+
+class HandoffKeeperTests(unittest.TestCase):
+    """Manus study M7: seat returns close in a fixed five-field
+    schema (ASKED/DONE/FILES/EVIDENCE/OPEN), a missing-field return
+    gets exactly one repair round, an unparseable return reaches
+    its caller flagged with the raw text intact, and the keeper
+    pass at task end files at most a few curated bullets in
+    .forge/learnings.md — never a raw dump."""
+
+    FULL = ("WRONG: nothing. MISSING: a test. CHANGE: add one.\n"
+            "ASKED: build the thing\n"
+            "DONE: wrote the feature and its test\n"
+            "FILES: a.py\n"
+            "b.py\n"
+            "EVIDENCE: run_command pytest passed, 3 tests\n"
+            "OPEN: re-check the timeout path")
+
+    # -- the parser --
+
+    def test_parse_full_schema(self):
+        from forge import handoff
+        parsed, missing, attempted = handoff.parse_handoff(self.FULL)
+        self.assertEqual(missing, [])
+        self.assertTrue(attempted)
+        self.assertEqual(parsed["asked"], "build the thing")
+        self.assertEqual(parsed["done"], "wrote the feature and its test")
+        self.assertEqual(parsed["files"], ["a.py", "b.py"])
+        self.assertIn("pytest passed", parsed["evidence"])
+        self.assertEqual(parsed["open"], ["re-check the timeout path"])
+
+    def test_parse_missing_fields_reported(self):
+        from forge import handoff
+        text = ("ASKED: build it\nDONE: built it\n"
+                "FILES: a.py\nEVIDENCE: it ran\n")
+        parsed, missing, attempted = handoff.parse_handoff(text)
+        self.assertEqual(missing, ["open"])
+        self.assertTrue(attempted)
+
+    def test_parse_legacy_shape_never_attempted(self):
+        from forge import handoff
+        parsed, missing, attempted = handoff.parse_handoff(
+            "WRONG: nothing. MISSING: a test. CHANGE: add one.")
+        self.assertEqual(missing, list(handoff.FIELDS))
+        self.assertFalse(attempted)
+
+    def test_repair_instruction_names_missing_only(self):
+        from forge import handoff
+        text = handoff.repair_instruction(["evidence", "open"])
+        self.assertIn("EVIDENCE", text)
+        self.assertIn("OPEN", text)
+        self.assertNotIn("ASKED", text)
+        self.assertNotIn("DONE", text)
+
+    # -- the council seat, end to end --
+
+    def _worker(self, client, workspace=None, **kw):
+        from forge.worker import AgentWorker
+        kw.setdefault("governing_roster", "fake-driver, rev-model")
+        worker = AgentWorker(client, "fake-driver",
+                             [{"role": "user", "content": "build the thing"}],
+                             {}, workspace or tempfile.mkdtemp(), **kw)
+        worker.approval_needed.connect(lambda *a: worker.resolve_approval(True))
+        finished = []
+        worker.finished_text.connect(lambda text, msgs: finished.append(text))
+        return worker, finished
+
+    def _reply_client(self, driver_script, reviewer_replies):
+        """Driver script + a queue of reviewer replies; records calls."""
+        class _Client:
+            def __init__(self):
+                self.script = list(driver_script)
+                self.replies = list(reviewer_replies)
+                self.calls = []
+
+            def tags(self):
+                return [{"name": "fake-driver"}, {"name": "rev-model"}]
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None):
+                self.calls.append((model, schemas, [dict(m) for m in messages]))
+                if model == "rev-model":
+                    text = self.replies.pop(0) if self.replies else ""
+                    yield {"message": {"content": text, "tool_calls": []}}
+                    return
+                item = self.script.pop(0) if self.script else {"content": "end"}
+                yield {"message": {"content": item["content"],
+                                   "tool_calls": []}}
+
+        return _Client()
+
+    def test_council_repair_round_parses(self):
+        partial = ("WRONG: nothing.\nASKED: build the thing\n"
+                   "DONE: wrote it\nFILES: a.py\n"
+                   "EVIDENCE: it ran fine\n")
+        client = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            [partial, "OPEN: re-check the timeout path"])
+        w, finished = self._worker(client, council=True,
+                                   reviewer_model="rev-model")
+        w.run()
+        # One repair generation on the reviewer, then the revision.
+        self.assertEqual([c[0] for c in client.calls],
+                         ["fake-driver", "rev-model", "rev-model",
+                          "fake-driver"])
+        handoff = w._council_handoff
+        self.assertEqual(handoff["missing"], [])
+        self.assertFalse(handoff["unparsed"])
+        self.assertEqual(handoff["parsed"]["open"],
+                         ["re-check the timeout path"])
+        # The full critique (both parts) still rides the history.
+        rev = [m for m in w.messages if m.get("reviewer")]
+        self.assertEqual(len(rev), 1)
+        self.assertIn("EVIDENCE: it ran fine", rev[0]["content"])
+        self.assertIn("OPEN: re-check the timeout path", rev[0]["content"])
+        self.assertIn("revised draft", finished[0])
+
+    def test_council_unparseable_flagged_raw_intact(self):
+        partial = ("ASKED: build the thing\nDONE: wrote it\n")
+        client = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            [partial, "just some prose, no sections at all"])
+        w, finished = self._worker(client, council=True,
+                                   reviewer_model="rev-model")
+        w.run()  # must not raise; the turn stands on the critique
+        handoff = w._council_handoff
+        self.assertTrue(handoff["unparsed"])
+        self.assertIn("files", handoff["missing"])
+        self.assertIn("ASKED: build the thing", handoff["raw"])
+        rev = [m for m in w.messages if m.get("reviewer")]
+        self.assertEqual(len(rev), 1)
+        self.assertIn("ASKED: build the thing", rev[0]["content"])
+        self.assertIn("revised draft", finished[0])
+
+    def test_council_legacy_prose_untouched(self):
+        # A review that never attempted the schema: no repair
+        # generation, byte-identical behaviour to pre-M7.
+        client = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            ["WRONG: nothing. MISSING: a test. CHANGE: add one."])
+        w, finished = self._worker(client, council=True,
+                                   reviewer_model="rev-model")
+        w.run()
+        self.assertEqual([c[0] for c in client.calls],
+                         ["fake-driver", "rev-model", "fake-driver"])
+        self.assertTrue(w._council_handoff["unparsed"])
+        rev = [m for m in w.messages if m.get("reviewer")]
+        self.assertEqual(
+            rev[0]["content"],
+            "WRONG: nothing. MISSING: a test. CHANGE: add one.")
+        self.assertIn("revised draft", finished[0])
+
+    # -- the tester seat --
+
+    def _tester(self, replies):
+        """Load the tester plugin with a scripted reply queue."""
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "plugins" / "tester" / "plugin.py"
+        spec = importlib.util.spec_from_file_location("tester_plugin_m7", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        calls = []
+
+        class _FakeClient:
+            def __init__(self, base_url, timeout=None):
+                self.timeout = timeout
+                self.replies = list(replies)
+
+            def tags(self):
+                return [{"name": "eriktonon/bonsai-2-uncensored:2b"}]
+
+            def chat_stream(self, model, messages, options, tools,
+                            keep_alive=None):
+                calls.append(model)
+                text, tc = (self.replies.pop(0)
+                            if self.replies else ("", []))
+                yield {"message": {"content": text, "tool_calls": tc}}
+
+        module.OllamaClient = _FakeClient
+        from forge.plugins import PluginContext
+        ctx = PluginContext(
+            workspace=tempfile.mkdtemp(), log=lambda *a: None,
+            tester_model="eriktonon/bonsai-2-uncensored:2b")
+        return module, calls, ctx
+
+    def test_tester_full_schema_no_repair(self):
+        module, calls, ctx = self._tester(
+            [("VERDICT: PASS\n" + self.FULL, [])])
+        report = module.run_tester({"task": "check it"}, ctx)
+        self.assertEqual(calls, ["eriktonon/bonsai-2-uncensored:2b"])
+        self.assertTrue(report.startswith(
+            "TESTER REPORT (model: eriktonon/bonsai-2-uncensored:2b)"))
+        self.assertNotIn("HANDOFF:", report)
+
+    def test_tester_partial_schema_repaired_once(self):
+        partial = ("VERDICT: PASS\nASKED: check it\nDONE: ran checks\n"
+                   "FILES: a.py\nEVIDENCE: all green\n")
+        module, calls, ctx = self._tester(
+            [(partial, []), ("OPEN: re-check the timeout path", [])])
+        report = module.run_tester({"task": "check it"}, ctx)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("OPEN: re-check the timeout path", report)
+        self.assertNotIn("HANDOFF:", report)
+
+    def test_tester_verdict_only_flagged_not_dropped(self):
+        module, calls, ctx = self._tester(
+            [("VERDICT: PASS\nall green", [])])
+        report = module.run_tester({"task": "check it"}, ctx)
+        self.assertEqual(calls, ["eriktonon/bonsai-2-uncensored:2b"])
+        self.assertTrue(report.startswith("TESTER REPORT (model: "))
+        self.assertIn("VERDICT: PASS", report)
+        self.assertIn("[HANDOFF: incomplete — missing: asked, done, "
+                      "files, evidence, open]", report)
+
+    # -- the keeper --
+
+    def test_keeper_writes_capped_deduped_cr1_shape(self):
+        from forge import handoff
+        root = tempfile.mkdtemp()
+        handoffs = [{"seat": "council", "unparsed": False,
+                     "parsed": {"asked": "build it", "done": "built it",
+                                "files": [], "evidence": "ran fine",
+                                "open": ["check the timeout path",
+                                         "check the retry path",
+                                         "check the empty path",
+                                         "check the fourth path"]},
+                     "missing": [], "findings": []}]
+        result = handoff.keeper_pass(root, handoffs)
+        self.assertEqual(result["kept"], 3)  # capped, fourth discarded
+        self.assertEqual(result["discarded"], 1)
+        path = Path(root) / ".forge" / "learnings.md"
+        self.assertTrue(path.exists())
+        text = path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# Review learnings\n"))
+        self.assertIn("Open (council): check the timeout path", text)
+        self.assertIn("· From: keeper", text)
+        self.assertNotIn("fourth path", text)
+        # A second identical task files the one the cap left
+        # behind — and a third files nothing (dedupe).
+        again = handoff.keeper_pass(root, handoffs)
+        self.assertEqual(again["kept"], 1)
+        self.assertIn("fourth path", path.read_text(encoding="utf-8"))
+        third = handoff.keeper_pass(root, handoffs)
+        self.assertEqual(third["kept"], 0)
+        self.assertEqual(third["discarded"], 4)
+
+    def test_keeper_end_to_end_council_open_item(self):
+        ws = tempfile.mkdtemp()
+        client = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            [self.FULL])
+        w, finished = self._worker(client, ws, council=True,
+                                   reviewer_model="rev-model")
+        w.run()
+        path = Path(ws) / ".forge" / "learnings.md"
+        self.assertTrue(path.exists())
+        self.assertIn("Open (council): re-check the timeout path",
+                      path.read_text(encoding="utf-8"))
+        # A second identical turn files nothing new.
+        before = path.read_text(encoding="utf-8")
+        client2 = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            [self.FULL])
+        w2, _f2 = self._worker(client2, ws, council=True,
+                               reviewer_model="rev-model")
+        w2.run()
+        self.assertEqual(path.read_text(encoding="utf-8"), before)
+
+    def test_keeper_writes_nothing_for_clean_task(self):
+        ws = tempfile.mkdtemp()
+        clean = ("WRONG: nothing.\nASKED: build the thing\n"
+                 "DONE: wrote it\nFILES: a.py\n"
+                 "EVIDENCE: it ran fine\nOPEN: (none)\n")
+        client = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            [clean])
+        w, _finished = self._worker(client, ws, council=True,
+                                    reviewer_model="rev-model")
+        w.run()
+        self.assertFalse((Path(ws) / ".forge" / "learnings.md").exists())
+
+
+class _TrajectoryCaptureClient:
+    """Records every request it is served, then settles in text —
+    the resumed worker's first generation is what the test reads."""
+
+    def __init__(self):
+        self.requests = []
+
+    def chat_stream(self, model, messages, options, schemas,
+                    keep_alive=None):
+        self.requests.append(list(messages))
+        yield {"message": {"content": "settled in text",
+                           "tool_calls": []}}
+
+
+class TrajectorySummaryTests(unittest.TestCase):
+    """Manus study M8 — schema-based trajectory summary, the
+    compaction backstop. The builder is programmatic (no model):
+    fixed fields only, extracted from the recorded history, and
+    anything with nothing on record says so instead of inventing
+    a value."""
+
+    def _history(self):
+        """Three exchanges with a real record: a successful write,
+        a FAILED write (excluded from files changed), and a
+        successful edit of the same file (deduplicated)."""
+        return [
+            {"role": "user", "content": "Build the widget\nmore detail"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "write_file",
+                              "arguments": {"path": "src/a.py",
+                                            "content": "x"}}}]},
+            {"role": "tool", "name": "write_file",
+             "content": "Wrote src/a.py"},
+            {"role": "user", "content": "now add the panel"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "write_file",
+                              "arguments": json.dumps(
+                                  {"path": "src/b.py",
+                                   "content": "y"})}}]},
+            {"role": "tool", "name": "write_file",
+             "content": "Tool error: permission denied for src/b.py"},
+            {"role": "user", "content": "fix the bug"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"function": {"name": "edit_file",
+                              "arguments": {"path": "src/a.py",
+                                            "old_text": "x",
+                                            "new_text": "z"}}}]},
+            {"role": "tool", "name": "edit_file",
+             "content": "Edited src/a.py"},
+        ]
+
+    def _steps(self):
+        return ["Write widget", "Fix bug", "Ship it"]
+
+    def test_fixed_fields_from_the_record(self):
+        from forge import context as context_mod
+        data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget",
+            handoffs=[{"parsed": {"open": ["Panel styling TBD"]}}])
+        # Fixed keys, fixed order — the schema, not prose.
+        self.assertEqual(list(data.keys()),
+                         list(context_mod.TRAJECTORY_FIELDS))
+        self.assertEqual(data["goal"], "Build the widget")
+        status = data["plan_status"]
+        self.assertEqual(status["total"], 3)
+        self.assertEqual(status["done"], [1])
+        self.assertEqual(status["open"], ["Fix bug", "Ship it"])
+        # The failed write is NOT a file changed; the edit of the
+        # same file does not duplicate it.
+        self.assertEqual(data["files_changed"], ["src/a.py"])
+        self.assertEqual(data["errors"],
+                         ["Tool error: permission denied for src/b.py"])
+        self.assertEqual(data["decisions"], [])
+        self.assertIn("Fix bug", data["open_items"])
+        self.assertIn("Panel styling TBD", data["open_items"])
+        text = context_mod.render_trajectory(data)
+        self.assertIn("1 of 3 steps done", text)
+        self.assertIn("Decisions: (not recorded)", text)
+        self.assertIn("src/a.py", text)
+        msg = context_mod.trajectory_message(data)
+        self.assertTrue(msg.get("trajectory"))
+        self.assertNotIn("summary", msg)
+        self.assertEqual(msg["trajectory_data"], data)
+
+    def test_nothing_on_record_says_so(self):
+        from forge import context as context_mod
+        data = context_mod.build_trajectory([])
+        self.assertEqual(data["goal"], "(not recorded)")
+        self.assertIsNone(data["plan_status"])
+        self.assertEqual(data["files_changed"], [])
+        self.assertEqual(data["decisions"], [])
+        self.assertEqual(data["errors"], [])
+        self.assertEqual(data["open_items"], [])
+        self.assertEqual(data["record_pointer"], [])
+        text = context_mod.render_trajectory(data)
+        self.assertIn("Goal: (not recorded)", text)
+        self.assertIn("Plan: (not recorded)", text)
+        self.assertIn("Decisions: (not recorded)", text)
+        self.assertIn("Full record: (no fold archive on record)", text)
+
+    def test_archive_pointer_chains_from_fold_markers(self):
+        from forge import context as context_mod
+        msgs = [{"role": "system", "summary": True,
+                 "fold_archive": ".forge/context/fold-1.json",
+                 "content": "old summary"},
+                {"role": "user", "content": "go on"}]
+        data = context_mod.build_trajectory(msgs)
+        self.assertEqual(data["record_pointer"],
+                         [".forge/context/fold-1.json"])
+        self.assertIn(".forge/context/fold-1.json",
+                      context_mod.render_trajectory(data))
+
+    def test_store_and_replacement_shrink_a_fat_history(self):
+        from forge import context as context_mod
+        with tempfile.TemporaryDirectory() as td:
+            msgs = []
+            for i in range(3):
+                msgs.append({"role": "user",
+                             "content": f"earlier request {i}"})
+                msgs.append({"role": "assistant",
+                             "content": "A" * 16000})
+            for i in range(3, 6):
+                msgs.append({"role": "user",
+                             "content": f"recent request {i}"})
+                msgs.append({"role": "assistant", "content": "done"})
+            msgs.append({"role": "user", "content": "go"})
+            plan = context_mod.plan_fold(msgs, 8000, [], force=True)
+            self.assertIsNotNone(plan)
+            data = context_mod.build_trajectory(
+                msgs, plan_steps=self._steps(), plan_done={0, 1},
+                title="Build the widget")
+            replaced = context_mod.trajectory_replacement(
+                msgs, plan, data)
+            self.assertIsNotNone(replaced)
+            self.assertLess(context_mod.estimate_messages(replaced),
+                            context_mod.estimate_messages(msgs))
+            traj = [m for m in replaced if m.get("trajectory")]
+            self.assertEqual(len(traj), 1)
+            self.assertIn("2 of 3 steps done",
+                          traj[0]["content"])
+            rel = context_mod.store_trajectory(td, data)
+            self.assertEqual(rel, ".forge/context/trajectory.json")
+            stored = json.loads(
+                (Path(td) / ".forge" / "context"
+                 / "trajectory.json").read_text(encoding="utf-8"))
+            self.assertEqual(stored, data)
+
+    def test_saturation_writes_the_trajectory_and_wraps_up(self):
+        # The non-shrinking fold case (ContextContinuity's): the
+        # summary cannot shrink, so the turn wraps up — and now the
+        # wrap-up generation starts from the trajectory, not the
+        # stale bulk. The pinned shape survives: one fold attempt,
+        # no tool round, budget stop logged, NO fold summary.
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            client = _ContinuityClient(summary_text="S" * 40000)
+            worker, hits = ContextContinuityTests()._worker(
+                client, td, log,
+                messages=ContextContinuityTests()._fat_history())
+            worker.run()
+            self.assertEqual(client.fold_calls, 1)
+            self.assertEqual(hits["n"], 0)
+            self.assertIn("context_budget_stop", log.kinds())
+            self.assertIn("context_trajectory", log.kinds())
+            self.assertFalse(any(m.get("summary")
+                                 for m in worker.messages))
+            traj = [m for m in worker.messages if m.get("trajectory")]
+            self.assertEqual(len(traj), 1)
+            stored = json.loads(
+                (Path(td) / ".forge" / "context"
+                 / "trajectory.json").read_text(encoding="utf-8"))
+            # Stored with sort_keys (the M1 discipline), so the
+            # on-disk order is alphabetical; the field SET is the
+            # fixed schema.
+            self.assertEqual(sorted(stored.keys()),
+                             sorted(__import__(
+                                 "forge.context",
+                                 fromlist=["TRAJECTORY_FIELDS"])
+                                 .TRAJECTORY_FIELDS))
+            self.assertTrue(worker.finished_text)
+
+    def test_nothing_foldable_means_no_trajectory(self):
+        # One exchange: split_fold finds no span, so the classic
+        # wrap-up lands exactly as before — no trajectory message,
+        # no trajectory log, no file.
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            client = _BudgetClient()
+            worker = ContextBudgetTests()._worker(client, 2000, td, log)
+            worker.run()
+            self.assertIn("context_budget_stop", log.kinds())
+            self.assertNotIn("context_trajectory", log.kinds())
+            self.assertFalse(any(m.get("trajectory")
+                                 for m in worker.messages))
+            self.assertFalse((Path(td) / ".forge" / "context"
+                              / "trajectory.json").exists())
+
+    def test_resumed_worker_starts_oriented(self):
+        # A worker built from [trajectory, user "continue"] — the
+        # shape a stored conversation resumes in — has the summary
+        # as its first context item, re-arms the live checklist
+        # from it (M3 recitation shows step 2 current), and needs
+        # no full-history archaeology: the request carries no fat
+        # content at all.
+        from forge import context as context_mod
+        from forge.worker import AgentWorker
+        data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget")
+        msgs = [context_mod.trajectory_message(data),
+                {"role": "user", "content": "continue"}]
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            client = _TrajectoryCaptureClient()
+            worker = AgentWorker(client, "fake", msgs,
+                                 {"num_ctx": 8000}, td, eventlog=log)
+            worker.run()
+            self.assertIn("trajectory_plan_restored", log.kinds())
+            self.assertTrue(client.requests)
+            first = client.requests[0]
+            traj = [m for m in first if m.get("trajectory")]
+            self.assertEqual(len(traj), 1)
+            self.assertIn("1 of 3 steps done", traj[0]["content"])
+            self.assertIn("Fix bug", traj[0]["content"])
+            self.assertFalse(any("A" * 100 in str(m.get("content", ""))
+                                 for m in first))
+            recited = [m for m in first
+                       if str(m.get("content", "")).startswith(
+                           "[Current plan —")]
+            self.assertEqual(len(recited), 1)
+            self.assertIn("Fix bug", recited[0]["content"])
+
+    def test_restore_and_refresh_round_trip(self):
+        from forge import context as context_mod
+        from forge.worker import AgentWorker
+        data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget")
+        msgs = [context_mod.trajectory_message(data),
+                {"role": "user", "content": "continue"}]
+        with tempfile.TemporaryDirectory() as td:
+            worker = AgentWorker(_TrajectoryCaptureClient(), "fake",
+                                 msgs, {"num_ctx": 8000}, td,
+                                 eventlog=_FakeEventLog())
+            # Restore: step 1 done, steps 2–3 open.
+            worker._restore_trajectory_plan()
+            self.assertEqual(worker._plan_steps, self._steps())
+            self.assertEqual(worker._plan_done, {0})
+            # A finished plan re-arms nothing.
+            done_data = context_mod.build_trajectory(
+                self._history(), plan_steps=self._steps(),
+                plan_done={0, 1, 2}, title="Build the widget")
+            worker.messages = [context_mod.trajectory_message(done_data),
+                               {"role": "user", "content": "continue"}]
+            worker._plan_steps = None
+            worker._plan_done = set()
+            worker._restore_trajectory_plan()
+            self.assertIsNone(worker._plan_steps)
+            # Refresh: the snapshot follows the live plan state.
+            worker.messages = [context_mod.trajectory_message(data),
+                               {"role": "user", "content": "continue"}]
+            worker._plan_steps = self._steps()
+            worker._plan_done = {0, 1}
+            worker._plan_title = "Build the widget"
+            worker._refresh_trajectory()
+            latest = context_mod.latest_trajectory(worker.messages)
+            self.assertEqual(latest["trajectory_data"]
+                             ["plan_status"]["done"], [1, 2])
+            self.assertIn("2 of 3 steps done",
+                          latest["content"])
+
+    def test_happy_paths_unchanged(self):
+        # A normal mid-turn fold still lands with no trajectory,
+        # and a healthy short history resumes with no trajectory
+        # added — the backstop only fires at saturation.
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            client = _ContinuityClient()
+            worker, hits = ContextContinuityTests()._worker(
+                client, td, log,
+                messages=ContextContinuityTests()._fat_history())
+            worker.run()
+            self.assertIn("context_fold_mid_turn", log.kinds())
+            self.assertNotIn("context_trajectory", log.kinds())
+            self.assertFalse(any(m.get("trajectory")
+                                 for m in worker.messages))
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            client = _TrajectoryCaptureClient()
+            worker = AgentWorker(
+                client, "fake",
+                [{"role": "user", "content": "hi"}], {"num_ctx": 8000},
+                td, eventlog=log)
+            worker.run()
+            self.assertFalse(any(m.get("trajectory")
+                                 for m in worker.messages))
+            self.assertNotIn("context_trajectory", log.kinds())
+
+
+class SessionReplayTests(unittest.TestCase):
+    """Manus study M9 (Tier 2 #1): a finished session exports to
+    one self-contained local HTML file — C9 timeline + transcript,
+    as it happened. No new recording machinery: the render reads
+    the stored conversation and the timeline's own entries."""
+
+    def _messages(self):
+        return [
+            {"role": "user", "content": "build the widget"},
+            {"role": "assistant", "content": "On it.",
+             "tool_calls": [{"function": {"name": "write_file",
+                                          "arguments": {"path": "w.py",
+                                                        "content": "x"}}} ]},
+            {"role": "tool", "content": "wrote w.py", "tool_call_id": "c1"},
+            {"role": "assistant", "content": "Done."},
+        ]
+
+    def _entries(self):
+        return [
+            {"started": "2026-11-09T14:02:11", "ended": "2026-11-09T14:03:34",
+             "model": "m/test", "prompt": "build the widget",
+             "outcome": "finished", "mode": "code", "seconds": 83.5,
+             "generations": 3, "prompt_tokens": 1240, "eval_tokens": 312},
+            {"started": "2026-11-09T14:05:00", "ended": "2026-11-09T14:05:12",
+             "model": "m/test", "prompt": "fix it", "outcome": "failed",
+             "mode": "code", "seconds": None, "generations": None,
+             "prompt_tokens": None, "eval_tokens": None},
+        ]
+
+    def test_replay_has_header_totals_messages_and_timeline(self):
+        from forge import replay as replay_mod
+        out = replay_mod.render_replay("Widget chat", self._messages(),
+                                       self._entries(), model="m/test",
+                                       project="/tmp/proj")
+        self.assertIn("Widget chat", out)
+        self.assertIn("m/test", out)
+        self.assertIn("Turns: 2", out)
+        self.assertIn("1,552", out)  # 1240 + 312 estimated tokens
+        self.assertIn("build the widget", out)
+        self.assertIn("Done.", out)
+        self.assertIn("write_file", out)
+        self.assertIn("wrote w.py", out)
+        self.assertIn("fix it", out)
+        self.assertIn("failed", out)
+        # Timeline rows in order: the finished turn precedes the failed one.
+        self.assertLess(out.index("build the widget"),
+                        out.index("fix it"))
+
+    def test_hostile_content_is_escaped_and_file_is_self_contained(self):
+        from forge import replay as replay_mod
+        messages = [
+            {"role": "user",
+             "content": "<script>alert('xss')</script>"},
+            {"role": "assistant",
+             "content": "see <a href=\"http://evil.example/\">this</a>"},
+        ]
+        out = replay_mod.render_replay("Hostile", messages, [])
+        self.assertNotIn("<script>", out)
+        self.assertNotIn("alert('xss')", out)
+        self.assertIn("&lt;script&gt;", out)
+        # The URL survives only as escaped TEXT inside &lt;a ...&gt; —
+        # inert, never a live link: no tag, no href/src attribute
+        # anywhere in the file.
+        self.assertNotIn("<a ", out)
+        # Real attributes use a bare quote; the escaped text uses
+        # &quot; — so href=" / src=" can only come from live markup.
+        self.assertNotIn('href="', out)
+        self.assertNotIn('src="', out)
+        self.assertNotIn("<script", out.lower())
+
+    def test_render_is_deterministic(self):
+        from forge import replay as replay_mod
+        first = replay_mod.render_replay("T", self._messages(),
+                                         self._entries())
+        second = replay_mod.render_replay("T", self._messages(),
+                                          self._entries())
+        self.assertEqual(first, second)
+
+    def test_old_session_without_timeline_exports_transcript_only(self):
+        from forge import replay as replay_mod
+        out = replay_mod.render_replay("Old chat", self._messages(), [])
+        self.assertIn("No timeline recorded for this session", out)
+        self.assertIn("build the widget", out)
+        self.assertIn("Done.", out)
+        self.assertNotIn("Turns:", out)
+
+    def test_fold_summary_and_trajectory_render_as_what_they_are(self):
+        from forge import replay as replay_mod
+        messages = [
+            {"role": "system", "summary": True,
+             "folded_count": 5, "fold_archive": ".forge/context/fold-1.json",
+             "content": "Earlier: built the widget."},
+            {"role": "system", "trajectory": True,
+             "trajectory_data": {
+                 "goal": "build the widget",
+                 "plan_status": {"title": "widget", "total": 2,
+                                 "done": [0], "steps": ["a", "b"],
+                                 "open": [1]},
+                 "files_changed": ["w.py"],
+                 "decisions": "(not recorded)",
+                 "errors": [],
+                 "open_items": ["b"],
+                 "record_pointer": ".forge/context/fold-1.json"}},
+            {"role": "user", "content": "continue"},
+        ]
+        out = replay_mod.render_replay("Folded", messages, [])
+        self.assertIn("Fold summary", out)
+        self.assertIn(".forge/context/fold-1.json", out)
+        self.assertIn("Earlier: built the widget.", out)
+        self.assertIn("Trajectory summary", out)
+        self.assertIn("goal: build the widget", out)
+        self.assertIn("decisions: (not recorded)", out)
+        self.assertIn("open_items", out)
+
+    def test_tool_result_is_capped_with_a_pointer_note(self):
+        from forge import replay as replay_mod
+        messages = [{"role": "tool", "content": "R" * 2000}]
+        out = replay_mod.render_replay("Fat", messages, [])
+        self.assertIn("R" * 800, out)
+        self.assertNotIn("R" * 801, out)
+        self.assertIn("chars clipped", out)
+
+    def test_export_writes_deterministic_path_under_replays(self):
+        from forge import replay as replay_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            first = replay_mod.export_replay(
+                tmp, 7, "Chat", self._messages(), self._entries())
+            second = replay_mod.export_replay(
+                tmp, 7, "Chat", self._messages(), self._entries())
+            self.assertEqual(first, second)
+            self.assertEqual(first.name, "conversation-7-replay.html")
+            self.assertEqual(first.parent.name, "replays")
+            self.assertEqual(first.parent.parent.name, ".forge")
+            self.assertEqual(first.read_text(encoding="utf-8"),
+                             replay_mod.render_replay(
+                                 "Chat", self._messages(), self._entries()))
+
+
+class SaveRunAsSkillTests(unittest.TestCase):
+    """Manus study M10 — "save this run as a skill": OFF by default
+    (settings `offer_save_run_as_skill`), so a finished task ends
+    exactly as before; ON, a completed plan ends with the offer
+    through the approval bridge, and accepting drafts a SKILL.md
+    from the run's own record (M8 trajectory + M3 success
+    criteria) that lands DISABLED per the S6 rule. The draft is
+    programmatic — no extra generation — and a decline, a
+    cancelled/failed task, or a task with no steps writes nothing."""
+
+    PLAN = "Plan:\n1. Alpha step\n2. Beta step\n3. Gamma step"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _worker(self, script, hits, log, skills_dir, offer=False,
+                planning=True, approve_save=True):
+        from forge.worker import AgentWorker
+        from forge import run_skill as run_skill_mod
+        schema = {"type": "function",
+                  "function": {"name": "ping_tool", "description": "test",
+                               "parameters": {"type": "object",
+                                              "properties": {"word": {"type": "string"}}}}}
+
+        def handler(args):
+            hits["n"] += 1
+            return "pong"
+
+        extra = {"ping_tool": (schema, handler, False, "test")}
+        client = _ProgressClient(script)
+        worker = AgentWorker(
+            client, "fake-model",
+            [{"role": "user", "content": "build it"}], {},
+            tempfile.mkdtemp(), extra_tools=extra,
+            eventlog=log,
+            permissions={"rules": [],
+                         "mode": "plan" if planning else "code",
+                         "classes": {}},
+            planning=planning, skribe_writes=False,
+            skills_dir=skills_dir,
+            offer_save_run_as_skill=offer)
+        asked = {"names": []}
+        drafted = []
+        worker.skill_drafted.connect(drafted.append)
+
+        def _resolve(name, *a):
+            asked["names"].append(name)
+            if name == run_skill_mod.SAVE_SKILL_TOOL:
+                worker.resolve_approval(approve_save)
+            else:
+                worker.resolve_approval(True)
+
+        worker.approval_needed.connect(_resolve)
+        seen = {"ready": [], "finished": []}
+        worker.plan_ready.connect(seen["ready"].append)
+        worker.finished_text.connect(
+            lambda text, msgs: seen["finished"].append(text))
+        return worker, client, seen, asked, drafted
+
+    def _wait_for(self, cond, timeout=10.0):
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            self.app.processEvents()
+            if cond():
+                return True
+            _time.sleep(0.01)
+        return cond()
+
+    def _drive_approved(self, worker, seen):
+        worker.start()
+        self.assertTrue(self._wait_for(lambda: seen["ready"]),
+                        "plan_ready never fired")
+        worker.resolve_plan("approve")
+        self.assertTrue(self._wait_for(lambda: seen["finished"]),
+                        "turn never finished")
+        worker.wait(3000)
+
+    def _completed_script(self):
+        return [
+            {"content": self.PLAN},
+            {"content": "STEP 1 DONE", "tool": "write_file",
+             "args": {"path": "a.py", "content": "x = 1\n"}},
+            {"content": "STEP 2 DONE", "tool": "ping_tool",
+             "args": {"word": "b"}},
+            {"content": "STEP 3 DONE"},
+        ]
+
+    # -- (a) default OFF: nothing changes at all --------------------
+    def test_default_off_no_offer_no_draft(self):
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir)
+        self._drive_approved(worker, seen)
+        self.assertNotIn("SAVE_RUN_AS_SKILL", asked["names"])
+        self.assertEqual([k for k, _f in log.events
+                          if k.startswith("save_skill")], [])
+        self.assertEqual(drafted, [])
+        self.assertEqual(list(__import__("pathlib").Path(skills_dir).iterdir()), [])
+        # The requests themselves carry no offer text either.
+        for call in client.messages_seen:
+            for m in call:
+                self.assertNotIn("Save this run as a skill",
+                                 str(m.get("content", "")))
+
+    # -- (b) ON + success + accept: disabled draft skill -----------
+    def test_on_success_accept_writes_disabled_draft(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir, offer=True)
+        self._drive_approved(worker, seen)
+        self.assertIn("SAVE_RUN_AS_SKILL", asked["names"])
+        self.assertEqual(len(drafted), 1)
+        self.assertTrue(drafted[0]["ok"])
+        self.assertEqual(drafted[0]["name"], "build-it")
+        skill_file = Path(skills_dir) / "build-it" / "SKILL.md"
+        self.assertTrue(skill_file.is_file())
+        text = skill_file.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("name: build-it\n"))
+        self.assertIn("build it", text)
+        for step in ("Alpha step", "Beta step", "Gamma step"):
+            self.assertIn(step, text)
+        self.assertIn("a.py", text)
+        # The draft is a new skill with no known_skills history, so
+        # the S6 reload rule (pinned by the window-level test at
+        # ~32335) records it DISABLED — the draft itself never
+        # claims to be enabled, and nothing loads it here.
+        self.assertIn("starts disabled", text.lower())
+        offers = [f for k, f in log.events if k == "save_skill_offer"]
+        self.assertEqual(len(offers), 1)
+        self.assertTrue(offers[0]["approved"])
+
+    # -- (c) ON + decline: nothing written --------------------------
+    def test_on_success_decline_writes_nothing(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir,
+            offer=True, approve_save=False)
+        self._drive_approved(worker, seen)
+        self.assertIn("SAVE_RUN_AS_SKILL", asked["names"])
+        self.assertEqual(drafted, [])
+        self.assertEqual(list(Path(skills_dir).iterdir()), [])
+        offers = [f for k, f in log.events if k == "save_skill_offer"]
+        self.assertEqual(len(offers), 1)
+        self.assertFalse(offers[0]["approved"])
+
+    # -- (d) ON + incomplete plan: no offer -------------------------
+    def test_on_incomplete_plan_no_offer(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        script = [
+            {"content": self.PLAN},
+            {"content": "STEP 1 DONE", "tool": "ping_tool",
+             "args": {"word": "a"}},
+            {"content": "done, leaving the rest"},
+        ]
+        worker, client, seen, asked, drafted = self._worker(
+            script, hits, log, skills_dir, offer=True)
+        self._drive_approved(worker, seen)
+        self.assertEqual(worker._plan_done, {0})
+        self.assertNotIn("SAVE_RUN_AS_SKILL", asked["names"])
+        self.assertEqual(drafted, [])
+        self.assertEqual(list(Path(skills_dir).iterdir()), [])
+
+    # -- (d2) ON + cancelled turn: no offer -------------------------
+    def test_on_cancelled_turn_no_offer(self):
+        import threading
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+
+        class _BlockingClient:
+            def __init__(self):
+                self.calls = 0
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def tags(self):
+                return [{"name": "fake-model"}]
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield {"message": {"content": self.PLAN_TEXT,
+                                       "tool_calls": []}}
+                    return
+                self.started.set()
+                self.release.wait(timeout=10)
+                yield {"message": {"content": "STEP 1 DONE",
+                                   "tool_calls": []}}
+
+            PLAN_TEXT = "Plan:\n1. Alpha step\n2. Beta step\n3. Gamma step"
+
+        from forge.worker import AgentWorker
+        from forge import run_skill as run_skill_mod
+        client = _BlockingClient()
+        worker = AgentWorker(
+            client, "fake-model",
+            [{"role": "user", "content": "build it"}], {},
+            tempfile.mkdtemp(), eventlog=log,
+            permissions={"rules": [], "mode": "plan", "classes": {}},
+            planning=True, skribe_writes=False,
+            skills_dir=skills_dir, offer_save_run_as_skill=True)
+        asked = {"names": []}
+        drafted = []
+        worker.skill_drafted.connect(drafted.append)
+        worker.approval_needed.connect(
+            lambda name, *a: (asked["names"].append(name),
+                              worker.resolve_approval(
+                                  name != run_skill_mod.SAVE_SKILL_TOOL)))
+        seen = {"ready": [], "finished": []}
+        worker.plan_ready.connect(seen["ready"].append)
+        worker.finished_text.connect(
+            lambda text, msgs: seen["finished"].append(text))
+        worker.start()
+        self.assertTrue(self._wait_for(lambda: seen["ready"]),
+                        "plan_ready never fired")
+        worker.resolve_plan("approve")
+        self.assertTrue(client.started.wait(timeout=10),
+                        "execution generation never started")
+        worker.cancel()
+        client.release.set()
+        self.assertTrue(self._wait_for(lambda: seen["finished"]),
+                        "turn never finished after cancel")
+        worker.wait(3000)
+        self.assertNotIn("SAVE_RUN_AS_SKILL", asked["names"])
+        self.assertEqual(drafted, [])
+        self.assertEqual(list(Path(skills_dir).iterdir()), [])
+
+    # -- (e) ON + no steps (one-shot ask): no offer -----------------
+    def test_on_no_plan_turn_no_offer(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        script = [{"content": "working", "tool": "ping_tool",
+                   "args": {"word": "a"}},
+                  {"content": "done"}]
+        worker, client, seen, asked, drafted = self._worker(
+            script, hits, log, skills_dir, offer=True, planning=False)
+        worker.run()
+        self.assertTrue(seen["finished"])
+        self.assertNotIn("SAVE_RUN_AS_SKILL", asked["names"])
+        self.assertEqual(drafted, [])
+        self.assertEqual(list(Path(skills_dir).iterdir()), [])
+
+    # -- (f) slug collision: suffixed folder, never overwrite -------
+    def test_slug_collision_suffixes_never_overwrites(self):
+        from pathlib import Path
+        from forge import create_ext as create_mod
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        ok, _msg = create_mod.create_skill(
+            skills_dir, "build-it", "First skill.", "Do the first thing.")
+        self.assertTrue(ok)
+        first = Path(skills_dir) / "build-it" / "SKILL.md"
+        first_text = first.read_text(encoding="utf-8")
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir, offer=True)
+        self._drive_approved(worker, seen)
+        self.assertEqual(len(drafted), 1)
+        self.assertTrue(drafted[0]["ok"])
+        self.assertEqual(drafted[0]["name"], "build-it-2")
+        self.assertEqual(first.read_text(encoding="utf-8"), first_text)
+        second = Path(skills_dir) / "build-it-2" / "SKILL.md"
+        self.assertIn("Alpha step", second.read_text(encoding="utf-8"))
+
+    # -- the pure draft: shape, slug, collision loop ----------------
+    def test_draft_shape_and_slug(self):
+        from forge import run_skill as run_skill_mod
+        traj = {"goal": "Build the parser!",
+                "plan_status": {"title": "Build the parser!",
+                                "total": 2, "done": [1, 2],
+                                "steps": ["Create a.py", "Edit b.py"],
+                                "open": []},
+                "files_changed": ["a.py"],
+                "decisions": [], "errors": ["Tool error: boom"],
+                "open_items": [], "record_pointer": []}
+        draft = run_skill_mod.build_run_skill_draft(traj)
+        self.assertEqual(draft["name"], "build-the-parser")
+        self.assertIn("Build the parser", draft["description"])
+        self.assertIn("1. Create a.py", draft["body"])
+        self.assertIn("2. Edit b.py", draft["body"])
+        self.assertIn("a.py", draft["body"])
+        self.assertIn("boom", draft["body"])
+        self.assertEqual(run_skill_mod.slugify_goal(""), "saved-run")
+        self.assertEqual(run_skill_mod.slugify_goal("  A B_C!  "), "a-b-c")
+
+    def test_draft_skill_collision_loop(self):
+        from forge import run_skill as run_skill_mod
+        created = {}
+
+        def fake_create(skills_dir, name, description, body):
+            if name in created:
+                return False, f"create_skill refused: a skill named '{name}' already exists."
+            created[name] = body
+            return True, f"Created '{name}'."
+
+        ok, used, _msg = run_skill_mod.draft_skill(
+            "/tmp", {"name": "x", "description": "d", "body": "b"},
+            fake_create)
+        self.assertTrue(ok)
+        self.assertEqual(used, "x")
+        ok, used, _msg = run_skill_mod.draft_skill(
+            "/tmp", {"name": "x", "description": "d", "body": "b"},
+            fake_create)
+        self.assertTrue(ok)
+        self.assertEqual(used, "x-2")
+
+
+class AuthoritativeSourcesTests(unittest.TestCase):
+    """Manus study M11 — authoritative sources before scraping.
+
+    The standing instruction lives in the two places a browsing
+    turn actually reads — the Research mode guidance and the
+    browse_open tool description — plus the Research run
+    instruction, which names the plan's own authoritative URLs
+    first. The one mechanical rule is narrow and owner-grounded:
+    "authoritative" means a URL the owner-approved plan named in
+    its "Sources to search" section; there is no general way for
+    code to know the docs domain of an arbitrary subject, so the
+    rest stays instruction. The model's own Sources cited list is
+    model-written and the shell never touches it — the chain is:
+    the run instruction says open the authoritative sources
+    first, and sources are numbered in first-open order, so the
+    authoritative sources lead the cited list."""
+
+    def test_research_guidance_carries_the_instruction(self):
+        from forge.permissions import MODE_GUIDANCE
+        research = MODE_GUIDANCE["research"]
+        self.assertIn("AUTHORITATIVE SOURCES FIRST", research)
+        self.assertIn("official docs", research)
+        self.assertIn("official API reference", research)
+        self.assertIn("project's own repository", research)
+        self.assertIn("cite it as a copy", research)
+        self.assertIn("authoritative one wins", research)
+
+    def test_instruction_is_research_scoped_not_in_shared_prefix(self):
+        # The M1 guard: the instruction must not ride in the shared
+        # system prompt every mode reads. Code mode's guidance
+        # carries none of it, and the guidance is the only home
+        # outside the Research run instruction.
+        from forge.permissions import MODE_GUIDANCE
+        for mode in ("code", "plan", "ask", "review", "design",
+                     "architect", "write"):
+            self.assertNotIn("AUTHORITATIVE SOURCES FIRST",
+                             MODE_GUIDANCE[mode], mode)
+
+    def test_browse_open_description_carries_the_instruction(self):
+        import json
+        root = Path(__file__).resolve().parent.parent
+        meta = json.loads(
+            (root / "plugins" / "browse" / "plugin.json")
+            .read_text(encoding="utf-8"))
+        tools = {t["name"]: t for t in meta["tools"]}
+        self.assertIn("AUTHORITATIVE SOURCE FIRST",
+                      tools["browse_open"]["description"])
+        self.assertIn("official docs",
+                      tools["browse_open"]["description"])
+        # The choice is made at open; the read verb just reads the
+        # current page, so it carries no source-picking instruction.
+        self.assertNotIn("AUTHORITATIVE",
+                         tools["browse_read"]["description"])
+
+    def test_authoritative_urls_from_plan_section_only(self):
+        from forge import modes
+        doc = ("## Question\nHow fast is it?\n\n"
+               "## Sources to search\n"
+               "Official docs: https://docs.example.org/guide.\n"
+               "The API reference at https://api.example.org/v1 "
+               "and a mirror https://mirror.example.com/docs\n"
+               "## Depth\nStandard\n\n"
+               "## Assumptions\n"
+               "See https://elsewhere.example.net/not-a-source\n")
+        self.assertEqual(
+            modes.authoritative_urls(doc),
+            ["https://docs.example.org/guide",
+             "https://api.example.org/v1",
+             "https://mirror.example.com/docs"])
+        # A URL named twice counts once; a URL outside the
+        # section does not count.
+        doc2 = ("## Sources to search\n"
+                "https://docs.example.org/guide and again "
+                "https://docs.example.org/guide\n")
+        self.assertEqual(modes.authoritative_urls(doc2),
+                         ["https://docs.example.org/guide"])
+        self.assertEqual(modes.authoritative_urls("## Question\nNone\n"),
+                         [])
+        self.assertEqual(modes.authoritative_urls(""), [])
+
+    def test_work_instruction_names_plan_sources_first(self):
+        from forge import modes
+        doc = ("## Question\nHow fast is it?\n\n"
+               "## Sources to search\n"
+               "Official docs https://docs.example.org/guide, "
+               "plus web search.\n\n"
+               "## Depth\nStandard\n")
+        text = modes.research_work_instruction(
+            doc, ["Is it fast?"], ".forge/research/x.md",
+            "standard", 20)
+        self.assertIn("AUTHORITATIVE SOURCES FIRST", text)
+        self.assertIn("cite it as a copy", text)
+        self.assertIn("authoritative one wins", text)
+        self.assertIn("open them first: https://docs.example.org/guide",
+                      text)
+        # Numbering still rides first-open order, untouched.
+        self.assertIn("Number your sources in the order you FIRST "
+                      "open them", text)
+
+    def test_work_instruction_without_named_sources_invents_none(self):
+        from forge import modes
+        doc = ("## Question\nHow fast is it?\n\n"
+               "## Sources to search\nThe web, this project.\n\n"
+               "## Depth\nStandard\n")
+        text = modes.research_work_instruction(
+            doc, ["Is it fast?"], ".forge/research/x.md",
+            "standard", 20)
+        self.assertIn("AUTHORITATIVE SOURCES FIRST", text)
+        self.assertNotIn("open them first:", text)
+        self.assertNotIn("http", text)
+
+    def test_plan_drafting_asks_for_authoritative_first(self):
+        from forge import modes
+        text = modes.research_section_instruction("Sources to search", "")
+        self.assertIn("authoritative source", text)
+        self.assertIn("official docs", text)
+        self.assertIn("before any copy", text)
+
+
+class FanOutTests(unittest.TestCase):
+    """Manus study M12: fan-out for similar independent items.
+    The pure layer (forge/fanout.py) is driven with stub spawns;
+    the window driver is proven with real workers on the #64
+    blocking client, the same way ParallelTurnsMissionControlTests
+    proves the detach dance. The seeding rule is pinned throughout:
+    an item fans only when its `independent` flag says so — never
+    inferred — and a dependent item refuses the WHOLE batch."""
+
+    @staticmethod
+    def _handoff(task, open_line="nothing open"):
+        return (f"ASKED: {task}\nDONE: did it\nFILES: a.txt\n"
+                f"EVIDENCE: ran the check, it passed\nOPEN: {open_line}")
+
+    @staticmethod
+    def _incomplete(task):
+        return (f"ASKED: {task}\nDONE: did it\nFILES: a.txt\n"
+                "EVIDENCE: ran the check, it passed")
+
+    def _items(self, *tasks):
+        from forge.fanout import FanOutItem
+        return [FanOutItem(task=t, independent=True,
+                           title=t.split()[0]) for t in tasks]
+
+    def _stub_spawn(self, refuse_once=()):
+        """A spawn callable: returns a fresh handle per item, or
+        None once for each title in refuse_once (then works)."""
+        state = {"calls": [], "n": 0, "refused": set()}
+
+        def spawn(item):
+            state["calls"].append(item.title)
+            if item.title in refuse_once \
+                    and item.title not in state["refused"]:
+                state["refused"].add(item.title)
+                return None
+            state["n"] += 1
+            return f"h{state['n']}"
+        spawn.state = state
+        return spawn
+
+    # -- validation: the seeding rule and the refusals ------------
+    def test_cap_1_refuses_and_spawns_nothing(self):
+        from forge.fanout import FanOutRun
+        spawn = self._stub_spawn()
+        with self.assertRaises(ValueError) as caught:
+            FanOutRun(self._items("a one", "b two"), 1, spawn)
+        self.assertIn("cap 1", str(caught.exception))
+        self.assertEqual(spawn.state["calls"], [])
+
+    def test_dependent_item_refuses_the_whole_batch(self):
+        from forge.fanout import FanOutItem, FanOutRun
+        items = [FanOutItem(task="a one", independent=True, title="a"),
+                 FanOutItem(task="b two", independent=False, title="b"),
+                 FanOutItem(task="c three", independent=True, title="c")]
+        spawn = self._stub_spawn()
+        with self.assertRaises(ValueError) as caught:
+            FanOutRun(items, 3, spawn)
+        self.assertIn("'b'", str(caught.exception))
+        self.assertIn("never fanned", str(caught.exception))
+        self.assertEqual(spawn.state["calls"], [])
+
+    def test_empty_batch_and_blank_task_refused(self):
+        from forge.fanout import FanOutItem, FanOutRun
+        spawn = self._stub_spawn()
+        with self.assertRaises(ValueError):
+            FanOutRun([], 2, spawn)
+        with self.assertRaises(ValueError):
+            FanOutRun([FanOutItem(task="   ", independent=True)], 2,
+                      spawn)
+        self.assertEqual(spawn.state["calls"], [])
+
+    def test_independent_defaults_false(self):
+        from forge.fanout import FanOutItem
+        self.assertFalse(FanOutItem(task="do it").independent)
+
+    def test_plan_waves_keep_order_and_cap(self):
+        from forge.fanout import plan_waves
+        items = self._items("a one", "b two", "c three", "d four")
+        waves = plan_waves(items, 2)
+        self.assertEqual([[i.title for i in w] for w in waves],
+                         [["a", "b"], ["c", "d"]])
+        self.assertEqual(len(plan_waves(items, 4)), 1)
+
+    # -- the pure run: waves, cap, collection --------------------
+    def test_three_items_fan_out_and_return_valid_handoffs(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two", "c three")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 3, spawn)
+        run.start()
+        self.assertEqual(spawn.state["calls"], ["a", "b", "c"])
+        for handle in ("h1", "h2", "h3"):
+            actions = run.on_settled(
+                handle, self._handoff(f"task {handle}"))
+            self.assertIsNone(actions["repair"])
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 3)
+        for entry in run.results:
+            self.assertEqual(entry["missing"], [])
+            self.assertFalse(entry["unparsed"])
+
+    def test_cap_queues_excess_in_order_and_never_overruns(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two", "c three", "d four")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        self.assertEqual(spawn.state["calls"], ["a", "b"])
+        run.on_settled("h1", self._handoff("a one"))
+        self.assertEqual(spawn.state["calls"], ["a", "b", "c"])
+        run.on_settled("h2", self._handoff("b two"))
+        self.assertEqual(spawn.state["calls"], ["a", "b", "c", "d"])
+        run.on_settled("h3", self._handoff("c three"))
+        run.on_settled("h4", self._handoff("d four"))
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 4)
+
+    def test_spawn_refusal_keeps_item_queued_and_retries(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two", "c three")
+        spawn = self._stub_spawn(refuse_once=("b",))
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        self.assertEqual(spawn.state["calls"], ["a", "b"])
+        # b was refused; settling a retries b, then c fills the slot.
+        run.on_settled("h1", self._handoff("a one"))
+        self.assertEqual(spawn.state["calls"], ["a", "b", "b", "c"])
+        run.on_settled("h2", self._handoff("b two"))
+        run.on_settled("h3", self._handoff("c three"))
+        self.assertTrue(run.done)
+
+    def test_total_spawn_refusal_stalls_plainly(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two")
+        run = FanOutRun(items, 2, lambda item: None)
+        run.start()
+        self.assertTrue(run.done)
+        self.assertEqual([r.get("status") for r in run.results],
+                         ["stalled", "stalled"])
+
+    def test_failed_turn_files_failed_entry(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        run.on_settled("h1", error="Ollama timed out")
+        run.on_settled("h2", self._handoff("b two"))
+        self.assertTrue(run.done)
+        failed = [r for r in run.results if r.get("status") == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("timed out", failed[0]["error"])
+        self.assertTrue(failed[0]["unparsed"])
+
+    # -- the repair round (M7 shape) ------------------------------
+    def test_missing_section_triggers_one_repair_round(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        actions = run.on_settled("h1", self._incomplete("a one"))
+        repair = actions["repair"]
+        self.assertIsNotNone(repair)
+        self.assertIn("OPEN", repair["instruction"])
+        self.assertFalse(actions["done"])
+        # The window spawns the repair turn and reports its handle.
+        run.note_repair("r1", repair["index"])
+        actions = run.on_settled("r1", "OPEN: nothing open",
+                                 is_repair=True)
+        self.assertTrue(actions["done"])
+        self.assertEqual(len(run.results), 1)
+        self.assertEqual(run.results[0]["missing"], [])
+        self.assertFalse(run.results[0]["unparsed"])
+        self.assertIn("OPEN: nothing open", run.results[0]["raw"])
+
+    def test_repair_still_incomplete_lands_flagged_with_raw_intact(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        actions = run.on_settled("h1", self._incomplete("a one"))
+        run.note_repair("r1", actions["repair"]["index"])
+        # The repair reply says nothing useful: no second round.
+        actions = run.on_settled("r1", "still working on it",
+                                 is_repair=True)
+        self.assertTrue(actions["done"])
+        entry = run.results[0]
+        self.assertTrue(entry["unparsed"])
+        self.assertEqual(entry["missing"], ["open"])
+        self.assertIn("still working on it", entry["raw"])
+
+    def test_repair_unavailable_finalises_flagged(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        actions = run.on_settled("h1", self._incomplete("a one"))
+        actions = run.repair_unavailable(actions["repair"]["index"])
+        self.assertFalse(actions["done"])  # b is still live
+        run.on_settled("h2", self._handoff("b two"))
+        self.assertTrue(run.done)
+        flagged = [r for r in run.results if r["unparsed"]]
+        self.assertEqual(len(flagged), 1)
+        self.assertIn("did it", flagged[0]["raw"])
+
+    def test_never_attempted_return_is_flagged_not_repaired(self):
+        from forge.fanout import FanOutRun
+        items = self._items("a one")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn)
+        run.start()
+        actions = run.on_settled("h1", "Just did the thing, all good.")
+        self.assertIsNone(actions["repair"])
+        self.assertTrue(run.done)
+        entry = run.results[0]
+        self.assertTrue(entry["unparsed"])
+        self.assertEqual(entry["raw"], "Just did the thing, all good.")
+
+    def test_collect_handoff_sync_repair_path(self):
+        from forge.fanout import collect_handoff
+        entry = collect_handoff(
+            self._incomplete("a one"), "fanout:a",
+            repair=lambda missing: "OPEN: nothing open")
+        self.assertEqual(entry["missing"], [])
+        self.assertFalse(entry["unparsed"])
+
+    def test_fanout_instruction_carries_task_and_schema(self):
+        from forge.fanout import FanOutItem, fanout_instruction
+        text = fanout_instruction(
+            FanOutItem(task="ALPHA task", independent=True))
+        self.assertIn("ALPHA task", text)
+        for marker in ("ASKED:", "DONE:", "FILES:", "EVIDENCE:", "OPEN:"):
+            self.assertIn(marker, text)
+
+
+class FanOutWindowTests(unittest.TestCase):
+    """Manus study M12, window driver: real workers on the #64
+    blocking client. A batch of three independent items at cap 2
+    runs two live at once, queues the third in order, and each
+    turn's return is collected as a schema-valid handoff; a
+    missing section gets its one repair round in its own
+    conversation."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.ws = root / "proj"
+        self.ws.mkdir()
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._old_client = self.win.client
+        self.client = _RoutedBlockingClient()
+        self.win.client = self.client
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(self.ws)
+        self.win.plugin_ctx.workspace = str(self.ws)
+        self._old_settings = {
+            key: self.win.settings.get(key, None)
+            for key in ("max_parallel_turns", "auto_summarize",
+                        "skribe_writes")}
+        self.win.settings["max_parallel_turns"] = 2
+        self.win.settings["auto_summarize"] = False
+        self.win.settings["skribe_writes"] = False
+        self.win.council_check.setChecked(False)
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win.plan_state = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win._gate_queue = []
+        self.win._gate_presenting = False
+        self.win._gate_owner_worker = None
+        self.win._fanout_run = None
+        self.win.mode_combo.setCurrentText("Code")
+        self.cid = self.win.store.save(
+            None, [{"role": "system", "content": "sys"},
+                   {"role": "user", "content": "seed"}],
+            model=None, project=str(self.ws))
+        self.win.load_conversation(self.cid)
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+
+    def tearDown(self):
+        self.client.release_all()
+        workers = [s["worker"] for s in self.win._streams.values()]
+        if self.win.worker is not None:
+            workers.append(self.win.worker)
+        for worker in workers:
+            cancel = getattr(worker, "cancel", None)
+            if worker is not None and worker.isRunning() \
+                    and callable(cancel):
+                cancel()
+        self._pump_until(
+            lambda: all(not w.isRunning() for w in workers), timeout=5)
+        for worker in workers:
+            wait = getattr(worker, "wait", None)
+            if callable(wait):
+                wait(2000)
+        self.win.worker = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win._gate_queue = []
+        self.win._fanout_run = None
+        self.win.client = self._old_client
+        self.win.workspace = self._old_workspace
+        self.win.plugin_ctx.workspace = self._old_workspace
+        for key, value in self._old_settings.items():
+            if value is None:
+                self.win.settings.pop(key, None)
+            else:
+                self.win.settings[key] = value
+        self.win.mode_combo.setCurrentText("Code")
+        self.win.deck._server = self._real_server
+        self.temp.cleanup()
+
+    def _pump_until(self, pred, timeout=8.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.app.processEvents()
+            if pred():
+                return True
+            time.sleep(0.02)
+        return pred()
+
+    def _handoff(self, task, open_line="nothing open"):
+        return (f"ASKED: {task}\nDONE: did it\nFILES: a.txt\n"
+                f"EVIDENCE: ran the check, it passed\nOPEN: {open_line}")
+
+    def _items(self, *tasks):
+        from forge.fanout import FanOutItem
+        return [FanOutItem(task=t, independent=True,
+                           title=t.split()[0]) for t in tasks]
+
+    # -- refusals at the window ------------------------------------
+    def test_cap_1_fan_out_refuses_with_nothing_running(self):
+        self.win.settings["max_parallel_turns"] = 1
+        self.assertFalse(self.win.fan_out_batch(
+            self._items("a one", "b two")))
+        self.assertEqual(self.win._streams, {})
+        self.assertIsNone(self.win.worker)
+        self.assertIsNone(self.win._fanout_run)
+
+    def test_dependent_batch_refused_at_window(self):
+        from forge.fanout import FanOutItem
+        items = [FanOutItem(task="a one", independent=True, title="a"),
+                 FanOutItem(task="b two", independent=False, title="b")]
+        self.assertFalse(self.win.fan_out_batch(items))
+        self.assertEqual(self.win._streams, {})
+        self.assertIsNone(self.win._fanout_run)
+
+    def test_second_fan_out_refused_while_one_runs(self):
+        self.client.arm("ALPHA", [[("block",),
+                                   ("text", self._handoff("ALPHA task"))]])
+        self.assertTrue(self.win.fan_out_batch(
+            self._items("ALPHA task")))
+        self.assertFalse(self.win.fan_out_batch(
+            self._items("BETA task")))
+        self.client.release["ALPHA"].set()
+        self.assertTrue(self._pump_until(
+            lambda: self.win._fanout_run is None))
+
+    # -- the live proof: three items, cap 2 ------------------------
+    def test_three_items_fan_out_within_cap_and_collect_handoffs(self):
+        self.client.arm("ALPHA", [[("block",),
+                                   ("text", self._handoff(
+                                       "ALPHA task",
+                                       "check the widget wiring"))]])
+        self.client.arm("BETA", [[("block",),
+                                  ("text", self._handoff("BETA task"))]])
+        self.client.arm("GAMMA", [[("text", self._handoff("GAMMA task"))]])
+        items = self._items("ALPHA task", "BETA task", "GAMMA task")
+        self.assertTrue(self.win.fan_out_batch(items))
+        run = self.win._fanout_run
+        self.assertIsNotNone(run)
+        self.assertTrue(self._pump_until(
+            lambda: self.client.entered["ALPHA"].is_set()
+            and self.client.entered["BETA"].is_set()),
+            "first wave never entered its generations")
+        # The cap holds: GAMMA has not started while two are live.
+        self.assertNotIn("GAMMA", self.client.calls)
+        self.client.release["ALPHA"].set()
+        self.assertTrue(self._pump_until(
+            lambda: "GAMMA" in self.client.calls),
+            "queued item never started when a slot freed")
+        self.client.release["BETA"].set()
+        self.assertTrue(self._pump_until(
+            lambda: self.win._fanout_run is None),
+            "fan-out never finished")
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 3)
+        for entry in run.results:
+            self.assertEqual(entry["missing"], [])
+            self.assertFalse(entry["unparsed"])
+        # The keeper filed the one OPEN item from the batch.
+        learnings = self.ws / ".forge" / "learnings.md"
+        self.assertTrue(learnings.exists())
+        self.assertIn("check the widget wiring", learnings.read_text())
+
+    def test_repair_round_runs_in_the_items_conversation(self):
+        # The Knowledge distiller (Nov 11) runs a generation after
+        # every settled turn through the same client — its prompt
+        # carries the turn's text, so without its own tag it would
+        # consume the DELTA script's second reply and the repair
+        # turn would get the default "end". Give the distiller its
+        # own tag, armed first so the router prefers it (its
+        # replies are discarded drafts; the content here is inert).
+        self.client.arm("THE OWNER ASKED",
+                        [[("text", "end")], [("text", "end")]])
+        incomplete = ("ASKED: DELTA task\nDONE: did it\nFILES: a.txt\n"
+                      "EVIDENCE: ran the check, it passed")
+        self.client.arm("DELTA", [[("text", incomplete)],
+                                  [("text", "OPEN: nothing open")]])
+        self.assertTrue(self.win.fan_out_batch(
+            self._items("DELTA task")))
+        run = self.win._fanout_run
+        self.assertTrue(self._pump_until(
+            lambda: self.win._fanout_run is None),
+            "fan-out with repair never finished")
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 1)
+        entry = run.results[0]
+        self.assertEqual(entry["missing"], [])
+        self.assertFalse(entry["unparsed"])
+        self.assertIn("OPEN: nothing open", entry["raw"])
+
+
+class EventTriggerTests(unittest.TestCase):
+    """Manus study M13, Tier 2 #5 (last): local events the shell
+    already observes may PROPOSE an action to the owner through
+    the existing gates — never auto-apply, never run tools on
+    their own, and each proposal is owner-approved or dies."""
+
+    # -- the pure store --------------------------------------------
+
+    def _store(self):
+        from forge import proposals as proposals_mod
+        root = Path(tempfile.mkdtemp())
+        return proposals_mod.ProposalStore(root), root
+
+    def test_seeded_tester_failure_raises_pending_proposal(self):
+        from forge import proposals as proposals_mod
+        store, root = self._store()
+        proposal, created = store.raise_proposal(
+            "tester_failed", "Tester run failed",
+            "Start a fix turn for the failing test(s)",
+            "tests/test_foo.py",
+            detail={"files": "tests/test_foo.py",
+                    "evidence": "assert x == 2 failed"})
+        self.assertTrue(created)
+        self.assertEqual(proposal["kind"], "tester_failed")
+        self.assertEqual(proposal["event"], "Tester run failed")
+        self.assertEqual(proposal["action"],
+                         "Start a fix turn for the failing test(s)")
+        self.assertEqual(proposal["touches"], "tests/test_foo.py")
+        self.assertEqual(proposal["status"], "pending")
+        self.assertIsNotNone(proposal["raised_at"])
+        self.assertIsNone(proposal["decided_at"])
+        self.assertTrue((root / ".forge" / "proposals.json").is_file())
+        self.assertEqual([p["id"] for p in store.pending()],
+                         [proposal["id"]])
+
+    def test_raise_runs_nothing_and_spawns_nothing(self):
+        import ast
+        import threading
+        import forge.proposals as proposals_mod
+        # No background observation by construction: the module
+        # imports no thread, timer, watcher, or subprocess
+        # machinery (checked on the AST, not the prose — the
+        # docstring itself names what it does NOT do).
+        tree = ast.parse(Path(proposals_mod.__file__).read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0]
+                                for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.add((node.module or "").split(".")[0])
+        for forbidden in ("threading", "subprocess", "PySide6",
+                          "PyQt6", "watchdog"):
+            self.assertNotIn(forbidden, imported)
+        before = threading.active_count()
+        store, _root = self._store()
+        store.raise_proposal("run_failed", "Run crash: exited 1",
+                             "Ask the Watch seat to draft a fix",
+                             "the project file(s) behind the alert")
+        self.assertEqual(threading.active_count(), before)
+
+    def test_same_event_does_not_stack(self):
+        store, _root = self._store()
+        first, created_first = store.raise_proposal(
+            "run_failed", "Run crash: exited 1",
+            "Ask the Watch seat to draft a fix", "app.py")
+        second, created_second = store.raise_proposal(
+            "run_failed", "Run crash: exited 1",
+            "Ask the Watch seat to draft a fix", "app.py")
+        self.assertTrue(created_first)
+        self.assertFalse(created_second)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(len(store.pending()), 1)
+
+    def test_decline_kills_it_and_cannot_be_redecided(self):
+        store, _root = self._store()
+        proposal, _ = store.raise_proposal(
+            "tester_failed", "Tester run failed",
+            "Start a fix turn for the failing test(s)", "tests/")
+        decided = store.decide(proposal["id"], False)
+        self.assertEqual(decided["status"], "declined")
+        self.assertIsNotNone(decided["decided_at"])
+        self.assertEqual(store.pending(), [])
+        self.assertIsNone(store.decide(proposal["id"], True))
+        self.assertIsNone(store.decide(proposal["id"], False))
+
+    def test_accept_marks_consumed_and_cannot_be_replayed(self):
+        store, _root = self._store()
+        proposal, _ = store.raise_proposal(
+            "tester_failed", "Tester run failed",
+            "Start a fix turn for the failing test(s)", "tests/")
+        decided = store.decide(proposal["id"], True)
+        self.assertEqual(decided["status"], "accepted")
+        self.assertEqual(store.pending(), [])
+        self.assertIsNone(store.decide(proposal["id"], True))
+
+    def test_undecided_proposal_expires_and_cannot_be_accepted(self):
+        import time
+        from forge import proposals as proposals_mod
+        store, _root = self._store()
+        now = time.time()
+        proposal, _ = store.raise_proposal(
+            "run_failed", "Run crash: exited 1",
+            "Ask the Watch seat to draft a fix", "app.py", now=now)
+        self.assertEqual(len(store.pending(now=now + 10)), 1)
+        self.assertEqual(store.pending(
+            now=now + proposals_mod.PROPOSAL_TTL_SECONDS + 1), [])
+        self.assertIsNone(store.decide(
+            proposal["id"], True,
+            now=now + proposals_mod.PROPOSAL_TTL_SECONDS + 1))
+        records = store._load()
+        self.assertEqual(records[0]["status"], "expired")
+
+    def test_pending_survives_a_restart_but_expired_stays_dead(self):
+        import time
+        from forge import proposals as proposals_mod
+        store, root = self._store()
+        now = time.time()
+        proposal, _ = store.raise_proposal(
+            "tester_failed", "Tester run failed",
+            "Start a fix turn for the failing test(s)", "tests/",
+            now=now)
+        reopened = proposals_mod.ProposalStore(root)
+        self.assertEqual([p["id"] for p in reopened.pending(now=now)],
+                         [proposal["id"]])
+        self.assertEqual(reopened.pending(
+            now=now + proposals_mod.PROPOSAL_TTL_SECONDS + 1), [])
+        again = proposals_mod.ProposalStore(root)
+        self.assertEqual(again._load()[0]["status"], "expired")
+        self.assertEqual(again.pending(
+            now=now + proposals_mod.PROPOSAL_TTL_SECONDS + 1), [])
+
+    def test_unknown_kind_is_refused(self):
+        from forge import proposals as proposals_mod
+        store, _root = self._store()
+        with self.assertRaises(ValueError):
+            store.raise_proposal("file_changed", "a.py changed",
+                                 "do something", "a.py")
+
+    def test_fix_turn_task_quotes_the_evidence(self):
+        from forge import proposals as proposals_mod
+        proposal = proposals_mod.new_proposal(
+            "tester_failed", "Tester run failed",
+            "Start a fix turn for the failing test(s)",
+            "tests/test_foo.py",
+            detail={"files": "tests/test_foo.py",
+                    "evidence": "assert x == 2 failed"})
+        task = proposals_mod.fix_turn_task(proposal)
+        self.assertIn("Fix the failing test(s)", task)
+        self.assertIn("tests/test_foo.py", task)
+        self.assertIn("assert x == 2 failed", task)
+
+    # -- the worker seam -------------------------------------------
+
+    def test_fail_verdict_emits_event_pass_does_not(self):
+        from forge.worker import AgentWorker
+        ws = Path(tempfile.mkdtemp())
+        seen = []
+
+        def on_event(kind, payload):
+            seen.append((kind, payload))
+
+        worker = AgentWorker(
+            _ScriptedClient([]), "fake",
+            [{"role": "user", "content": "go"}], {}, str(ws),
+            skribe_writes=False, on_event=on_event)
+        parsed = {"asked": "run tests", "done": "ran them",
+                  "files": ["tests/test_foo.py"],
+                  "evidence": "assert x == 2 failed",
+                  "open": ["one risk"]}
+        fail_report = ("TESTER REPORT (model: x)\nVERDICT: FAIL\n"
+                       "assert x == 2 failed\nASKED: run tests\n"
+                       "DONE: ran them\nFILES: tests/test_foo.py\n"
+                       "EVIDENCE: assert x == 2 failed\nOPEN: one risk")
+        worker._note_tester_verdict(fail_report, parsed)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], "tester_failed")
+        self.assertEqual(seen[0][1]["files"], "tests/test_foo.py")
+        self.assertIn("assert x == 2 failed", seen[0][1]["evidence"])
+        self.assertIn("one risk", seen[0][1]["open"])
+        pass_report = fail_report.replace("VERDICT: FAIL",
+                                          "VERDICT: PASS")
+        worker._note_tester_verdict(pass_report, parsed)
+        worker._note_tester_verdict("Tester error: model missing",
+                                    parsed)
+        self.assertEqual(len(seen), 1)
+
+    def test_event_callback_failure_never_breaks_the_turn(self):
+        from forge.worker import AgentWorker
+        ws = Path(tempfile.mkdtemp())
+
+        def boom(kind, payload):
+            raise RuntimeError("callback exploded")
+
+        worker = AgentWorker(
+            _ScriptedClient([]), "fake",
+            [{"role": "user", "content": "go"}], {}, str(ws),
+            skribe_writes=False, on_event=boom)
+        parsed = {"asked": "", "done": "", "files": [],
+                  "evidence": "boom", "open": []}
+        worker._note_tester_verdict(
+            "TESTER REPORT (model: x)\nVERDICT: FAIL\nboom", parsed)
+        # No exception escapes: the turn's own verdict handling
+        # is untouched by a failing listener.
+        worker2 = AgentWorker(
+            _ScriptedClient([]), "fake",
+            [{"role": "user", "content": "go"}], {}, str(ws),
+            skribe_writes=False)
+        worker2._note_tester_verdict(
+            "TESTER REPORT (model: x)\nVERDICT: FAIL\nboom", parsed)
+
+
+class EventTriggerWindowTests(unittest.TestCase):
+    """Manus study M13 at the window: a crash alert raises a
+    run proposal and nothing runs; decline kills it; accept
+    drives the existing gates — the Watch fix gate for a run
+    failure (Remember hidden, no rule minted), an ordinary Code
+    turn for a Tester failure."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        import forge.main as main_mod
+        self._main = main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.ws = self.root / "proj"
+        self.ws.mkdir()
+        self.win.store = ConversationStore(self.root / "c.db")
+        self.win.eventlog = EventLog(self.root / "log")
+        self._old_client = self.win.client
+        self.client = _RoutedBlockingClient()
+        self.win.client = self.client
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(self.ws)
+        self.win.plugin_ctx.workspace = str(self.ws)
+        self._old_settings = {
+            key: self.win.settings.get(key, None)
+            for key in ("max_parallel_turns", "auto_summarize",
+                        "skribe_writes", "permission_rules")}
+        self.win.settings["max_parallel_turns"] = 2
+        self.win.settings["auto_summarize"] = False
+        self.win.settings["skribe_writes"] = False
+        self.win.settings["permission_rules"] = []
+        self.win.council_check.setChecked(False)
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win.plan_state = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win._gate_queue = []
+        self.win._gate_presenting = False
+        self.win._gate_owner_worker = None
+        self.win._fanout_run = None
+        self.win._monitor_thread = None
+        self.win.mode_combo.setCurrentText("Code")
+        self.win._run_monitor.begin("")
+        self.win.deck.set_state(monitor={"alerts": [], "watching": False},
+                                proposals=[])
+        (self.ws / "app.py").write_text(
+            "x = 1\nraise ValueError('boom')\n")
+        self.cid = self.win.store.save(
+            None, [{"role": "system", "content": "sys"},
+                   {"role": "user", "content": "seed"}],
+            model=None, project=str(self.ws))
+        self.win.load_conversation(self.cid)
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+        _RecordingApprovalDialog.instances = []
+        _RecordingApprovalDialog.answer = False
+        self._real_dialog = main_mod.ApprovalDialog
+        main_mod.ApprovalDialog = _RecordingApprovalDialog
+
+    def tearDown(self):
+        self._main.ApprovalDialog = self._real_dialog
+        self.client.release_all()
+        workers = [s["worker"] for s in self.win._streams.values()]
+        if self.win.worker is not None:
+            workers.append(self.win.worker)
+        for worker in workers:
+            cancel = getattr(worker, "cancel", None)
+            if worker is not None and worker.isRunning() \
+                    and callable(cancel):
+                cancel()
+        self._pump_until(
+            lambda: all(not w.isRunning() for w in workers), timeout=5)
+        for worker in workers:
+            wait = getattr(worker, "wait", None)
+            if callable(wait):
+                wait(2000)
+        if self.win._monitor_thread is not None:
+            self.win._monitor_thread.wait(3000)
+            self.win._monitor_thread = None
+        self.win.worker = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win._gate_queue = []
+        self.win._fanout_run = None
+        self.win.client = self._old_client
+        self.win.workspace = self._old_workspace
+        self.win.plugin_ctx.workspace = self._old_workspace
+        for key, value in self._old_settings.items():
+            if value is None:
+                self.win.settings.pop(key, None)
+            else:
+                self.win.settings[key] = value
+        self.win.mode_combo.setCurrentText("Code")
+        self.win.deck._server = self._real_server
+        self.temp.cleanup()
+
+    def _pump_until(self, predicate, timeout=8.0):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.02)
+        self.app.processEvents()
+        return predicate()
+
+    def _crash_alert(self):
+        return self.win._run_monitor.observe_line(
+            "Traceback (most recent call last):")
+
+    def _eventlog_kinds(self):
+        kinds = []
+        for path in (self.root / "log").glob("*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    kinds.append(json.loads(line).get("kind"))
+                except ValueError:
+                    pass
+        return kinds
+
+    def test_crash_alert_raises_run_proposal_and_nothing_runs(self):
+        alert = self._crash_alert()
+        self.assertIsNotNone(alert)
+        self.win._note_monitor_alert(alert)
+        pending = self.win.proposals_pending()
+        self.assertEqual(len(pending), 1)
+        proposal = pending[0]
+        self.assertEqual(proposal["kind"], "run_failed")
+        self.assertIn("crash", proposal["event"])
+        self.assertIn("Watch seat", proposal["action"])
+        self.assertEqual(proposal["status"], "pending")
+        self.assertEqual(
+            proposal["detail"]["alert"]["kind"], "crash")
+        self.assertEqual(
+            self.win.deck.snapshot().get("proposals"), pending)
+        self.assertIn("proposal_raised", self._eventlog_kinds())
+        self.assertIsNone(self.win.worker)
+        self.assertIsNone(self.win._monitor_thread)
+        # The same alert again stacks nothing.
+        self.win._note_monitor_alert(alert)
+        self.assertEqual(len(self.win.proposals_pending()), 1)
+
+    def test_stall_and_repeat_alerts_raise_no_proposal(self):
+        self.win._note_monitor_alert(
+            {"id": 1, "kind": "stall", "detail": "no output for 30s",
+             "evidence": "(no output for 30 seconds)", "count": 1,
+             "when": "12:00:00"})
+        self.win._note_monitor_alert(
+            {"id": 2, "kind": "repeat", "detail": "same error x3",
+             "evidence": "boom", "count": 3, "when": "12:00:01"})
+        self.assertEqual(self.win.proposals_pending(), [])
+        self.assertNotIn("proposal_raised", self._eventlog_kinds())
+
+    def test_unknown_kind_is_refused_not_raised(self):
+        self.assertIsNone(self.win.raise_event_proposal(
+            "file_changed", "app.py changed", "do something",
+            "app.py"))
+        self.assertEqual(self.win.proposals_pending(), [])
+
+    def test_decline_kills_proposal_and_runs_nothing(self):
+        alert = self._crash_alert()
+        self.win._note_monitor_alert(alert)
+        proposal = self.win.proposals_pending()[0]
+        before = (self.ws / "app.py").read_bytes()
+        self.assertTrue(self.win.decide_proposal(proposal["id"], False))
+        self.assertEqual(self.win.proposals_pending(), [])
+        self.assertEqual((self.ws / "app.py").read_bytes(), before)
+        self.assertIsNone(self.win.worker)
+        self.assertIsNone(self.win._monitor_thread)
+        self.assertIn("proposal_declined", self._eventlog_kinds())
+        self.assertFalse(self.win.decide_proposal(proposal["id"], True))
+
+    def test_accept_run_proposal_drives_fix_gate_without_remember(self):
+        import time
+        alert = self._crash_alert()
+        self.win._note_monitor_alert(alert)
+        proposal = self.win.proposals_pending()[0]
+        reply = ("FIX-FILE: app.py\n```\nx = 1\n"
+                 "print('fixed instead of raising')\n```\n")
+        self.win.client = _MonitorFixClient(reply)
+        _RecordingApprovalDialog.answer = True
+        self.assertTrue(self.win.decide_proposal(proposal["id"], True))
+        # The fix drafting runs off the GUI thread; pump until
+        # its reply reaches the gate.
+        self.assertTrue(self._pump_until(
+            lambda: len(_RecordingApprovalDialog.instances) >= 1,
+            timeout=8))
+        self._pump_until(
+            lambda: (self.ws / "app.py").read_text() !=
+            "x = 1\nraise ValueError('boom')\n", timeout=8)
+        self.assertEqual(len(_RecordingApprovalDialog.instances), 1)
+        dialog = _RecordingApprovalDialog.instances[0]
+        self.assertEqual(dialog.tool_name, "write_file")
+        # The proposal gate never offers Remember, so no
+        # remembered allow-rule can ever be minted from it.
+        self.assertFalse(dialog.show_remember)
+        self.assertEqual(self.win.settings["permission_rules"], [])
+        self.assertEqual((self.ws / "app.py").read_text(),
+                         "x = 1\nprint('fixed instead of raising')\n")
+        self.assertIn("proposal_accepted", self._eventlog_kinds())
+
+    def test_accept_tester_proposal_starts_an_ordinary_turn(self):
+        self.client.arm("FIXTEST", [[("block",)], [("text", "done")]])
+        self.win._on_worker_event("tester_failed", {
+            "files": "tests/test_foo.py",
+            "evidence": "FIXTEST assert x == 2 failed",
+            "open": "one risk"})
+        pending = self.win.proposals_pending()
+        self.assertEqual(len(pending), 1)
+        proposal = pending[0]
+        self.assertEqual(proposal["kind"], "tester_failed")
+        self.assertTrue(self.win.decide_proposal(proposal["id"], True))
+        self.assertEqual(self.win.proposals_pending(), [])
+        started = self._pump_until(
+            lambda: self.win.worker is not None
+            and self.win.worker.isRunning(), timeout=8)
+        self.assertTrue(started)
+        self.assertIn("Fix the failing test(s)",
+                      getattr(self.win, "_turn_prompt", ""))
+        self.assertIn("FIXTEST", getattr(self.win, "_turn_prompt", ""))
+
+    def test_busy_bench_leaves_accept_pending(self):
+        self.client.arm("BUSY", [[("block",)], [("text", "done")]])
+        self.win.input.setPlainText("BUSY please wait")
+        self.win.send_message()
+        started = self._pump_until(
+            lambda: self.win.worker is not None
+            and self.win.worker.isRunning(), timeout=8)
+        self.assertTrue(started)
+        self.win._on_worker_event("tester_failed", {
+            "files": "", "evidence": "BUSY boom", "open": ""})
+        proposal = self.win.proposals_pending()[0]
+        self.assertFalse(self.win.decide_proposal(proposal["id"], True))
+        self.assertEqual(
+            [p["id"] for p in self.win.proposals_pending()],
+            [proposal["id"]])
+
+    def test_worker_thread_proposal_line_reaches_bench_via_tick(self):
+        # A worker-thread event must never touch the activity
+        # widget directly: its bench-log line waits in the queue
+        # until the GUI-thread watch tick drains it.
+        self.win._on_worker_event("tester_failed", {
+            "files": "", "evidence": "boom", "open": ""})
+        self.assertEqual(len(self.win.proposals_pending()), 1)
+        self.assertTrue(any("Proposal raised" in line
+                            for line in self.win._proposal_log_queue))
+        before = len(self.win._log_lines)
+        self.win._watch_tick()
+        self.assertEqual(self.win._proposal_log_queue, [])
+        self.assertGreater(len(self.win._log_lines), before)
+        self.assertIn("Proposal raised", self.win._log_lines[-1])
+
+    def test_expired_proposal_cannot_be_accepted_at_the_window(self):
+        import time
+        from forge import proposals as proposals_mod
+        store = proposals_mod.ProposalStore(self.ws)
+        old = time.time() - 2 * proposals_mod.PROPOSAL_TTL_SECONDS
+        proposal, _ = store.raise_proposal(
+            "run_failed", "Run crash: exited 1",
+            "Ask the Watch seat to draft a fix", "app.py", now=old)
+        self.assertFalse(self.win.decide_proposal(proposal["id"], True))
+        self.assertEqual(self.win.proposals_pending(), [])
+        self.assertIsNone(self.win.worker)
+
+
+class InboxTests(unittest.TestCase):
+    """Inbox mode (VS Code 1.146, adapted — owner order 2026-11-11):
+    one consolidated view of what needs attention, what's running,
+    and what's ready to merge. Grouping lives in forge/inbox.py
+    (pure, clock-injected); the window and the owner's verbs are
+    thin. The proofs below: group order Working / Needs attention
+    / Ready / On hold / Done; dismiss never stops a running turn
+    and never touches the stored conversation; hold toggles; a
+    snooze hides until its time passes (fake clock — no test waits
+    on the wall clock); one-level Undo; new activity revives a
+    dismissed item while a done-marked one stays done; Ready lists
+    only finished turns that actually have a checkpoint; triage
+    survives a restart through the app-level inbox.json."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from forge import inbox as inbox_mod
+        self.inbox_mod = inbox_mod
+        self.now = 1000000.0
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.ws = root / "proj"; self.ws.mkdir()
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._old_client = self.win.client
+        self.client = _RoutedBlockingClient()
+        self.win.client = self.client
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(self.ws)
+        self.win.plugin_ctx.workspace = str(self.ws)
+        self._old_settings = {
+            key: self.win.settings.get(key, None)
+            for key in ("max_parallel_turns", "auto_summarize",
+                        "skribe_writes")}
+        self.win.settings["max_parallel_turns"] = 2
+        self.win.settings["auto_summarize"] = False
+        self.win.settings["skribe_writes"] = False
+        self.win.council_check.setChecked(False)
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win.plan_state = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win._gate_queue = []
+        self.win._gate_presenting = False
+        self.win._gate_owner_worker = None
+        self.win._inbox_undo = None
+        self.win._inbox_checkpoint_cache = {}
+        self.store = inbox_mod.InboxStore(
+            root / "inbox.json", now_fn=lambda: self.now)
+        self._old_inbox_store = self.win.inbox_store
+        self.win.inbox_store = self.store
+        self._ckpts = {}
+        self.win.mode_combo.setCurrentText("Code")
+        self.cid_a = self.win.store.save(
+            None, [{"role": "system", "content": "sys"},
+                   {"role": "user", "content": "seed A"}],
+            model=None, project=str(self.ws))
+        self.cid_b = self.win.store.save(
+            None, [{"role": "system", "content": "sys"},
+                   {"role": "user", "content": "seed B"}],
+            model=None, project=str(self.ws))
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+
+    def tearDown(self):
+        self.client.release_all()
+        workers = [s["worker"] for s in self.win._streams.values()
+                   if s.get("worker") is not None]
+        if self.win.worker is not None:
+            workers.append(self.win.worker)
+        for worker in workers:
+            cancel = getattr(worker, "cancel", None)
+            if worker is not None and worker.isRunning() \
+                    and callable(cancel):
+                cancel()
+        self._pump_until(
+            lambda: all(not w.isRunning() for w in workers), timeout=5)
+        for worker in workers:
+            wait = getattr(worker, "wait", None)
+            if callable(wait):
+                wait(2000)
+        self.win.worker = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win._gate_queue = []
+        self.win._inbox_undo = None
+        self.win.inbox_store = self._old_inbox_store
+        self.win.client = self._old_client
+        self.win.workspace = self._old_workspace
+        self.win.plugin_ctx.workspace = self._old_workspace
+        for key, value in self._old_settings.items():
+            if value is None:
+                self.win.settings.pop(key, None)
+            else:
+                self.win.settings[key] = value
+        self.win.mode_combo.setCurrentText("Code")
+        self.win.deck._server = self._real_server
+        self.temp.cleanup()
+
+    def _pump_until(self, pred, timeout=8.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.app.processEvents()
+            if pred():
+                return True
+            time.sleep(0.02)
+        return pred()
+
+    def _send(self, cid, text):
+        if self.win.conversation_id != cid:
+            self.win.load_conversation(cid)
+        self.win.input.setPlainText(text)
+        self.win.send_message()
+
+    def _stream(self, sid, cid, title="Conv", workspace="",
+                project="proj", settled=None, gate=None,
+                planning=False, started_at=1000.0, status_text=""):
+        return {"id": sid, "worker": None, "conversation_id": cid,
+                "title": title, "workspace": workspace,
+                "project": project, "model": "stub-model",
+                "mode": "Code", "prompt": "",
+                "started_at": started_at,
+                "last_activity": started_at, "last_push": 0.0,
+                "stream_text": "", "status_text": status_text,
+                "gate": gate, "background": False,
+                "planning": planning, "side": False,
+                "maintenance": False, "settled": settled,
+                "collector": None, "receipts": None}
+
+    def _group(self, streams=(), plan=None, jobs=()):
+        return self.inbox_mod.group_items(
+            list(streams), plan, list(jobs), self.store, self.now,
+            lambda ws: self._ckpts.get(ws, False))
+
+    def _keys(self, groups, group):
+        return [i["key"] for i in groups[group]]
+
+    def _stored_text(self, cid):
+        return "\n".join(str(m.get("content") or "")
+                         for m in self.win.store.load(cid) or [])
+
+    # -- grouping order -------------------------------------------
+
+    def test_grouping_order_working_attention_ready_held_done(self):
+        self._ckpts[str(self.ws)] = True
+        live = self._stream(1, self.cid_a, title="Live turn")
+        gated = self._stream(
+            2, self.cid_b, title="Gated turn",
+            gate={"tool": "write_file", "queued": False})
+        done = self._stream(3, 999, title="Finished turn",
+                            workspace=str(self.ws),
+                            settled=("done", 1000.0))
+        groups = self._group([live, gated, done])
+        self.assertEqual(list(groups.keys()), list(
+            self.inbox_mod.GROUPS))
+        self.assertEqual(self._keys(groups, "working"),
+                         [f"turn:{self.cid_a}"])
+        self.assertEqual(self._keys(groups, "attention"),
+                         [f"turn:{self.cid_b}"])
+        self.assertEqual(self._keys(groups, "ready"), ["turn:999"])
+        self.assertEqual(groups["ready"][0]["promote"], "checkpoints")
+        self.assertEqual(groups["held"], [])
+        self.assertEqual(groups["done"], [])
+        # Triage moves items across groups: hold one, dismiss one.
+        # (The verbs find their item through win.inbox_groups(),
+        # so the stream records must be registered first.)
+        self.win._streams = {1: live, 2: gated, 3: done}
+        self.win.inbox_hold(f"turn:{self.cid_a}")
+        self.win.inbox_dismiss(f"turn:{self.cid_b}")
+        groups = self._group([live, gated, done])
+        self.assertEqual(self._keys(groups, "held"),
+                         [f"turn:{self.cid_a}"])
+        self.assertEqual(self._keys(groups, "done"),
+                         [f"turn:{self.cid_b}"])
+        self.assertEqual(groups["working"], [])
+        self.assertEqual(groups["attention"], [])
+
+    def test_plan_gate_sits_in_attention_with_goldfish_note(self):
+        plan_stream = self._stream(
+            1, self.cid_a, title="Plan turn", planning=True)
+        plan = {"conversation_id": self.cid_a, "title": "Plan turn",
+                "request": "Build the widget", "steps": 2,
+                "goldfish": True, "started_at": 1000.0}
+        groups = self._group([plan_stream], plan=plan)
+        # The plan turn's stream is the plan item, not a second row.
+        self.assertEqual(self._keys(groups, "attention"),
+                         [f"plan:{self.cid_a}"])
+        self.assertEqual(groups["working"], [])
+        self.assertIn("Goldfish",
+                      groups["attention"][0]["detail"])
+        plain = {"conversation_id": self.cid_a, "title": "Plan turn",
+                 "request": "Build the widget", "steps": 2,
+                 "goldfish": False, "started_at": 1000.0}
+        groups = self._group([plan_stream], plan=plain)
+        self.assertNotIn("Goldfish",
+                         groups["attention"][0]["detail"])
+
+    def test_ready_group_only_lists_finished_turns_with_checkpoints(self):
+        done_no_ckpts = self._stream(
+            1, 11, title="Finished, no checkpoints",
+            workspace=str(self.ws), settled=("done", 1000.0))
+        groups = self._group([done_no_ckpts])
+        self.assertEqual(groups["ready"], [])
+        self.assertEqual(self._keys(groups, "done"), ["turn:11"])
+        self._ckpts[str(self.ws)] = True
+        groups = self._group([done_no_ckpts])
+        self.assertEqual(self._keys(groups, "ready"), ["turn:11"])
+        self.assertEqual(groups["done"], [])
+        failed_with_ckpts = self._stream(
+            2, 12, title="Failed, has checkpoints",
+            workspace=str(self.ws), settled=("failed", 1000.0))
+        groups = self._group([done_no_ckpts, failed_with_ckpts])
+        self.assertEqual(self._keys(groups, "ready"), ["turn:11"])
+        self.assertEqual(self._keys(groups, "done"), ["turn:12"])
+
+    def test_parallel_jobs_group_by_state(self):
+        def job(jid, state, kind="code", started=1000.0):
+            return {"id": jid, "line": jid, "state": state,
+                    "job": {"id": jid, "task": f"task {jid}",
+                            "project": str(self.ws),
+                            "model": "stub-model", "kind": kind,
+                            "state": state, "started": started,
+                            "finished": 1100.0}}
+        rows = [job("j1", "running"),
+                job("j2", "done"),
+                job("j3", "done", kind="readonly"),
+                job("j4", "failed")]
+        groups = self._group(jobs=rows)
+        self.assertEqual(self._keys(groups, "working"), ["job:j1"])
+        self.assertEqual(self._keys(groups, "ready"), ["job:j2"])
+        self.assertEqual(groups["ready"][0]["promote"], "merge")
+        self.assertEqual(self._keys(groups, "done"),
+                         ["job:j3", "job:j4"])
+
+    # -- dismiss / hold / snooze / undo ----------------------------
+
+    def test_dismiss_does_not_stop_running_turn_and_session_survives(self):
+        self.client.arm("ALPHA", [[("block",), ("text", "ALPHA DONE")]])
+        self._send(self.cid_a, "ALPHA task")
+        worker = self.win.worker
+        self.assertTrue(self._pump_until(
+            lambda: self.client.entered["ALPHA"].is_set()),
+            "turn never entered its generation")
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "working"),
+            [f"turn:{self.cid_a}"])
+        self.win.inbox_dismiss(f"turn:{self.cid_a}")
+        groups = self.win.inbox_groups()
+        self.assertEqual(groups["working"], [])
+        self.assertEqual(self._keys(groups, "done"),
+                         [f"turn:{self.cid_a}"])
+        # Dismiss is Inbox-level only: the turn keeps running and
+        # the stored conversation is untouched.
+        self.assertTrue(worker.isRunning(),
+                        "dismiss stopped the running turn")
+        self.assertIn("ALPHA task", self._stored_text(self.cid_a))
+        self.client.release["ALPHA"].set()
+        self.assertTrue(self._pump_until(
+            lambda: self.win.worker is None),
+            "turn never settled after dismiss")
+        self.assertIn("ALPHA DONE", self._stored_text(self.cid_a))
+        # Settling is not new activity: still dismissed in Done.
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "done"),
+            [f"turn:{self.cid_a}"])
+
+    def test_hold_moves_to_on_hold_and_toggles_back(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_hold(f"turn:{self.cid_a}")
+        groups = self.win.inbox_groups()
+        self.assertEqual(self._keys(groups, "held"),
+                         [f"turn:{self.cid_a}"])
+        self.assertEqual(groups["working"], [])
+        # The toggle is the way back once Undo's memory is gone.
+        self.win.inbox_hold(f"turn:{self.cid_a}")
+        groups = self.win.inbox_groups()
+        self.assertEqual(self._keys(groups, "working"),
+                         [f"turn:{self.cid_a}"])
+        self.assertEqual(groups["held"], [])
+
+    def test_snooze_hides_then_reappears_after_expiry(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_snooze(f"turn:{self.cid_a}", "1h")
+        groups = self.win.inbox_groups()
+        self.assertEqual(self._keys(groups, "working"), [])
+        self.assertEqual(self._keys(groups, "done"), [])
+        self.now += 1800  # half an hour in: still hidden.
+        groups = self.win.inbox_groups()
+        self.assertEqual(self._keys(groups, "working"), [])
+        self.now += 1801  # past the hour: back, record cleared.
+        groups = self.win.inbox_groups()
+        self.assertEqual(self._keys(groups, "working"),
+                         [f"turn:{self.cid_a}"])
+        self.assertIsNone(self.store.peek(f"turn:{self.cid_a}"))
+
+    def test_snooze_until_next_launch_returns_after_reload(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_snooze(f"turn:{self.cid_a}", "next_launch")
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "working"), [])
+        # A fresh store on the same file is a relaunch: the
+        # until-next-launch snooze is dropped at load.
+        relaunched = self.inbox_mod.InboxStore(
+            Path(self.temp.name) / "inbox.json",
+            now_fn=lambda: self.now)
+        self.assertIsNone(relaunched.peek(f"turn:{self.cid_a}"))
+        self.win.inbox_store = relaunched
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "working"),
+            [f"turn:{self.cid_a}"])
+
+    def test_snooze_until_tomorrow_is_next_0900(self):
+        import time as _time
+        import datetime as _dt
+        now = _dt.datetime(2026, 11, 11, 22, 30).timestamp()
+        until, next_launch = self.inbox_mod.snooze_window(
+            "tomorrow", now)
+        self.assertFalse(next_launch)
+        target = _dt.datetime.fromtimestamp(until)
+        self.assertEqual((target.day, target.hour), (12, 9))
+        morning = _dt.datetime(2026, 11, 11, 7, 0).timestamp()
+        until, _ = self.inbox_mod.snooze_window("tomorrow", morning)
+        self.assertEqual(
+            _dt.datetime.fromtimestamp(until).hour, 9)
+        self.assertEqual(
+            _dt.datetime.fromtimestamp(until).day, 11)
+
+    def test_undo_restores_previous_triage_state(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_dismiss(f"turn:{self.cid_a}")
+        self.assertIsNotNone(self.store.peek(f"turn:{self.cid_a}"))
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "done"),
+            [f"turn:{self.cid_a}"])
+        self.win.inbox_undo()
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "working"),
+            [f"turn:{self.cid_a}"])
+        self.assertIsNone(self.store.peek(f"turn:{self.cid_a}"))
+        # Undo is one level: a second undo is a no-op.
+        self.win.inbox_undo()
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "working"),
+            [f"turn:{self.cid_a}"])
+
+    def test_undo_restores_hold_after_dismiss(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_hold(f"turn:{self.cid_a}")
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "held"),
+            [f"turn:{self.cid_a}"])
+        self.win.inbox_dismiss(f"turn:{self.cid_a}")
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "done"),
+            [f"turn:{self.cid_a}"])
+        self.win.inbox_undo()
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "held"),
+            [f"turn:{self.cid_a}"])
+
+    # -- revival ----------------------------------------------------
+
+    def test_new_activity_revives_dismissed_item(self):
+        old = self._stream(1, self.cid_a, title="Old turn",
+                           started_at=1000.0)
+        self.win._streams = {1: old}
+        self.win.inbox_dismiss(f"turn:{self.cid_a}")
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "done"),
+            [f"turn:{self.cid_a}"])
+        # A new turn in the same conversation is new activity:
+        # the dismiss clears and the item is Working again.
+        new = self._stream(2, self.cid_a, title="New turn",
+                           started_at=2000.0)
+        self.win._streams = {2: new}
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "working"),
+            [f"turn:{self.cid_a}"])
+        self.assertIsNone(self.store.peek(f"turn:{self.cid_a}"))
+
+    def test_mark_done_never_revives_on_new_activity(self):
+        old = self._stream(1, self.cid_a, title="Old turn",
+                           started_at=1000.0)
+        self.win._streams = {1: old}
+        self.win.inbox_mark_done(f"turn:{self.cid_a}")
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "done"),
+            [f"turn:{self.cid_a}"])
+        new = self._stream(2, self.cid_a, title="New turn",
+                           started_at=2000.0)
+        self.win._streams = {2: new}
+        self.assertEqual(
+            self._keys(self.win.inbox_groups(), "done"),
+            [f"turn:{self.cid_a}"])
+        self.assertEqual(self.win.inbox_groups()["working"], [])
+
+    def test_dismissed_item_stays_retrievable_after_stream_pops(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_dismiss(f"turn:{self.cid_a}")
+        # The stream record is gone (a new turn replaced it in
+        # another conversation, or the app restarted): the Done
+        # row still renders from the triage snapshot.
+        self.win._streams = {}
+        groups = self.win.inbox_groups()
+        self.assertEqual(self._keys(groups, "done"),
+                         [f"turn:{self.cid_a}"])
+        self.assertEqual(groups["done"][0]["title"], "Live turn")
+
+    # -- persistence + window --------------------------------------
+
+    def test_triage_survives_restart(self):
+        live = self._stream(1, self.cid_a, title="Live turn")
+        self.win._streams = {1: live}
+        self.win.inbox_dismiss(f"turn:{self.cid_a}")
+        path = Path(self.temp.name) / "inbox.json"
+        self.assertTrue(path.is_file())
+        reloaded = self.inbox_mod.InboxStore(
+            path, now_fn=lambda: self.now)
+        rec = reloaded.peek(f"turn:{self.cid_a}")
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["state"], "dismissed")
+        self.assertEqual(rec["title"], "Live turn")
+
+    def test_window_builds_and_lists_five_groups(self):
+        from PySide6.QtWidgets import QLabel, QListWidget, QPushButton
+        win = self.win.inbox_win
+        self.assertIsNotNone(win)
+        self.win._streams = {
+            1: self._stream(1, self.cid_a, title="Live turn")}
+        win.refresh()
+        heads = [lab.text() for lab in win.findChildren(QLabel)
+                 if lab.text() in ("WORKING", "NEEDS ATTENTION",
+                                   "READY TO MERGE", "ON HOLD", "DONE")]
+        self.assertEqual(heads, ["WORKING", "NEEDS ATTENTION",
+                                "READY TO MERGE", "ON HOLD", "DONE"])
+        lists = win.findChildren(QListWidget)
+        self.assertEqual(len(lists), 5)
+        self.assertEqual(lists[0].count(), 1)
+        self.assertIn("Live turn", lists[0].item(0).text())
+        btns = {b.text() for b in win.findChildren(QPushButton)}
+        for label in ("Go to", "Dismiss from Inbox", "Put on Hold",
+                      "Snooze", "Mark as Done", "Undo", "Approve merge",
+                      "View diff", "Open checkpoints", "Refresh"):
+            self.assertIn(label, btns)

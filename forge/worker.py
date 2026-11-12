@@ -47,6 +47,26 @@ Changes from v1:
   repeats. A success clears the streak. "Failed" means a tool-level
   error (a result starting "Tool error") — a command that ran and
   exited non-zero is the command's failure, not the tool's.
+- Manus study M4 (keep the wrong stuff in): an UNEXPECTED exception
+  escaping _dispatch (a bug, not an authored ToolError) used to reach
+  the model as a bare "Tool error: {exc}" — a KeyError read as just
+  "'config'", with the type and the raising frame existing nowhere,
+  not even the event log. Now the tool_execute_error record carries
+  error_type + a compact traceback tail, and the batch appends a
+  one-line failure detail (type + deepest frame, forge/tools.py
+  failure_detail) to that call's message copy. Authored ToolError
+  messages stay byte-exact — they are the designed diagnostic — and
+  _execute's return shape is untouched.
+- Manus study M6 (anti-rut): the Note 17 identical-result refusal
+  resets its count whenever a repeated call's result CHANGES, so a
+  successful call with a fresh result every time (a poll, a live
+  listing) could repeat all turn steered by nothing. A per-turn
+  rut counter now tracks identical successes regardless of the
+  result digest: a notice rides the result from the third success,
+  and once five successes are on record the call is refused for
+  the rest of the turn (tool_rut_notice / tool_rut_broken). Failures never feed it —
+  the Item 11 fail-streak owns them, and a streaking key is exempt
+  from the break. See RUT_NOTICE_AT / RUT_BREAK_AT.
 - Plugins/skills/projects register extra tools through `extra_tools`:
   {name: (schema, handler, requires_approval, source_label)}.
 - Item #52 per-tool kill switch: the owner's `disabled_tools`
@@ -187,6 +207,7 @@ import os
 import re
 import threading
 import time
+import traceback
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
@@ -199,6 +220,7 @@ from .tools import (TOOL_SCHEMAS, BUILTIN_NAMES, execute_tool, describe_tool,
                     describe_tool_full, describe_tool_short,
                     validate_tool_args)
 from .ollama_client import OllamaClient, client_accepts_cancel
+from . import handoff as handoff_mod
 from . import hooks as hooks_mod, permissions as perms_mod, skribe as skribe_mod
 from . import tools as tools_mod
 from . import production as production_mod
@@ -210,12 +232,14 @@ from . import seats as seats_mod
 from . import create_ext as create_mod
 from . import planning as planning_mod
 from . import goldfish as goldfish_mod
+from . import run_skill as run_skill_mod
 from . import mcp_trust as mcp_trust_mod
 from . import modes as modes_mod
 from . import reference_build as rdb_mod
 from . import repomap as repomap_mod
 from . import snapshots as snapshots_mod
 from . import checkpoints as checkpoints_mod
+from . import testcadence as cadence_mod
 from . import providers as providers_mod
 from . import lightmachine as light_mod
 
@@ -951,6 +975,26 @@ PLAN_REMIND_EVERY = 3
 CYCLE_PROMPT_AT = 40
 LONG_TURN_TOOL = "long_turn_check"
 
+# Manus study M6 (anti-rut): the identical-result refusal (Note 17)
+# only counts a repeat while the RESULT stays byte-identical — a
+# call whose result keeps changing (run_command polling a live
+# directory, `date`, a file another process keeps rewriting) reset
+# its count on every new digest and could repeat forever, steered
+# by nothing until the 40-cycle soft prompt above. The rut guard
+# counts identical SUCCESSES per turn regardless of the result's
+# digest: at RUT_NOTICE_AT successes the notice rides the result
+# (name what you are watching for, or change approach); once
+# RUT_BREAK_AT successes are on record the call is refused
+# outright for the rest of the turn (tool_rut_broken). The thresholds sit later than the
+# fail-streak's second-failure notice on purpose — a repeat
+# SUCCESS can be legitimate work (re-reading a file between its
+# edits), a repeat failure never is. Failed calls never feed this
+# counter: the Item 11 fail-streak owns them, and a key on a
+# failure streak is exempt from the rut break, exactly as it is
+# exempt from the identical-result refusal.
+RUT_NOTICE_AT = 3
+RUT_BREAK_AT = 5
+
 # Item #58: the homework pass is a PHASE, not the turn — the
 # owner's no-tool-cycle-cap rule governs the turn's work, not how
 # long the read pass may run before drafting must begin. A model
@@ -1013,6 +1057,9 @@ class AgentWorker(QThread):
     plan_active = Signal(int)        # a step became the current one
     plan_step_done = Signal(int)     # a step was announced DONE
     plan_turn_done = Signal(object)  # SKRIBE outcome dict at turn end
+    # Manus study M10: a drafted skill landed on disk — the window
+    # reloads extensions so the S6 rule records it disabled at once.
+    skill_drafted = Signal(object)  # {"name", "ok", "message"}
     # Research room (2026-11-11): the run's live state, emitted
     # only from real run events — the gate opening, the run
     # arming, each counted page operation, the report's consulted
@@ -1041,6 +1088,7 @@ class AgentWorker(QThread):
                  contained_docker_image: str = "",
                  goldfish: bool = False,
                  goldfish_budget=None,
+                 offer_save_run_as_skill: bool = False,
                  plugin_ctx=None,
                  skills_dir=None,
                  plugins_dir=None,
@@ -1048,6 +1096,8 @@ class AgentWorker(QThread):
                  research_options: dict | None = None,
                  mcp_trust: dict | None = None,
                  mcp_trust_save=None,
+                 surface_state: dict | None = None,
+                 on_event=None,
                  light_machine: bool = False):
         super().__init__()
         self.client, self.model = client, model
@@ -1079,6 +1129,22 @@ class AgentWorker(QThread):
         # no gate — handlers behave exactly as before.
         self.mcp_trust = mcp_trust
         self.mcp_trust_save = mcp_trust_save
+        # Manus study M13: the window's event callback — the worker
+        # reports a local event it observed (a Tester FAIL verdict)
+        # and the window decides whether it becomes a proposal.
+        # None (bare constructions, every pre-M13 test) means the
+        # event is observed and dropped: the turn itself is
+        # unchanged, and no proposal is ever raised from here.
+        self.on_event = on_event
+        # Manus study M5: the session's tool-surface memory — a
+        # plain dict the window owns and hands to every worker it
+        # builds (the mcp_trust pattern above), so _record_surface
+        # can log a surface CHANGE between turns, not just each
+        # turn's surface in isolation. None (bare constructions,
+        # every pre-M5 test) gives the worker a private dict: the
+        # initial record still lands in the log, change detection
+        # simply has no previous turn to compare against.
+        self.surface_state = surface_state if surface_state is not None else {}
         # Light Machine profile (2026-11-11): the window hands the
         # owner's `light_machine` setting over at construction, the
         # same door as contained_run — read from this attribute at
@@ -1148,6 +1214,12 @@ class AgentWorker(QThread):
                 resolved=council_mod.DEFAULT_REVIEWER_MODEL,
                 reason="reviewer model is not on the governing roster"))
         self._council_done = False
+        # Manus study M7: the turn's validated seat handoffs, for
+        # the keeper pass at run()'s end. Council + goldfish hold
+        # one entry each; tester runs collect in order.
+        self._council_handoff: dict | None = None
+        self._goldfish_handoff: dict | None = None
+        self._tester_handoffs: list[dict] = []
         # Note 12: planning engages only when the window passes
         # planning=True (Plan mode). The gate decision rides an Event
         # exactly like a tool approval — no clock (F8), and cancel()
@@ -1191,6 +1263,11 @@ class AgentWorker(QThread):
         # over, resolved with the bench/tester fallback pattern.
         self.goldfish = bool(goldfish)
         self._goldfish_budget = goldfish_mod.resolve_budget(goldfish_budget)
+        # Manus study M10: offer to save a finished run as a skill
+        # at turn end. Default off (settings
+        # `offer_save_run_as_skill`); off means this flag is False
+        # and the offer path below is never entered.
+        self.offer_save_run_as_skill = bool(offer_save_run_as_skill)
         self._goldfish_result: dict | None = None
         # Item 14: per-turn by construction (one worker per turn) —
         # the pre-edit snapshot is attempted at most once, before the
@@ -1222,12 +1299,24 @@ class AgentWorker(QThread):
         self._plan_steps: list[str] | None = None
         self._plan_done: set[int] = set()
         self._plan_last_remind = 0
+        # Manus study M3: programmatic recitation state, armed at
+        # plan approval — the title is the turn request's first line
+        # and the criteria the approved document's Success criteria
+        # section ("" when the owner's edit is what runs, or the
+        # document has no such section). Read fresh by _generate on
+        # every execution cycle; never cached as a rendered block.
+        self._plan_title = ""
+        self._plan_success = ""
         # Item #58: the in-loop homework pass (Design / Architect /
         # Review / Ask — Plan runs its own inside _plan_phase).
         # run() arms it from the turn's mode; while it is active
         # only read tools are offered, and the first text-only
         # generation ends the pass instead of settling the turn.
         self._homework_active = False
+        # Manus study M5: the PHASE homework pass (_homework_phase)
+        # is active — the in-loop pass above uses _homework_active;
+        # _homework_refusal reads both through _in_homework().
+        self._homework_phase_active = False
         self._homework_mode = ""
         self._homework_reads: list[str] = []
         self._plan_skribe = {"verified": 0, "unverified": 0, "graded": False}
@@ -1245,6 +1334,14 @@ class AgentWorker(QThread):
         # writes the council_review record.
         self._review_stats: dict = {}
         self._verify_fails: dict[str, int] = {}
+        # Manus study M4: the compact failure detail (type + raising
+        # frame) for the MOST RECENT _execute dispatch exception, or
+        # None. _execute stashes it where the traceback is alive;
+        # _execute_call_batch's tail appends it to that call's tool
+        # MESSAGE copy — the model reads the type and the failing
+        # line, while _execute's return (and every consumer of it)
+        # keeps the exact pre-M4 shape.
+        self._failure_detail: str | None = None
         # C3: this turn's file-change tally ({path: changed
         # lines}) for the auto-test cadence — fed in
         # _execute_call_batch beside the SKRIBE queue, reset per
@@ -1300,6 +1397,60 @@ class AgentWorker(QThread):
                   approved=approved, waited_seconds=waited)
         return approved
 
+    def _maybe_offer_save_run_as_skill(self, handoffs):
+        """Manus study M10: at the end of a completed plan, offer
+        to draft the run as a skill. The draft is programmatic
+        (run_skill.build_run_skill_draft over M8's trajectory —
+        goal, plan steps, files touched, errors, open items), the
+        ask rides the same approval bridge as the long-turn prompt
+        (untimed, F8; Stop releases it as a decline), and an
+        acceptance writes through create_skill, which refuses a
+        taken name — run_skill.draft_skill suffixes instead of
+        overwriting. Nothing here ever raises into the turn: any
+        failure is logged and the turn settles as usual."""
+        try:
+            traj = context_mod.build_trajectory(
+                self.messages, plan_steps=self._plan_steps,
+                plan_done=self._plan_done, title=self._plan_title,
+                handoffs=handoffs)
+            draft = run_skill_mod.build_run_skill_draft(
+                traj, success=getattr(self, "_plan_success", ""))
+            steps = (traj.get("plan_status") or {}).get("steps") or []
+            if not draft.get("name") or not steps:
+                return
+        except Exception as exc:
+            self._log("save_skill_offer_failed", detail=str(exc)[:300])
+            return
+        description = (
+            f"Save this run as a skill? The draft '{draft['name']}' — "
+            f"{draft['description']} — would be written to the skill "
+            f"directory as a new DISABLED skill. Edit it in Customize "
+            f"before it can load; declining writes nothing.")
+        self.status.emit("Paused — save this run as a skill?…")
+        decision = {"approved": False}
+        event = threading.Event()
+        self._decision, self._decision_event = decision, event
+        asked_at = time.time()
+        self.approval_needed.emit(
+            run_skill_mod.SAVE_SKILL_TOOL,
+            {"name": draft["name"]}, description, None)
+        event.wait()  # F8: NO timeout — paused on the human clock.
+        waited = round(time.time() - asked_at, 2)
+        self._decision = self._decision_event = None
+        approved = bool(decision["approved"])
+        self._log("save_skill_offer", skill=draft["name"],
+                  approved=approved, waited_seconds=waited)
+        if not approved:
+            return
+        try:
+            ok, used, message = run_skill_mod.draft_skill(
+                self.skills_dir, draft, create_mod.create_skill)
+        except Exception as exc:
+            ok, used, message = False, draft["name"], str(exc)[:300]
+        self._log("save_skill_drafted", skill=used, ok=ok)
+        self.skill_drafted.emit({"name": used, "ok": ok,
+                                 "message": message})
+
     def resolve_plan(self, action: str, steps: list[str] | None = None,
                      comment: str | None = None):
         """The owner's answer at the Note 12 gate: "approve" (with
@@ -1353,30 +1504,70 @@ class AgentWorker(QThread):
         visible = set(perms_mod.mode_visible_tools(
             mode, [s["function"]["name"] for s in all_schemas], classes))
         offered = [s for s in all_schemas if s["function"]["name"] in visible]
-        if mode == "research" and (not self._research_approved
-                                   or self._research_web_off()):
-            # The research plan gate, at the offer seam: until the
-            # owner approves a plan in this conversation, the
-            # browse verbs are not offered at all — the model
-            # cannot call what it cannot see. (mode_allows admits
-            # them by name for the mode; THIS is the turn-state
-            # half of the gate, and _research_refusal is its
-            # per-call backstop.)
-            offered = [s for s in offered
-                       if not s["function"]["name"].startswith("browse_")]
+        # Manus study M5: the research plan gate used to ALSO live
+        # here — until _research_approved, the browse verbs were
+        # stripped from this offer, so the surface changed
+        # mid-session at the gate. The gate now lives ONLY at
+        # execution (_research_refusal, the per-call backstop that
+        # always existed): the verbs stay in the definitions for
+        # the whole session and a pre-approval call is refused in
+        # the transcript, before permissions and approval, exactly
+        # as it was when it arrived unoffered.
         return offered
 
     def _read_schemas(self):
-        """Item #58: the homework pass's offer set — the mode's
-        visible schemas cut to READ-class tools only. A mode's
-        restricted write tools (write_file for plan documents,
-        design artifacts, review reports) are NOT offered during
-        homework: the pass gathers facts, it does not draft. The
-        kill switch already filtered inside _schemas, so a
-        disabled read tool is absent here too."""
+        """Item #58: the mode's visible schemas cut to READ-class
+        tools only. Manus study M5 retired this from the OFFER
+        path: homework generations are now offered the mode's full
+        surface (_schemas) so the surface never changes mid-turn,
+        and the pass's read-only discipline is enforced at
+        execution instead (_homework_refusal). The method stays as
+        the read-class view of the surface — the definition of
+        what homework may execute."""
         classes = self.permissions.get("classes", {})
         return [s for s in self._schemas()
                 if perms_mod.tool_class(s["function"]["name"], classes) == "read"]
+
+    def _surface_fingerprint(self, schemas=None) -> str:
+        """Manus study M5: the canonical fingerprint of the tool
+        surface this worker offers — a hash of the schemas'
+        deterministic JSON (sort_keys, the M1 discipline), so two
+        surfaces are the same surface iff their bytes are."""
+        if schemas is None:
+            schemas = self._schemas()
+        blob = json.dumps(schemas, sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()
+
+    def _record_surface(self):
+        """Manus study M5: record this turn's tool surface in the
+        event log, against the session's shared surface memory
+        (surface_state). The first turn of a session logs the
+        baseline (tool_surface); a later turn whose surface
+        differs — which can only mean the OWNER changed the
+        configuration between turns (mode, a plugin or skill
+        toggle, the tool kill switch, an MCP/plugin set change:
+        the worker's inputs are fixed at construction) — logs
+        tool_surface_changed with both fingerprints. Forge-internal
+        state never reaches this function's inputs: phases and the
+        budget cannot change what _schemas returns. The one
+        mid-turn transition — the Plan gate's promotion to Code
+        permissions — is caused by the owner's approval, and its
+        site calls this function again so the change is logged
+        there too."""
+        schemas = self._schemas()
+        fingerprint = self._surface_fingerprint(schemas)
+        mode = self.permissions.get("mode", "code")
+        previous = self.surface_state.get("fingerprint")
+        if previous is None:
+            self._log("tool_surface", fingerprint=fingerprint,
+                      tools=len(schemas), mode=mode)
+        elif previous != fingerprint:
+            self._log("tool_surface_changed", previous=previous,
+                      fingerprint=fingerprint, tools=len(schemas),
+                      mode=mode)
+        self.surface_state["fingerprint"] = fingerprint
+        self.surface_state["mode"] = mode
+        self.surface_state["tools"] = len(schemas)
 
     def _record_reads(self, tool_calls, results_start: int) -> list[str]:
         """Item #58: which of a batch's calls actually READ
@@ -1633,7 +1824,7 @@ class AgentWorker(QThread):
                                          self._light_on())
 
     def _generate(self, schemas, num_predict=None, phase="main",
-                  cycle=None) -> tuple[str, list]:
+                  cycle=None, recite_plan=False) -> tuple[str, list]:
         """One streamed generation against the given tool schemas.
         Returns (text, tool_calls). The planning capture passes an
         EMPTY schema list — with no tools offered, the model cannot
@@ -1692,8 +1883,35 @@ class AgentWorker(QThread):
         if phase == "grading":
             _keep_alive = self._seat_keep_alive(self.model, _keep_alive)
         self._prepare_residency(self.model)
+        # Manus study M3: programmatic recitation. Only the main
+        # loop passes recite_plan — homework, drafting, Goldfish and
+        # council generations assemble exactly as before — and only
+        # while an approved plan is executing with steps still open
+        # (the D39 reminder's gate). The block is built FRESH here,
+        # from the live checklist state (_plan_steps / _plan_done,
+        # the same state the STEP DONE ticks update), and rides a
+        # COPY of the history as the request's last message:
+        # self.messages — the stored conversation — is never given
+        # the block, so it cannot accumulate across cycles, cannot
+        # be folded (M2's fold works on the stored history), and
+        # leaves M1's stable prefix at the head untouched. This is
+        # the one assembly point for local and provider turns alike:
+        # both stream through this client's chat_stream.
+        request_messages = self.messages
+        _plan_steps = getattr(self, "_plan_steps", None)
+        if (recite_plan and _plan_steps
+                and len(self._plan_done) < len(_plan_steps)):
+            request_messages = [*self.messages, {
+                "role": "system",
+                "content": planning_mod.plan_recitation_text(
+                    _plan_steps, self._plan_done,
+                    title=getattr(self, "_plan_title", ""),
+                    success=getattr(self, "_plan_success", ""))}]
+            self._log("plan_recited",
+                      done=len(self._plan_done),
+                      total=len(_plan_steps))
         for event in self.client.chat_stream(
-                self.model, self.messages, options, schemas,
+                self.model, request_messages, options, schemas,
                 **self._stream_cancel_kwargs(_keep_alive)):
             if self._cancel:
                 break
@@ -1833,9 +2051,19 @@ class AgentWorker(QThread):
         read; whether the project is EMPTY) as a system note —
         except "failed", where the turn is already over."""
         self.status.emit("Reading the project first…")
-        schemas = self._read_schemas()
+        # Manus study M5: the pass is offered the mode's full
+        # surface, exactly like every other generation of the turn
+        # (it used to be cut to read-class here); the read-only
+        # discipline is enforced at execution for the length of
+        # the pass (_homework_refusal reads _homework_phase_active
+        # through _in_homework).
+        self._homework_phase_active = True
+        schemas = self._schemas()
         call_history: dict = {}
         fail_history: dict = {}
+        # Manus study M6: the pass's own rut counter, scoped like
+        # the pass's other repeat-guard dicts above.
+        rut_history: dict = {}
         reads: list[str] = []
         unusable = 0
         corrected = False
@@ -1866,7 +2094,8 @@ class AgentWorker(QThread):
             self.messages.append(assistant_message)
             if tool_calls:
                 start = len(self.messages)
-                self._execute_call_batch(tool_calls, call_history, fail_history)
+                self._execute_call_batch(tool_calls, call_history, fail_history,
+                                         rut_history)
                 reads.extend(self._record_reads(tool_calls, start))
                 if self._cancel:
                     break
@@ -1911,6 +2140,10 @@ class AgentWorker(QThread):
             self._log("homework_done", mode=mode, reads=len(reads),
                       files=len(self._project_files()),
                       outcome=outcome["outcome"])
+        # Manus study M5: the pass is over — the execution gate
+        # lifts with it (the drafting generations that follow run
+        # under the ordinary mode permissions again).
+        self._homework_phase_active = False
         return outcome
 
     def _plan_clarify_choice(self) -> tuple[str, str]:
@@ -2138,6 +2371,19 @@ class AgentWorker(QThread):
             self.status.emit("Plan killed — nothing was executed.")
             return False
         self._plan_steps = approved
+        # Manus study M3: arm the recitation state from the same
+        # sources the gate itself used — the request that opened the
+        # turn (its first line, the notes-file clip) for the title,
+        # and the approved document's Success criteria, but only
+        # while the approved steps are the drafted ones: an owner
+        # edit replaces the checklist, and a stale document must not
+        # outrank the owner's own text (the work_instruction rule
+        # below, applied to the criteria alike).
+        _req_lines = str(self._turn_request or "").strip().splitlines()
+        self._plan_title = _req_lines[0][:80] if _req_lines else ""
+        self._plan_success = (
+            planning_mod.success_criteria(document or "")
+            if approved == list(steps) else "")
         # D39: the cadence counts from the approval cycle — the loop
         # is about to start at cycle 0, and the gate exchange itself
         # just presented the plan, so the first reminder lands
@@ -2148,6 +2394,12 @@ class AgentWorker(QThread):
         # (The window built this worker's permissions dict for this
         # turn only; the mode combo on screen does not change.)
         self.permissions = {**self.permissions, "mode": "code"}
+        # Manus study M5: the promotion changes the offered surface
+        # mid-turn — legitimately, because the OWNER's gate
+        # approval causes it — so it goes on the record as a
+        # surface change at the moment it happens, like any other
+        # owner-caused change (see _record_surface).
+        self._record_surface()
         # Item #58: the document is the working instruction — but
         # only while the approved steps are the drafted ones. An
         # owner edit replaces the checklist, and a stale document
@@ -2394,6 +2646,65 @@ class AgentWorker(QThread):
             "running", "Run started — working the approved plan.")
         return True
 
+    def _note_tester_verdict(self, result: str, parsed: dict) -> None:
+        """Manus study M13: report a Tester FAIL verdict as a local
+        event. Only a FAIL is an event — the verdict is read by
+        the same contract reader the cadence tab uses
+        (testcadence.verdict_of), so a PASS, an error, or an
+        incomplete report reports nothing. The callback is the
+        window's; a callback that raises must never break the
+        turn, so it is caught and logged. No tool runs here, no
+        turn starts here — the event is a report, and what
+        happens next is the owner's decision at the proposal."""
+        if cadence_mod.verdict_of(result) != "fail":
+            return
+        if self.on_event is None:
+            return
+        files = parsed.get("files") or []
+        open_items = parsed.get("open") or []
+        evidence = str(parsed.get("evidence") or "").strip()
+        if not evidence:
+            lines = [ln for ln in str(result or "").splitlines()
+                     if ln.strip()][:8]
+            evidence = "\n".join(lines)
+        try:
+            self.on_event("tester_failed", {
+                "files": "\n".join(str(f) for f in files),
+                "open": "\n".join(str(o) for o in open_items),
+                "evidence": evidence[:1000]})
+        except Exception as exc:
+            self._log("event_emit_failed", event_kind="tester_failed",
+                      detail=str(exc)[:200])
+
+    def _in_homework(self) -> bool:
+        """Manus study M5: a homework pass is in progress — either
+        the phase pass (_homework_phase, Plan/Research) or the
+        in-loop pass (the document/answer modes, until the first
+        text-only generation ends it)."""
+        return bool(self._homework_active or self._homework_phase_active)
+
+    def _homework_refusal(self, name: str) -> str | None:
+        """Manus study M5: the homework pass's execution gate, or
+        None when the call may proceed. The pass gathers facts; it
+        does not draft. The tools stay in the offered definitions
+        for the whole turn (the offer no longer shrinks for the
+        pass), so a non-read call that arrives anyway — a
+        synthesized text-shim call, a model ignoring the pass's
+        instruction — is refused HERE, in the transcript, before
+        permissions and approval, and never executes. Read-class
+        calls proceed exactly as they did when they were the only
+        ones offered."""
+        if not self._in_homework():
+            return None
+        classes = self.permissions.get("classes", {})
+        if perms_mod.tool_class(name, classes) == "read":
+            return None
+        return (f"Refused: {name} is not available during the "
+                "homework pass — this pass is read-only while the "
+                "project's facts are gathered, and the tool becomes "
+                "available again as soon as the pass ends. Read "
+                "what you need, then answer in text.")
+
     def _research_refusal(self, name: str) -> str | None:
         """The per-call backstop for Research's browse verbs, or
         None when the call may proceed: the gate (no browsing
@@ -2574,6 +2885,16 @@ class AgentWorker(QThread):
                       rounds=result["rounds"], revised=result["revised"],
                       findings=len(result["findings"]),
                       skipped=result["skipped"] or None)
+            # Manus study M7: the parsed findings ARE the goldfish
+            # handoff — already structured by parse_findings, so no
+            # repair round is needed. The keeper reads them at the
+            # turn's end.
+            self._goldfish_handoff = {
+                "seat": "goldfish",
+                "parsed": {"asked": "", "done": "", "files": [],
+                           "evidence": "", "open": []},
+                "missing": [], "unparsed": False,
+                "findings": list(result["findings"])}
             return current_steps, result, current_text
         except Exception as exc:  # the pass must never eat the plan
             self._log("goldfish_failed", error=str(exc)[:300])
@@ -2658,6 +2979,21 @@ class AgentWorker(QThread):
                                      force=True)
         if plan is None:
             return False
+        # Manus study M2: archive the FULL span before the summarizer
+        # render clips it. If the archive cannot be written, the fold
+        # does NOT happen — the turn falls back to the classic wrap-up
+        # with its history untouched; content is never dropped
+        # without a pointer. No workspace in scope = exactly the
+        # pre-M2 path (no archive, no pointer).
+        archive_rel = None
+        if self.workspace:
+            try:
+                archive_rel = context_mod.archive_span(
+                    plan["span"], self.workspace)
+            except Exception as exc:
+                self._log("context_fold_mid_turn_failed",
+                          error=f"archive: {str(exc)[:160]}")
+                return False
         request = context_mod.summary_messages(plan["span"], num_ctx)
         options = {"temperature": 0.3,
                    "num_ctx": self.options.get("num_ctx", 8192)}
@@ -2681,17 +3017,129 @@ class AgentWorker(QThread):
             return False
         folded, count = context_mod.apply_fold(
             self.messages, plan,
-            strip_text_tool_calls("".join(chunks)))
+            strip_text_tool_calls("".join(chunks)),
+            archive_rel=archive_rel)
         if folded is None:
             return False
         self.messages = folded
         self._mid_turn_folds += 1
         self._log("context_fold_mid_turn", folded=count,
+                  archive=archive_rel,
                   folds=self._mid_turn_folds,
                   estimate=context_mod.total_estimate(self.messages,
                                                       schemas),
                   num_ctx=num_ctx)
         return True
+
+    def _write_trajectory(self, num_ctx, schemas) -> bool:
+        """Manus study M8 — the saturation backstop. When the
+        mid-turn fold could not land and older history exists that
+        a fold would have covered (plan_fold finds a span),
+        replace that span with a program-built trajectory summary
+        (fixed fields only, never invented) and store the same
+        dict beside the M2 archives. Returns True when the
+        replacement landed. Returns False — and the caller wraps
+        up over the untouched history — when there is nothing
+        foldable (split_fold's rules) or the replacement itself
+        would not shrink. A failed archive store never blocks the
+        replacement: the trajectory message in the history IS the
+        record; the file is its durable copy."""
+        plan = context_mod.plan_fold(self.messages, num_ctx, schemas,
+                                     force=True)
+        if plan is None:
+            return False
+        handoffs = ([self._goldfish_handoff]
+                    if self._goldfish_handoff else []) \
+            + list(self._tester_handoffs) \
+            + ([self._council_handoff]
+               if self._council_handoff else [])
+        data = context_mod.build_trajectory(
+            self.messages, plan_steps=self._plan_steps,
+            plan_done=self._plan_done, title=self._plan_title,
+            handoffs=handoffs)
+        replaced = context_mod.trajectory_replacement(
+            self.messages, plan, data)
+        if replaced is None:
+            return False
+        self.messages = replaced
+        stored = None
+        if self.workspace:
+            try:
+                stored = context_mod.store_trajectory(
+                    self.workspace, data)
+            except Exception as exc:
+                self._log("context_trajectory_store_failed",
+                          error=str(exc)[:160])
+        status = data.get("plan_status") or {}
+        self._log("context_trajectory",
+                  stored=stored,
+                  files=len(data.get("files_changed") or []),
+                  errors=len(data.get("errors") or []),
+                  open_items=len(data.get("open_items") or []),
+                  plan_done=len(status.get("done") or []),
+                  plan_total=status.get("total") or 0)
+        return True
+
+    def _restore_trajectory_plan(self):
+        """Manus study M8 — a resumed turn re-arms the live
+        checklist from the newest trajectory message on record, so
+        the first generation starts oriented (M3 recitation and
+        STEP DONE ticking resume from the recorded state instead
+        of from nothing). Only when the recorded plan still has
+        open steps — a finished plan re-arms nothing — and only
+        the live state: _plan_phase (Plan mode) overwrites this
+        with its own approved plan, so the restore never competes
+        with a fresh approval. The message is refreshed at every
+        turn end (_refresh_trajectory), so the snapshot the next
+        turn restores from is the latest known state, not the
+        state at saturation."""
+        latest = context_mod.latest_trajectory(self.messages)
+        if latest is None:
+            return
+        data = latest.get("trajectory_data") or {}
+        status = data.get("plan_status") or {}
+        steps = status.get("steps") or []
+        done = status.get("done") or []
+        if not steps or len(done) >= len(steps):
+            return
+        self._plan_steps = list(steps)
+        self._plan_done = {int(i) - 1 for i in done
+                           if 1 <= int(i) <= len(steps)}
+        self._plan_title = str(status.get("title") or "")
+        self._log("trajectory_plan_restored",
+                  done=len(self._plan_done), total=len(steps))
+
+    def _refresh_trajectory(self):
+        """Manus study M8 — at turn end, refresh the newest
+        trajectory message in place to the plan's current state, so
+        the snapshot a later turn restores from never goes stale
+        while the plan evolves. Only when this turn had a live
+        plan; a turn without one leaves the record as the history
+        it is. Never raises, never blocks the settle."""
+        if self._plan_steps is None:
+            return
+        latest = context_mod.latest_trajectory(self.messages)
+        if latest is None:
+            return
+        try:
+            handoffs = ([self._goldfish_handoff]
+                        if self._goldfish_handoff else []) \
+                + list(self._tester_handoffs) \
+                + ([self._council_handoff]
+                   if self._council_handoff else [])
+            data = context_mod.build_trajectory(
+                self.messages, plan_steps=self._plan_steps,
+                plan_done=self._plan_done, title=self._plan_title,
+                handoffs=handoffs)
+            idx = self.messages.index(latest)
+            self.messages[idx] = context_mod.trajectory_message(data)
+            if self.workspace:
+                try:
+                    context_mod.store_trajectory(self.workspace, data)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _run_goldfish_stage(self, stage: str, plan_text: str,
                             contents: dict) -> str | None:
@@ -2808,7 +3256,8 @@ class AgentWorker(QThread):
         self._log("owner_revision", steps=len(steps))
         return text, steps
 
-    def _execute_call_batch(self, tool_calls, call_history, fail_history):
+    def _execute_call_batch(self, tool_calls, call_history, fail_history,
+                            rut_history=None):
         """THE per-call pipeline (extracted from the turn loop so
         Plan's homework phase funnels through the very same seams):
         validation, the per-tool kill switch, pre-tool hooks, the
@@ -2816,7 +3265,13 @@ class AgentWorker(QThread):
         rules, the approval wait (F8), execution, post-edit
         feedback, receipts, SKRIBE queueing and the tool messages
         themselves. call_history / fail_history are the turn's
-        repeat-guard dicts, shared by every batch of the turn."""
+        repeat-guard dicts, shared by every batch of the turn.
+        rut_history (Manus study M6) is the turn's identical-
+        SUCCESS counter; direct one-batch callers may omit it and
+        get a batch-local counter, exactly as if their batch were
+        the whole turn."""
+        if rut_history is None:
+            rut_history = {}
         for call in tool_calls:
             fn = call.get("function", {})
             name, args = fn.get("name", ""), fn.get("arguments", {}) or {}
@@ -2920,6 +3375,28 @@ class AgentWorker(QThread):
                           "result each time. Repeating it will not change anything — "
                           "use the result you have, change your approach, or finish.")
                 self._log("tool_loop_blocked", tool=name, repeats=seen[0])
+            elif (rut_history.get(call_key, 0) >= RUT_BREAK_AT
+                    and call_key not in fail_history):
+                # Manus study M6: the hard rut-break. This exact
+                # call has already SUCCEEDED RUT_BREAK_AT times
+                # this turn — with results that kept changing, or
+                # the identical-result refusal above would own it
+                # — and the notices on the last successes did not
+                # move the model off it. Refuse it for the rest
+                # of the turn as a plain tool result (the M5
+                # gating shape: refused, never vanished), so the
+                # rut ends here instead of at the soft cycle
+                # prompt. A key on a failure streak is exempt —
+                # the fail-streak owns it, as with the refusal
+                # above.
+                result = (f"Tool notice: you have already run this exact {name} call "
+                          f"{rut_history[call_key]} times in this turn and it "
+                          "succeeded every time — that is a rut, so the shell "
+                          "will not run it again this turn. Change your "
+                          "approach (different arguments or a different "
+                          "tool), or finish.")
+                self._log("tool_rut_broken", tool=name,
+                          successes=rut_history[call_key])
             elif (research_refusal := self._research_refusal(name)) is not None:
                 # Write/Research modes: the gate/budget backstop —
                 # a browse call that arrives before approval (or
@@ -2930,6 +3407,27 @@ class AgentWorker(QThread):
                 self._log("research_block", tool=name,
                           ops=self._research_page_ops,
                           cap=self._research_cap)
+            elif (homework_refusal := self._homework_refusal(name)) is not None \
+                    and mode_ok:
+                # Manus study M5: the homework pass's gate — since
+                # M5 the pass is offered the full surface, so a
+                # non-read call can arrive; it is refused here,
+                # before permissions and approval, with the plain
+                # reason as its result, and never executes. The
+                # gate fires only for calls the mode itself would
+                # allow (write_file into a mode-legal path,
+                # mid-pass); when the mode already refuses the
+                # call, the mode's own refusal speaks — it carries
+                # the mode-specific wording the model and the
+                # pinned tests rely on ("ASK (read-only)"), and
+                # the homework text must not shadow it. (M5
+                # follow-up fixed in the M11 copy: the homework
+                # branch used to fire first unconditionally, so
+                # an Ask-mode write came back as a homework
+                # refusal and PermissionTests' Ask test failed on
+                # the pristine M10/M11 base.)
+                result = homework_refusal
+                self._log("homework_block", tool=name)
             elif not mode_ok:
                 result = mode_msg
                 self._log("mode_block", tool=name, mode=self.permissions.get("mode", "code"))
@@ -3110,6 +3608,34 @@ class AgentWorker(QThread):
                         self._log("tool_fail_notice", tool=name, failures=fails)
                 else:
                     fail_history.pop(call_key, None)
+            if executed:
+                # Manus study M6: count identical SUCCESSES for
+                # the rut guard — digest-independent, which is the
+                # whole point: call_history above resets its count
+                # on a changed result, this counter does not, so a
+                # call that succeeds with a fresh result every time
+                # still accumulates. Per-key counting also catches
+                # an alternating A,B,A,B rut whose results vary (an
+                # A,B rut with steady results is already refused by
+                # the identical-result guard). Failed calls are
+                # neither counted nor a reset: the fail-streak owns
+                # them, and if the call recovers its success count
+                # resumes where it left off — the two guards never
+                # mark the same result. From RUT_NOTICE_AT on, the
+                # notice rides the result; the call itself ran in
+                # full, exactly like the fail-streak's steering.
+                if not str(result).startswith("Tool error"):
+                    rut = rut_history.get(call_key, 0) + 1
+                    rut_history[call_key] = rut
+                    if rut >= RUT_NOTICE_AT:
+                        result = str(result) + (
+                            f"\nTool notice: this exact {name} call has now "
+                            f"succeeded {rut} times in this turn. If you are "
+                            "repeating it because its result keeps changing, "
+                            "say what you are watching for and what will "
+                            "make you stop; otherwise change your approach "
+                            "or finish.")
+                        self._log("tool_rut_notice", tool=name, successes=rut)
             # Note 20: a verifiable write joins the SKRIBE queue;
             # it is graded in one batch before the turn finishes.
             written = skribe_mod.successful_write(name, args, result, executed)
@@ -3146,6 +3672,26 @@ class AgentWorker(QThread):
             # same shell receipts — compact, and shell-authored.
             self._turn_receipts.append(receipt_line)
             self.receipt.emit(receipt_line)
+            # Manus study M7: a tester run's report is a seat
+            # handoff — parse it (the plugin already repaired it
+            # once inside the tool call) and keep it for the keeper
+            # pass. The result text itself is untouched here.
+            if name == "run_tester" and executed \
+                    and isinstance(result, str) \
+                    and result.startswith("TESTER REPORT"):
+                parsed, missing, _attempted = handoff_mod.parse_handoff(
+                    result)
+                self._tester_handoffs.append(
+                    {"seat": "tester", "parsed": parsed,
+                     "missing": missing, "unparsed": bool(missing),
+                     "raw": result})
+                # Manus study M13: a FAIL verdict is a local event
+                # the owner may want to act on — report it to the
+                # window (which raises a proposal, or nothing when
+                # no callback is wired). A PASS, an error, or an
+                # incomplete report is not an event: nothing is
+                # reported, and the turn is byte-identical.
+                self._note_tester_verdict(result, parsed)
             # Audit B18: only the MESSAGE copy of an
             # oversized result is digested — every consumer
             # above (loop detection, receipts, SKRIBE) has
@@ -3161,6 +3707,19 @@ class AgentWorker(QThread):
             # detection, receipts, SKRIBE) and the event log have
             # already seen the tool's raw text.
             content = _untrusted_frame(name, content)
+            # Manus study M4: an UNEXPECTED dispatch failure's
+            # detail line (exception type + raising frame, stashed
+            # by _execute where the traceback was alive) joins the
+            # message copy here, on the same terms as the framing
+            # above — the model reads what kind of failure it hit
+            # and where, while the result text every consumer above
+            # keyed on keeps its exact shape. The stash is consumed
+            # (cleared) for EVERY call, executed or not, so a detail
+            # can never leak onto a later call's message.
+            detail = getattr(self, "_failure_detail", None)
+            self._failure_detail = None
+            if executed and detail and isinstance(content, str):
+                content = content + "\n" + detail
             self.messages.append({"role": "tool", "tool_name": name,
                                   "content": content})
 
@@ -3180,6 +3739,10 @@ class AgentWorker(QThread):
             # identical (tool, args) key. Presence in this dict means
             # the key's last executed result was a tool error.
             fail_history: dict[str, int] = {}
+            # Manus study M6: identical SUCCESSFUL executions per
+            # (tool, args) key, digest-independent — the rut guard's
+            # counter (see RUT_NOTICE_AT / RUT_BREAK_AT).
+            rut_history: dict[str, int] = {}
             stop_bounces = 0
             self._skribe_queue = skribe_mod.WriteQueue()
             self._turn_changes = {}
@@ -3194,6 +3757,9 @@ class AgentWorker(QThread):
             # clean — none of them may leak from a previous turn.
             self._denial_history = {}
             self._verify_fails = {}
+            # Manus study M4: a fresh turn carries no stale failure
+            # detail from a previous turn's last execution.
+            self._failure_detail = None
             self._auto_snap_attempted = False
             self._cancel = False
             self._cancel_event = threading.Event()
@@ -3204,9 +3770,23 @@ class AgentWorker(QThread):
             self._budget_stopped = False
             self._mid_turn_folds = 0
             self._council_done = False
+            # Manus study M7: a fresh turn has no handoffs yet.
+            self._council_handoff = None
+            self._goldfish_handoff = None
+            self._tester_handoffs = []
             self._plan_steps = None
             self._plan_done = set()
             self._plan_last_remind = 0
+            # Manus study M3: recitation state resets with the plan
+            # state — a fresh turn recites nothing until its own
+            # plan is approved.
+            self._plan_title = ""
+            self._plan_success = ""
+            # Manus study M8: …unless a trajectory summary from a
+            # saturated earlier turn is on record — then the live
+            # checklist re-arms from it (see
+            # _restore_trajectory_plan).
+            self._restore_trajectory_plan()
             self._plan_skribe = {"verified": 0, "unverified": 0, "graded": False}
             self._goldfish_result = None
             # Write/Research modes: a fresh research turn starts
@@ -3237,6 +3817,11 @@ class AgentWorker(QThread):
                                      and not self.researching
                                      and self._homework_mode
                                      in modes_mod.HOMEWORK_MODES)
+            # Manus study M5: the turn's tool surface goes on the
+            # record before anything generates — and a change from
+            # the session's previous turn is logged as one (see
+            # _record_surface).
+            self._record_surface()
             for hook, code, out in hooks_mod.run_event(self.hooks, "session_start", self.workspace):
                 self._log("hook", event="session_start", command=str(hook.get("command", ""))[:80], exit=code)
             enter_loop = True
@@ -3269,14 +3854,18 @@ class AgentWorker(QThread):
                     if not self._ask_continue_long_turn():
                         break
                 self.status.emit("Generating response…" if cycle == 0 else "Processing tool result…")
+                # Item #58, as amended by Manus study M5: the
+                # offer is the mode's full surface for EVERY main
+                # generation of the turn — including the homework
+                # pass, which used to shrink it to read-class and
+                # grow it back at drafting. The pass's read-only
+                # discipline now lives at execution
+                # (_homework_refusal in the batch): a non-read call
+                # during the pass is refused in the transcript and
+                # never runs. The budget branches below still close
+                # the offer entirely when the context is nearly
+                # full (the flagged B18 wrap-up — see README).
                 schemas = self._schemas()
-                if self._homework_active and not self._skribe_awaiting:
-                    # Item #58: during the homework pass only READ
-                    # tools are offered — the mode gathers its facts
-                    # before it may draft or answer. The budget
-                    # branches below may still close the offer
-                    # entirely when the context is nearly full.
-                    schemas = self._read_schemas()
                 if self._skribe_awaiting:
                     # B18 exemption: the pending generation is the
                     # SKRIBE grading answer — it keeps its tools
@@ -3309,11 +3898,41 @@ class AgentWorker(QThread):
                     # the bare num_ctx setting — a provider model
                     # folds at its own stated window, a local at
                     # min(its trained max, the setting).
+                    # B18 is a MID-TURN guard — its own tests pin
+                    # "the first generation had its tools": the
+                    # stop fires when the turn's payload GROWS
+                    # past the fraction. At cycle 0 nothing has
+                    # grown — the payload is the fixed surface
+                    # (schemas + system prompt) plus the opening
+                    # history — so the fraction does not apply:
+                    # the tool surface alone has grown past 90%
+                    # of an 8k window, and stopping here made
+                    # every turn text-only before it did any work
+                    # (the gate tests caught it: the R5 guard
+                    # dropped every first-generation tool call).
+                    # The first generation closes the offer only
+                    # when the request does not fit the window
+                    # at all; from cycle 1 the fraction applies
+                    # exactly as before.
                     num_ctx = self._driver_budget()
-                    if context_mod.fill_fraction(
-                            self.messages, num_ctx,
-                            schemas) >= BUDGET_STOP_FRACTION:
+                    fill = context_mod.fill_fraction(
+                        self.messages, num_ctx, schemas)
+                    stop_at = (1.0 if cycle == 0
+                               else BUDGET_STOP_FRACTION)
+                    if fill >= stop_at:
                         if not self._try_mid_turn_fold(num_ctx, schemas):
+                            # Manus study M8: the fold could not land
+                            # (cap spent, non-shrinking, or no
+                            # summary) — the compression has
+                            # saturated. Before the classic wrap-up,
+                            # replace the stale bulk with a
+                            # program-built trajectory summary so the
+                            # settling generation starts oriented.
+                            # A history with nothing foldable gets
+                            # no trajectory (there is nothing to
+                            # replace) and wraps up exactly as
+                            # before.
+                            self._write_trajectory(num_ctx, schemas)
                             self._budget_stopped = True
                             self._log("context_budget_stop",
                                       estimate=context_mod.total_estimate(
@@ -3353,7 +3972,12 @@ class AgentWorker(QThread):
                     schemas,
                     num_predict=1024 if self._skribe_awaiting else None,
                     phase="grading" if self._skribe_awaiting else "main",
-                    cycle=cycle)
+                    cycle=cycle,
+                    # Manus study M3: the main loop is the one place
+                    # an approved plan executes — every one of its
+                    # generations recites the plan state at request
+                    # time (see _generate).
+                    recite_plan=True)
                 assistant_message = {"role": "assistant", "content": text}
                 if tool_calls:
                     assistant_message["tool_calls"] = tool_calls
@@ -3444,7 +4068,8 @@ class AgentWorker(QThread):
                         continue
                     break
                 _batch_start = len(self.messages)
-                self._execute_call_batch(tool_calls, call_history, fail_history)
+                self._execute_call_batch(tool_calls, call_history, fail_history,
+                                         rut_history)
                 self._tool_cycles += 1
                 if self._skribe_awaiting:
                     # Sweep R11: a grading generation spent a tool
@@ -3468,6 +4093,35 @@ class AgentWorker(QThread):
                     "unverified": self._plan_skribe["unverified"],
                     "graded": self._plan_skribe["graded"],
                     "cancelled": bool(self._cancel)})
+            # Manus study M8: the trajectory snapshot on record
+            # is refreshed to this turn's final plan state before
+            # the turn settles, so a later resume restores the
+            # latest known state.
+            self._refresh_trajectory()
+            # Manus study M7: the keeper pass — programmatic, once,
+            # over this turn's validated handoffs. Only a finished
+            # (not cancelled) turn with a workspace in scope; the
+            # keeper itself never raises.
+            handoffs = ([self._goldfish_handoff]
+                        if self._goldfish_handoff else []) \
+                + list(self._tester_handoffs) \
+                + ([self._council_handoff]
+                   if self._council_handoff else [])
+            if self.workspace and not self._cancel and handoffs:
+                handoff_mod.keeper_pass(self.workspace, handoffs,
+                                        log=self._log)
+            # Manus study M10: offer to save a finished run as a
+            # skill — only when the setting is on, a skills
+            # directory is in scope, the turn was not cancelled,
+            # and an approved plan completed (every step announced
+            # done). A one-shot ask has no plan, an unfinished plan
+            # is not a success: neither is ever offered. The offer
+            # path never raises and never blocks the turn on an
+            # error — a decline writes nothing.
+            if (self.offer_save_run_as_skill and self.skills_dir
+                    and not self._cancel and self._plan_steps
+                    and len(self._plan_done) == len(self._plan_steps)):
+                self._maybe_offer_save_run_as_skill(handoffs)
             self._log("turn_complete", seconds=round(time.time() - turn_started, 2),
                       generations=self._turn_generations,
                       prompt_tokens=self._turn_prompt_tokens,
@@ -3698,6 +4352,26 @@ class AgentWorker(QThread):
         critique = self._run_review(reviewer, answer)
         if critique is None:
             return False
+        # Manus study M7: the reviewer's return closes in the
+        # handoff schema. Parse it; an attempted-but-incomplete
+        # return gets ONE repair generation (the missing sections
+        # only); a return that never attempted the format is left
+        # byte-identical — it is still usable prose, and the
+        # revision below rides the full critique either way.
+        parsed, missing, attempted = handoff_mod.parse_handoff(critique)
+        if missing and attempted:
+            repair = self._run_review_repair(reviewer, critique, missing)
+            if repair:
+                critique = critique + "\n" + repair
+                parsed, missing, _attempted = handoff_mod.parse_handoff(
+                    critique)
+                self._log("council_handoff_repaired", missing=missing)
+        if missing:
+            self._log("council_handoff_unparsed", missing=missing)
+        self._council_handoff = {"seat": "council", "parsed": parsed,
+                                 "missing": missing,
+                                 "unparsed": bool(missing),
+                                 "raw": critique}
         stamp = datetime.now().strftime("%H:%M:%S")
         self.messages.append({"role": "assistant", "reviewer": reviewer,
                               "content": critique})
@@ -3753,7 +4427,8 @@ class AgentWorker(QThread):
                 self.status.emit("Reviewer model not installed — council skipped, turn stands.")
                 return None
             messages = council_mod.build_review_messages(
-                self._turn_request, answer, self._turn_receipts, reviewer)
+                self._turn_request, answer, self._turn_receipts, reviewer,
+                workspace=self.workspace)
             # The reviewer seat budgets at ITS OWN model's window.
             options = {"temperature": 0.3, "num_predict": 1024,
                        "num_ctx": self._resolve_budget(reviewer)}
@@ -3796,6 +4471,35 @@ class AgentWorker(QThread):
         except Exception as exc:
             self._log("council_failed", reviewer=reviewer, error=str(exc)[:300])
             self.status.emit("Reviewer unavailable — turn stands as-is.")
+            return None
+
+    def _run_review_repair(self, reviewer: str, critique: str,
+                           missing: list[str]) -> str | None:
+        """Manus study M7: the ONE repair round for a council
+        handoff that attempted the schema but missed sections —
+        the missing sections only, no tools. None on any failure;
+        the turn never waits on structure."""
+        try:
+            messages = [{"role": "system",
+                         "content": council_mod.REVIEWER_SYSTEM},
+                        {"role": "user", "content": (
+                            "Your review:\n" + critique + "\n\n" +
+                            handoff_mod.repair_instruction(missing))}]
+            options = {"temperature": 0.3, "num_predict": 512,
+                       "num_ctx": self.options.get("num_ctx", 8192)}
+            chunks = []
+            for event in self.client.chat_stream(
+                    reviewer, messages, options, [],
+                    **self._stream_cancel_kwargs("5m")):
+                if self._cancel:
+                    return None
+                content = event.get("message", {}).get("content", "")
+                if content:
+                    chunks.append(content)
+            text = "".join(chunks).strip()
+            return text or None
+        except Exception as exc:
+            self._log("council_repair_failed", error=str(exc)[:160])
             return None
 
     def _run_pre_tool(self, name: str, args: dict) -> str | None:
@@ -4001,6 +4705,9 @@ class AgentWorker(QThread):
         self._take_checkpoint(f"Step — {name} {path}".rstrip())
 
     def _execute(self, name: str, args: dict) -> str:
+        # Manus study M4: every execution starts with a clean detail
+        # stash — the batch tail reads it only for THIS call.
+        self._failure_detail = None
         blocked = self._maybe_pre_delete_checkpoint(name, args)
         if blocked is not None:
             return blocked
@@ -4012,8 +4719,34 @@ class AgentWorker(QThread):
             # error either way — it also reaches the event log, so
             # a dispatch bug is diagnosable after the fact instead
             # of existing only inside one transcript.
+            # Manus study M4: the log record now carries the
+            # exception TYPE and a compact traceback tail as well —
+            # str(exc) alone made a bare KeyError undiagnosable —
+            # and the model-facing detail line (tools.failure_detail)
+            # is stashed for the batch tail to append to this call's
+            # message copy. The RETURN keeps its exact shape: the
+            # authored/flattened "Tool error: …" line is a pinned
+            # surface (the Note 29 streak keys on it, tests pin it).
+            try:
+                # Built from extract_tb, not format_exception: the
+                # last two frames + the exception line, in that
+                # order, so the cap can never cut the exception line
+                # itself off the end (format_exception's caret lines
+                # pushed it past 600 chars on the first live case).
+                frames = traceback.extract_tb(exc.__traceback__) \
+                    if exc.__traceback__ is not None else []
+                trace_text = "\n".join(
+                    [f'File "{f.filename}", line {f.lineno}, '
+                     f"in {f.name}" for f in frames[-2:]]
+                    + [f"{type(exc).__name__}: {exc}"])[:600]
+            except Exception:
+                trace_text = ""
             self._log("tool_execute_error", tool=name,
-                      error=str(exc)[:300])
+                      error=str(exc)[:300],
+                      error_type=type(exc).__name__,
+                      trace=trace_text)
+            self._failure_detail = tools_mod.failure_detail(exc) \
+                or None
             return f"Tool error: {exc}"
         self._research_track(name, args, result)
         # Chunk C / G7: this seam promises text — a plugin handler

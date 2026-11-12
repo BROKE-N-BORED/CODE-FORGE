@@ -42,6 +42,21 @@ hands them to the worker at turn start, and the worker passes them
 through; absent folders (older constructions, test doubles) simply
 earn the classic dialog for update calls.
 
+S7 (audit S1-25b) extends the same preview to update_skill /
+update_plugin — the gate used to show only the target NAME for an
+update, never the code, while a create showed every line. An update
+lands on an EXISTING file, so its preview is a true old-vs-new diff:
+the current file is read from the app-global root the window hands
+over (the worker never knew those roots before S7 — see
+diff_for_approval), through create_ext's own inside-the-root check,
+and the proposed side is composed by the very helpers the update
+writes with. A current file that is missing or unreadable previews
+as all-new under UNAVAILABLE_NOTE, exactly like an unreadable
+workspace file. update_plugin also rewrites plugin.json's
+description, so a changed description is named in the preview's
+note line; the code diff itself shows the HANDLERS changes behind
+the rebuilt tool list.
+
 Rendering law (owner's v2.1 verdict): NO GREEN, anywhere. Added
 lines carry a "+" prefix on an amber/steel tint, removed lines a
 "−" prefix on a red tint — the prefix plus the background does the

@@ -201,9 +201,50 @@ MODE_GUIDANCE = {
                f"'{modes_mod.QUESTIONS_MARKER}' — or written into the "
                "artifact as explicit ASSUMPTIONS. Never silently invent "
                "them."),
-    "review": ("MODE: REVIEW. Read and critique — do not fix anything. Report findings by "
-               "severity (BLOCKER / SHOULD-FIX / NIT), each with the file and place, the "
-               "concrete failure it can cause, and the fix you would suggest. You may write "
+    "review": ("MODE: REVIEW. Read and critique — do not fix anything. Start every "
+               "report with a '## Walkthrough' section, before '## Findings', so the "
+               "owner can get oriented in 30 seconds. Keep it short — a handful of "
+               "lines, not an essay — with exactly these four parts: '**What "
+               "changed:**' 1–3 plain sentences on what the change under review "
+               "does; '**Changes, in dependency order:**' a compact list grouped "
+               "by layer — foundations first (data/schema/config), then core "
+               "logic, then UI/surface, then tests/docs — each row 'FILE/AREA — "
+               "what changed — why it matters', naming only the layers that "
+               "actually changed; '**Effort:**' one line on how big this change "
+               "is to review and absorb (for example 'Effort: Small — one file, "
+               "no behavior change', or 'Effort: Large — touches the turn loop; "
+               "read the Critical findings first'); '**Risk:**' one line naming "
+               "the riskiest part and what could break, or 'Risk: Low — …' with "
+               "the reason. Effort and Risk must be honest and specific to THIS "
+               "change — no boilerplate. Then write every "
+               "finding in the Findings section as ONE line in exactly this shape: "
+               "'- [SEVERITY · TYPE · Source: SOURCE] FILE:PLACE — PROBLEM — Fix: FIX'. "
+               "SEVERITY is one of Critical, Major, Minor, Trivial. TYPE is one of "
+               "Bug, Security, Performance, Refactor, Nitpick. SOURCE names what "
+               "actually triggered the finding — the project instruction or guideline "
+               "behind it (name it), an owner learning ('Owner learning'), a mechanical "
+               "or tool check (name it), a SKRIBE rubric item (name it), or 'Reviewer "
+               "judgment' when it is your own call; never invent a source. Guideline "
+               "files the owner approved (AGENTS.md, CLAUDE.md, .cursorrules, "
+               "copilot-instructions.md) ride in your prompt — apply them, and cite "
+               "the file as the Source when one of its rules triggers a finding. "
+               "PROBLEM "
+               "states the concrete failure the finding can cause; FIX is the fix you "
+               "would suggest. Under each finding line, add one indented line "
+               "starting 'Driver:' — the Prompt for the Driver: a self-contained "
+               "instruction for Code mode to fix exactly this finding, naming the "
+               "file and the exact change, and saying how to verify it (run what, "
+               "expect what). Example: '- [Major · Bug · Source: Reviewer judgment] "
+               "forge/worker.py:412 — the retry loop never exits when the server keeps "
+               "answering 500, so a turn can hang forever — Fix: cap the retries at 3 "
+               "and surface the failure.' then on the next line, indented, "
+               "'  Driver: In forge/worker.py, cap the retry loop at 3 attempts and "
+               "surface the failure to the owner on the third; then run the worker "
+               "against a stub that answers 500 every time and confirm it stops "
+               "after 3 attempts with the failure shown.' (Reports written before "
+               "this format used BLOCKER / SHOULD-FIX / NIT, which read as Critical "
+               "/ Major / Trivial.) "
+               "You may write "
                "the report to a review file (*review*.md or .forge/reviews/). Fixes happen "
                "in Code mode, at the owner's word."
                "\nITEM #58 DISCIPLINE: your turn opens with a HOMEWORK pass — "
@@ -213,7 +254,21 @@ MODE_GUIDANCE = {
                "report ends with a COVERAGE line in exactly this shape: "
                "'COVERAGE — read: <the files you actually read>; NOT read: "
                "<what you did not read, and why>'. A review that cannot say "
-               "what it did not read has not said what it is worth."),
+               "what it did not read has not said what it is worth."
+               "\nINCREMENTAL REVIEW: when the turn opens with an "
+               "incremental review request naming the files changed "
+               "since the last review, review ONLY those files — do "
+               "not re-read or re-raise findings on unchanged files "
+               "(learnings already cover what the owner dismissed). "
+               "If the request says nothing changed, say so in one "
+               "line and file nothing. After filing the report, "
+               "update .forge/reviews/summary.md — put one new block "
+               "at the TOP, newest first, in exactly this shape: "
+               "'## <date> — <review file>' then 'What changed: "
+               "<the Walkthrough's What-changed line>' then "
+               "'Findings: <severity counts, e.g. 2 Critical · 1 "
+               "Major · 0 Minor · 0 Trivial>' — so the summary reads "
+               "as the whole review history at a glance."),
     "architect": ("MODE: ARCHITECT. Read everything; write Markdown documentation only "
                   "(architecture notes, decisions, specs). No code edits, no commands."
                   "\nITEM #58 DISCIPLINE: your turn opens with a HOMEWORK pass — "
@@ -300,12 +355,70 @@ MODE_GUIDANCE = {
                  "carries its source number in brackets — a claim "
                  "with no number is a defect. What the research could "
                  "not answer goes under Open questions, plainly. "
+                 "AUTHORITATIVE SOURCES FIRST (Manus study M11): "
+                 "before you trust a page, check the authoritative "
+                 "source — the official docs, the official API "
+                 "reference, the project's own repository. A scraped "
+                 "copy, a mirror, or a summary is second-class: use "
+                 "it only when the authoritative source cannot be "
+                 "reached, cite it as a copy, and never let it "
+                 "outrank the authoritative source. When two sources "
+                 "disagree, the authoritative one wins and the "
+                 "report says so. "
                  "Writes in this mode land only in .forge/research/; "
                  "commands do not run. Searches are the only thing "
                  "that leaves this machine — say so when it matters. "
                  "During the drafting generations you are offered no "
                  "tools and must not write tool-call markup or XML."),
 }
+
+# Review voices (CR5 — CodeRabbit Tier 1 #5, 2026-11-11): how much
+# a Review turn says, and how hard it pushes. The finding format,
+# the Walkthrough and the severity scale never change — only the
+# voice. "chill" is the default and is exactly MODE_GUIDANCE's
+# review text with nothing added. "quiet" reports only what
+# matters and stays terse; "assertive" reports everything,
+# including the small stuff, and does not soften Critical
+# findings. The setting lives in settings.json as
+# "review_profile" and is picked in Settings or in the Review
+# room's Voice control — both write the same key.
+REVIEW_PROFILES = ("quiet", "chill", "assertive")
+
+REVIEW_PROFILE_BLOCKS = {
+    "quiet": ("\nReview voice: QUIET. Report only Critical and "
+              "Major findings — skip Minor, Trivial and nitpicks "
+              "entirely, and do not mention that you skipped them. "
+              "Keep the Walkthrough to its four parts and nothing "
+              "more. Terse throughout: one line per finding, no "
+              "extra commentary."),
+    "assertive": ("\nReview voice: ASSERTIVE. Report everything "
+                  "you find, including Minor, Trivial and nitpicks "
+                  "— thoroughness over brevity. Say plainly when a "
+                  "finding is a real defect and when it is a "
+                  "judgment call, and do not soften Critical "
+                  "findings. Keep the one-line finding format."),
+}
+
+
+def normalize_review_profile(value) -> str:
+    """A review-profile setting value, cleaned: lowercased and
+    stripped; anything unknown, blank or missing reads as the
+    default, "chill". Never raises."""
+    try:
+        cleaned = str(value or "").strip().lower()
+    except Exception:
+        return "chill"
+    return cleaned if cleaned in REVIEW_PROFILES else "chill"
+
+
+def review_guidance(profile: str = "chill") -> str:
+    """The Review mode guidance for one voice: the base review
+    text, plus that voice's block. "chill" returns the base text
+    exactly — the default review is byte-identical to before CR5."""
+    base = MODE_GUIDANCE["review"]
+    block = REVIEW_PROFILE_BLOCKS.get(
+        normalize_review_profile(profile), "")
+    return base + block
 
 
 def tool_class(name: str, classes: dict | None = None) -> str:
@@ -352,9 +465,11 @@ def mode_allows(mode: str, name: str, args: dict, classes: dict | None = None) -
         # Research's web verbs, admitted by name ahead of the class
         # check: browse_open is approval-gated at the plugin (a
         # "write" class), but opening and reading pages IS this
-        # mode's read work. Whether they are OFFERED yet is the
-        # plan gate's business — the worker withholds them until
-        # the owner approves a research plan.
+        # mode's read work. Whether a call may RUN yet is the plan
+        # gate's business — since Manus study M5 the verbs stay in
+        # the offered surface for the whole session and the gate
+        # refuses the call at execution (the worker's
+        # _research_refusal) until the owner approves a plan.
         return True, ""
     cls = tool_class(name, classes)
     if cls == "read":
@@ -403,9 +518,10 @@ def mode_visible_tools(mode: str, names: list[str], classes: dict | None = None)
         # Reads + the content tools (fenced to .forge/research/
         # per call) + the two browse verbs BY NAME (browse_open's
         # plugin class is "write"; see RESEARCH_BROWSE_TOOLS).
-        # The worker additionally withholds the browse verbs until
-        # a research plan is approved — visibility here is the
-        # mode's ceiling, the gate is the turn's state.
+        # Visibility here is the mode's ceiling and the session's
+        # whole surface (Manus study M5): the research plan gate
+        # no longer withholds the verbs from the offer — it
+        # refuses their calls at execution until approval.
         return [n for n in names if tool_class(n, classes) == "read"
                 or n in FILE_CONTENT_TOOLS
                 or n in RESEARCH_BROWSE_TOOLS]

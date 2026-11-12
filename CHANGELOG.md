@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-11-11 — Gemini thought signature fix
+- Gemini 3 models failed with HTTP 400 on the second tool call in a turn ("Function call is missing a thought_signature"). Forge now captures the thoughtSignature Gemini attaches to each functionCall part and sends it back verbatim on the same part in later requests, as Google requires. Parallel calls (only the first carries one) and multi-step calls (each carries its own) are both handled.
+- The signature never leaks into other providers: Groq and EXAONE payloads are rebuilt from name and arguments only, and the local Ollama client strips the key before sending.
+
+## 2026-11-11 — Inbox mode
+- New Inbox window (menu + palette): one view of what needs attention, what's running, and what's ready to merge, across all projects. Groups: Working, Needs attention, Ready to merge, On hold, Done.
+- Triage actions: Dismiss from Inbox (a dismissed item comes back on new activity), Put on Hold, Snooze (1 hour, until tomorrow 09:00, or until next launch), Mark as Done, Undo. Dismiss never stops a running turn and never archives anything. Ready items offer the real next step: approve a parallel job's merge, view its diff, or open a turn's checkpoints.
+
+## 2026-11-11 — Code turns can use tools again (budget-stop fix)
+- Fixed: the mid-turn context-budget stop was firing on the first generation of every Code turn (the tool surface had grown past the 90% threshold), so turns wrapped up without ever calling a tool. The stop now applies from the second generation onward; the first generation offers tools whenever the request fits the window at all. Mid-turn wrap-up behavior is unchanged.
+
+## 2026-11-11 — Manus study items M1–M13
+- Deterministic system prompts (stable prefix), filesystem context in prompts, programmatic plan recitation, errors kept in the conversation, a stable tool surface (homework and research gates enforced at execution), anti-rut detection, handoff keeper (ASKED/DONE/FILES/EVIDENCE/OPEN, one repair round), trajectory summaries, session replay, save-a-run-as-a-skill (off by default), authoritative sources for Research, fan-out batches (owner-seeded, up to 4), and gated local event triggers (proposals, 24-hour expiry).
+- The handoff keeper's learning store is the same one the review room uses — one helper, not two.
+
+## 2026-11-11 — Scrollbar styling (GUIFX T2)
+- Scrollbars are styled to match the bench (warm-charcoal track and thumb, no blue).
+
+## 2026-11-11 — CodeRabbit review improvements, Tier 1
+- Review turns and Council now carry owner-taught learnings ("Not a finding — teach" in the Review room); findings carry severity labels (Critical/Major/Minor/Trivial) plus type and source; reports get a Walkthrough section and a counted findings heading.
+- Owner-approved project guidelines (AGENTS.md and similar) are detected and applied only after approval, never silently. Review profiles: Quiet, Chill, Assertive.
+- Incremental review: "Mark reviewed" and "Review what's new" track what's been seen (.forge/reviews/). Per-finding "Prompt for the Driver", "Fix with Driver" (recorded under Fix requests), and owner pre-merge checks at the plan gate (.forge/gate-checks.md).
+- The system prompt now ranks its sections and compresses to half the window when it would overflow; unchanged when everything fits.
+
+## 2026-11-11 — Security stack S2–S7
+- Secrets are scrubbed from stored conversations and exports; provider keys live in an encrypted vault (not plain text in settings); app files and directories are created with private permissions.
+- Project hooks and MCP servers run only after the owner's trust decision; untrusted hooks never execute. Update and extension diffs are shown for approval before anything is applied.
+
+## 2026-11-11 — Button states (GUIFX T1)
+- Buttons now show pressed and disabled states across the bench (primary, navigation, accordion, top-bar). No new colors — existing tokens only.
+
 ## 2026-11-11 — Design Shell bridge (Phase B1)
 - New tool "design_shell": Forge can now call the standalone Design Shell program (installed separately) and drive it from chat — draft a design plan from words, search the shell's library, build approved jobs, generate batches of 3 reference images, file and import finished work.
 - Approval stays the owner's: a plan comes back as a plain-English summary and stops; the model cannot approve its own plan. Approving happens from the menu ("Approve Design Shell job") and spends a one-time gate token.

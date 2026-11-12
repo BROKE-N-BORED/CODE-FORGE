@@ -26,6 +26,7 @@ so the shell can log it loudly.
 """
 from __future__ import annotations
 
+from . import learnings as learnings_mod
 from . import seats as seats_mod
 
 # The reviewer seat's standing occupant: the abliterated Qwen (the
@@ -44,7 +45,14 @@ Judge against the owner's original request:
 Be specific and brief; a working review, not an essay. Do not praise without cause.
 If the work is sound, say so plainly and name the strongest point and the one
 residual risk. Never claim you ran tools or checked anything yourself — you
-only read the turn you were handed."""
+only read the turn you were handed.
+
+Close your review with these five lines, one per line, after your prose:
+ASKED: <the request as you understood it>
+DONE: <what the turn did>
+FILES: <files the turn touched, one per line, or (none)>
+EVIDENCE: <what the receipts and answer actually show>
+OPEN: <anything unfinished, risks found, or (none)>"""
 
 # Caps that keep one review inside the shared 8K context alongside the
 # request: the critique is about the finished answer and the receipts,
@@ -80,15 +88,33 @@ def model_installed(model: str, installed: list[str]) -> bool:
 
 
 def build_review_messages(request: str, answer: str, receipts: list[str],
-                          reviewer_model: str) -> list[dict]:
+                          reviewer_model: str,
+                          workspace: str | None = None) -> list[dict]:
     """The reviewer's whole world: standing orders + the owner's
-    request + what the turn did (receipts) + the driver's final answer."""
+    request + what the turn did (receipts) + the driver's final answer.
+
+    CR1 (perfection pass): when `workspace` — the turn's project —
+    is threaded through and that project (or the owner globally)
+    has review learnings, the same learnings block the Review mode
+    prompt carries (forge/learnings.py, framing included) rides in
+    the user message too, so the Council reviewer also stops
+    re-raising what the owner already dismissed. workspace=None
+    (every caller from before CR1) or a project with no learnings
+    leaves the messages byte-identical to before."""
     done = "\n".join(receipts)[:RECEIPT_CAP] if receipts else "(no tools were used)"
+    block = ""
+    if workspace is not None:
+        try:
+            block = learnings_mod.learnings_block(workspace)
+        except Exception:
+            # A learnings read must never eat a review.
+            block = ""
     user = (
         f"The owner asked:\n{str(request)[:REQUEST_CAP]}\n\n"
         f"What the driver's turn did (shell receipts):\n{done}\n\n"
-        f"The driver's final answer:\n{str(answer)[:ANSWER_CAP]}\n\n"
-        "Write your review now: WRONG / MISSING / CHANGE, as instructed.")
+        f"The driver's final answer:\n{str(answer)[:ANSWER_CAP]}"
+        + (f"\n\n{block}" if block else "")
+        + "\n\nWrite your review now: WRONG / MISSING / CHANGE, as instructed.")
     return [{"role": "system", "content": REVIEWER_SYSTEM},
             {"role": "user", "content": user}]
 

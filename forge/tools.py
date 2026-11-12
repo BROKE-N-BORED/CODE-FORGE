@@ -282,6 +282,45 @@ class ToolError(RuntimeError):
     pass
 
 
+# Manus study M4 ("keep the wrong stuff in"): the compact diagnostic
+# line for an UNEXPECTED tool failure. A ToolError's message is an
+# authored diagnostic — written to tell the model exactly what was
+# refused and how to fix the call — so it needs no help. Any OTHER
+# exception escaping a tool or a plugin handler is a surprise (a bug,
+# a broken environment), and the old flattening to "Tool error: {exc}"
+# threw away the two facts the model steers by: the exception TYPE
+# (a bare KeyError reads as just "'config'") and WHERE it was raised.
+# This line carries both, in one capped line: type + message, and the
+# deepest traceback frame as file:line in function. Callers append it
+# to the failure the model reads; the full traceback stays a job for
+# the event log, not the 8k window.
+_FAILURE_DETAIL_CAP = 320
+
+
+def failure_detail(exc) -> str:
+    """The one-line M4 diagnostic for an unexpected exception, or ""
+    for a ToolError (authored message — already the diagnostic) and
+    for anything without a usable traceback/message."""
+    if isinstance(exc, ToolError):
+        return ""
+    try:
+        import traceback as _tb
+        frames = _tb.extract_tb(exc.__traceback__) if \
+            exc.__traceback__ is not None else []
+        where = ""
+        if frames:
+            last = frames[-1]
+            where = (f" — raised at {Path(last.filename).name}:"
+                     f"{last.lineno} in {last.name}")
+        line = (f"[Failure detail: {type(exc).__name__}: "
+                f"{exc}{where}]")
+    except Exception:
+        return ""
+    if len(line) > _FAILURE_DETAIL_CAP:
+        line = line[:_FAILURE_DETAIL_CAP - 1] + "…]"
+    return line
+
+
 def _inside(root: Path, relative: str) -> Path:
     root = root.expanduser().resolve()
     # resolve() follows symlinks, so a symlink inside the workspace that

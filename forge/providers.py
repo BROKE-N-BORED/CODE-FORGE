@@ -699,7 +699,9 @@ def _to_groq_messages(messages, images=None):
                 call_id = str(call.get("id") or f"call_{mi}_{ci}")
                 args = fn.get("arguments") or {}
                 if not isinstance(args, str):
-                    args = json.dumps(args)
+                    # Manus study M1: deterministic bytes for the same
+                    # arguments, whatever order the dict was built in.
+                    args = json.dumps(args, sort_keys=True)
                 calls.append({"id": call_id, "type": "function",
                               "function": {"name": name, "arguments": args}})
                 pending.append((name, call_id))
@@ -823,7 +825,9 @@ class GroqClient(_ProviderHTTP):
         def make_request():
             return urllib.request.Request(
                 self.base_url + "/chat/completions",
-                data=json.dumps(payload).encode("utf-8"),
+                # Manus study M1: sorted keys — deterministic request
+                # bytes for the same conversation (see ollama_client).
+                data=json.dumps(payload, sort_keys=True).encode("utf-8"),
                 headers=self._headers(content_type=True), method="POST")
 
         def consume(req):
@@ -995,9 +999,27 @@ def _to_gemini_payload(messages, tools, options, images=None):
                 fn = (call or {}).get("function") or {}
                 name = str(fn.get("name") or "")
                 if name:
-                    parts.append({"functionCall": {
+                    # Gemini 3 thought signatures (Google Cloud
+                    # "Thought signatures", REST/manual handling):
+                    # a functionCall part MUST be sent back with
+                    # its thoughtSignature exactly as returned, as
+                    # a sibling of functionCall on the SAME part —
+                    # omitting it for the first functionCall part
+                    # in any step of the current turn is a 400.
+                    # The signature rides the internal call as
+                    # function.thought_signature (captured in
+                    # GeminiClient.chat_stream below); reattach it
+                    # only when present — never an empty/null field.
+                    # Parallel calls: only the first part carries
+                    # one (the model sends it that way); sequential
+                    # steps: each part carries its own.
+                    part = {"functionCall": {
                         "name": name,
-                        "args": _parse_tool_arguments(fn.get("arguments"))}})
+                        "args": _parse_tool_arguments(fn.get("arguments"))}}
+                    sig = fn.get("thought_signature")
+                    if isinstance(sig, str) and sig:
+                        part["thoughtSignature"] = sig
+                    parts.append(part)
             contents.append({"role": "model", "parts": parts or [{"text": ""}]})
             continue
         if role == "tool":
@@ -1114,7 +1136,8 @@ class GeminiClient(_ProviderHTTP):
                 + ":streamGenerateContent?alt=sse")
         req = urllib.request.Request(
             self.base_url + path,
-            data=json.dumps(payload).encode("utf-8"),
+            # Manus study M1: sorted keys, as in the Groq path above.
+            data=json.dumps(payload, sort_keys=True).encode("utf-8"),
             headers=self._headers(content_type=True), method="POST")
         for data in self._sse(req, cancel_event=cancel_event):
             if data == "[DONE]" or not isinstance(data, dict):
@@ -1137,9 +1160,24 @@ class GeminiClient(_ProviderHTTP):
                     text_parts.append(str(part["text"]))
                 call = part.get("functionCall")
                 if isinstance(call, dict) and call.get("name"):
-                    calls.append({"function": {
-                        "name": str(call["name"]),
-                        "arguments": _parse_tool_arguments(call.get("args"))}})
+                    # Gemini 3 thought signature: the part's
+                    # thoughtSignature is captured onto the internal
+                    # call as function.thought_signature, so the
+                    # worker carries it through the turn and
+                    # _to_gemini_payload reattaches it verbatim on
+                    # the same part in the next request (Google
+                    # requires it — a replayed functionCall without
+                    # its signature is a 400). Only present when
+                    # the model sent one: parallel calls carry it
+                    # on the first part only, and a part without
+                    # one earns no key at all (never empty/null).
+                    fn = {"name": str(call["name"]),
+                          "arguments": _parse_tool_arguments(
+                              call.get("args"))}
+                    sig = part.get("thoughtSignature")
+                    if isinstance(sig, str) and sig:
+                        fn["thought_signature"] = sig
+                    calls.append({"function": fn})
             done = bool(candidate.get("finishReason"))
             if text_parts or calls or done:
                 yield {"message": {"content": "".join(text_parts),
