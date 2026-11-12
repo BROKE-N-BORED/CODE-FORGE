@@ -2,7 +2,7 @@
 
 ## 2026-11-12 — Code graph, message queue, and full-suite fixes
 
-- Code graph (CodeRabbit Tier 2 #2): a new read-only code_graph tool — Forge can find where a name is defined, what uses it, and which files are related, from an index of the project's Python files.
+- Code graph: a new read-only code_graph tool — Forge can find where a name is defined, what uses it, and which files are related, from an index of the project's Python files.
 - Message queue: sending a message while a turn or fold runs now queues it instead of disabling Send. Queued messages drain in order when the turn settles, and each can be edited or deleted while it waits. Sent messages can be edited (the full original is kept in history first). One fold attempt per send, then the send proceeds.
 - Fixed: settings could fail to save and crash on a cleanup line that referenced a name that no longer exists.
 - Fixed: Research with the web switched off still offered the browse tools to the model. The switch now removes them from the offer as well as refusing the call.
@@ -19,15 +19,15 @@
 ## 2026-11-12 — Chat streaming glitch fix
 - Fixed: the chat window could show duplicated or overlapping text when scrolled to the bottom during a streaming turn. The streaming anchor had been dead since the Reply links landed — it read the second-to-last block as the bubble header, but the tail bubble is three blocks now (header, body, Reply links), so the anchor never established and every tick rebuilt the whole chat. It now checks the third-to-last block first, with the two-block shape as fallback, and a parked turn at an approval gate no longer repaints at all.
 
-## 2026-11-12 — CodeRabbit review improvements, Tier 2 #1 (linter layer)
+## 2026-11-12 — Linter layer
 - New "Run linters" button in the Review window: runs the project's own installed linters (Ruff, ShellCheck, ESLint) on demand and loads their findings into the composer, in the review format with the tool as the Source. Nothing is installed, nothing auto-runs, nothing auto-fixes. When no linter is installed it says so plainly.
 
 ## 2026-11-12 — Widget styling token pass (GUIFX T3)
 - Tooltips, tab bars, checkboxes, radio buttons, and list items are now styled from the bench tokens, matching the rest of the window.
 
-## 2026-11-12 — Manus proper fixes F1–F7
+## 2026-11-12 — Queue fixes F1–F7
 - The "[Plan progress]" reminder is retired; plan abandonment is now a real signal (a plan's trajectory records active, superseded, or abandoned, and approving a new plan supersedes the old one).
-- Fan-out and Proposals get their own windows (palette entries plus deck items), so the Manus features are reachable from the bench instead of existing only in code.
+- Fan-out and Proposals get their own windows (palette entries plus deck items), so the queue features are reachable from the bench instead of existing only in code.
 - New file-change watcher (forge/project_watcher.py): proposes when project files change on disk. Off by default, propose-only, and watches every file — no cap.
 - The Knowledge distiller gets its own client instead of sharing the driver's, and the stable-prefix test now proves determinism by time travel instead of pinning a date.
 
@@ -49,14 +49,14 @@
 ## 2026-11-11 — Code turns can use tools again (budget-stop fix)
 - Fixed: the mid-turn context-budget stop was firing on the first generation of every Code turn (the tool surface had grown past the 90% threshold), so turns wrapped up without ever calling a tool. The stop now applies from the second generation onward; the first generation offers tools whenever the request fits the window at all. Mid-turn wrap-up behavior is unchanged.
 
-## 2026-11-11 — Manus study items M1–M13
+## 2026-11-11 — Queue items M1–M13
 - Deterministic system prompts (stable prefix), filesystem context in prompts, programmatic plan recitation, errors kept in the conversation, a stable tool surface (homework and research gates enforced at execution), anti-rut detection, handoff keeper (ASKED/DONE/FILES/EVIDENCE/OPEN, one repair round), trajectory summaries, session replay, save-a-run-as-a-skill (off by default), authoritative sources for Research, fan-out batches (owner-seeded, up to 4), and gated local event triggers (proposals, 24-hour expiry).
 - The handoff keeper's learning store is the same one the review room uses — one helper, not two.
 
 ## 2026-11-11 — Scrollbar styling (GUIFX T2)
 - Scrollbars are styled to match the bench (warm-charcoal track and thumb, no blue).
 
-## 2026-11-11 — CodeRabbit review improvements, Tier 1
+## 2026-11-11 — Review improvements, Tier 1
 - Review turns and Council now carry owner-taught learnings ("Not a finding — teach" in the Review room); findings carry severity labels (Critical/Major/Minor/Trivial) plus type and source; reports get a Walkthrough section and a counted findings heading.
 - Owner-approved project guidelines (AGENTS.md and similar) are detected and applied only after approval, never silently. Review profiles: Quiet, Chill, Assertive.
 - Incremental review: "Mark reviewed" and "Review what's new" track what's been seen (.forge/reviews/). Per-finding "Prompt for the Driver", "Fix with Driver" (recorded under Fix requests), and owner pre-merge checks at the plan gate (.forge/gate-checks.md).
