@@ -1,0 +1,23 @@
+CODE FORGE v2.5 — WAVE (Linux Mint)
+
+TO INSTALL — double-click "Install Code Forge" in this folder.
+- If Mint asks about trust, click "Trust and Launch" (or "Mark as
+  Trusted", then double-click it again).
+- The installer copies Code Forge to ~/.local/share/code-forge,
+  downloads its Python packages (a few hundred megabytes, a few
+  minutes on first install), and adds "Code Forge" to the app menu.
+  No terminal needed.
+- If anything fails, the installer names its log file. The full log
+  is at /tmp/code-forge-install.log.
+
+TO RUN — open the app menu and search for Code Forge, or look under
+Development. Code Forge needs Ollama running locally to use models;
+get it at https://ollama.com/download if you don't have it.
+
+TO UNINSTALL — double-click "uninstall-code-forge.sh". Your settings
+and keys are kept.
+
+WHAT'S IN THIS RELEASE (WAVE) — F1-F7 fixes (plan reminders gone,
+fan-out and proposals windows, file watcher default off with no cap),
+a token-usage pass, a "Run linters" layer in the Review window, and a
+chat streaming glitch fix.

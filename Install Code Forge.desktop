@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install Code Forge
+Comment=Install Code Forge v2.5 (WAVE) — adds Code Forge to the app menu, no terminal needed
+Exec=python3 -c "import os,sys,subprocess; d = os.path.dirname(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1] else os.getcwd(); sys.exit(subprocess.call([os.path.join(d, 'install-code-forge.sh')]))" %k
+Icon=system-software-install
+Terminal=false
+Categories=System;

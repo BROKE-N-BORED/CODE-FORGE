@@ -20,6 +20,12 @@ OLLAMA_MIN_VERSION="0.40.13"
 LIST_ONLY=0
 [ "${1:-}" = "--list-only" ] && LIST_ONLY=1
 
+# GUI installs (double-click, no terminal) export SUDO_ASKPASS pointing
+# at a graphical password prompt; sudo -A uses it instead of asking
+# on a terminal that isn't there. Terminal runs are unaffected.
+SUDO="sudo"
+[ -n "${SUDO_ASKPASS:-}" ] && SUDO="sudo -A"
+
 # System dependencies the Forge shells out to or links against:
 # git (snapshots, checkpoints, the Git panel), python3-venv (the venv
 # below cannot be created without it), and the runtime libraries
@@ -130,13 +136,13 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 if [ ${#MISSING[@]} -gt 0 ] || [ ${#SYS_OUTDATED[@]} -gt 0 ]; then
   if command -v apt-get >/dev/null && command -v sudo >/dev/null; then
-    if sudo apt-get update -qq; then
+    if $SUDO apt-get update -qq; then
       if [ ${#MISSING[@]} -gt 0 ]; then
-        sudo apt-get install -y "${MISSING[@]}" || \
+        $SUDO apt-get install -y "${MISSING[@]}" || \
           echo "Could not install them automatically — run: sudo apt install ${MISSING[*]}" >&2
       fi
       if [ ${#SYS_OUTDATED[@]} -gt 0 ]; then
-        if sudo apt-get install -y --only-upgrade "${SYS_OUTDATED[@]}"; then
+        if $SUDO apt-get install -y --only-upgrade "${SYS_OUTDATED[@]}"; then
           SYS_UPDATED=1
         else
           echo "Could not update them automatically — run: sudo apt install --only-upgrade ${SYS_OUTDATED[*]}" >&2
@@ -187,17 +193,24 @@ else
   "$ROOT/.venv/bin/python" -m pip install -r "$ROOT/requirements.txt"
 fi
 mkdir -p "$HOME/.local/share/applications"
-cat > "$HOME/.local/share/applications/linux-forge-agent-shell.desktop" <<DESKTOP
+# The app-menu entry uses the shipped icon when it is there (the
+# Release zip carries assets/code-forge.png); a plain checkout
+# without the icon falls back to the stock terminal icon.
+ICON_PATH="$ROOT/assets/code-forge.png"
+[ -f "$ICON_PATH" ] || ICON_PATH="utilities-terminal"
+cat > "$HOME/.local/share/applications/code-forge.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=CODE FORGE v2 — Linux Forge Agent
-Comment=Local Ollama-powered desktop agent
+Name=Code Forge
+Comment=Local AI coding agent — runs on your own machine
 Exec="$ROOT/run.sh"
 Path=$ROOT
-Icon=utilities-terminal
+Icon=$ICON_PATH
 Terminal=false
 Categories=Development;Utility;
 DESKTOP
+# Retire the old menu entry name so the menu never shows two Forges.
+rm -f "$HOME/.local/share/applications/linux-forge-agent-shell.desktop"
 chmod +x "$ROOT/run.sh" "$ROOT/install.sh"
 command -v ollama >/dev/null || echo "NOTE: Ollama is not installed — the Forge needs it running locally. Get it from https://ollama.com/download and start it before launching."
 if [ "$VENV_EXISTED" -eq 1 ]; then

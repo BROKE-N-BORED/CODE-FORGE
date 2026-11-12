@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-12 — Double-click installer and app-menu entry (Release retrofit)
+- Code Forge now installs as a real program on Linux Mint: double-click "Install Code Forge" in the Release zip, answer the dialogs, and it lands in ~/.local/share/code-forge with a "Code Forge" entry in the app menu and its own icon. No terminal needed.
+- The installer backs up a previous install first (code only — the Python environment is rebuilt, and settings and keys live outside the program folder and are never touched), sets up the Python environment, and offers to launch Code Forge when it finishes. A previous install is upgraded in place.
+- install.sh now uses the graphical password prompt when run from the installer (sudo -A with SUDO_ASKPASS), writes the menu entry as code-forge.desktop with the shipped icon, and retires the old linux-forge-agent-shell.desktop name so the menu never shows two Forges.
+- The app icon is the pixel-ember Spark mark (assets/code-forge.png in the Release zip; the repo carries the base64 text as assets/code-forge.png.b64 and the installer decodes it when the PNG is absent).
+
 ## 2026-11-12 — Chat streaming glitch fix
 - Fixed: the chat window could show duplicated or overlapping text when scrolled to the bottom during a streaming turn. The streaming anchor had been dead since the Reply links landed — it read the second-to-last block as the bubble header, but the tail bubble is three blocks now (header, body, Reply links), so the anchor never established and every tick rebuilt the whole chat. It now checks the third-to-last block first, with the two-block shape as fallback, and a parked turn at an approval gate no longer repaints at all.
 
