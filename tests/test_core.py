@@ -16442,17 +16442,15 @@ class DeckTokenTests(unittest.TestCase):
     desktop's error red (below)."""
 
     # Disclosed exceptions — the ONLY literals allowed to remain
-    # in the served page (also documented at deck.build_page):
-    # - #e5534b: the desktop's established error red — a named
-    #   literal constant in main.py (RunBlock.ERROR_RED, "the
-    #   app's established literal error red — failure states, no
-    #   new hue"), also the connection dot's disconnected color.
-    #   TOKENS holds no error-red entry and its key set is pinned
-    #   by TokensTests, so the deck shares the value literally,
-    #   byte-identical to the desktop's.
-    # - #571d1d: the danger (stop/kill) button background — no
-    #   TOKENS surface carries a red tint and the desktop defines
-    #   no danger-surface token.
+    # in the served page (also documented at deck.build_page).
+    # T8 (2026-11-12) converted the last two stylesheet literals
+    # to tokens, so the deck is fully token-driven except the
+    # painted ember palette below: the error red now rides
+    # TOKENS["state_error"] (T7's token — the desktop's
+    # established error red, RunBlock.ERROR_RED in main.py) and
+    # the danger (stop/kill) button background rides
+    # TOKENS["surface_danger"]. Neither hex is allowlisted here
+    # any more; both reach the served page through their tokens.
     # - #141210 / #26221e, the FIRE_PALETTE ramp (#200d05,
     #   #400f03, #6e1704, #a52c06, #d95d0b, #f28c13, #ffc92e,
     #   #fff0a8) and the smoke rgb(150,155,165): the ember
@@ -16460,7 +16458,7 @@ class DeckTokenTests(unittest.TestCase):
     #   desktop's own ember painter (main.py FIRE_PALETTE and
     #   SMOKE_GRAY) — painted simulation colors, never stylesheet
     #   colors on either surface.
-    ALLOWLIST_HEX = {"#e5534b", "#571d1d", "#141210", "#26221e",
+    ALLOWLIST_HEX = {"#141210", "#26221e",
                      "#200d05", "#400f03", "#6e1704", "#a52c06",
                      "#d95d0b", "#f28c13", "#ffc92e", "#fff0a8"}
     ALLOWLIST_RGB = {(150, 155, 165)}
@@ -16554,6 +16552,60 @@ class DeckTokenTests(unittest.TestCase):
         self.assertEqual(assignments.count(ok_color), 9)
         self.assertEqual(assignments.count("#e5534b"), 19)
         self.assertEqual(set(assignments), {ok_color, "#e5534b"})
+
+
+class DeckDangerTokensTests(unittest.TestCase):
+    """T8 (GUIFX task list, 2026-11-12): the deck's last two
+    stylesheet literals — the error red and the danger-button
+    background — ride TOKENS now (state_error, T7's token, and
+    surface_danger), so the served page is fully token-driven
+    except the ember simulation's painted palette. The served
+    output is byte-identical to the pre-T8 page: the values did
+    not change, only where they come from."""
+
+    @classmethod
+    def setUpClass(cls):
+        import forge.main as main_mod
+        from forge import deck as deck_mod
+        cls.main = main_mod
+        cls.deck = deck_mod
+        cls.page = deck_mod.PAGE
+
+    def test_tokens_hold_the_danger_values(self):
+        self.assertEqual(self.main.TOKENS["state_error"], "#e5534b")
+        self.assertEqual(self.main.TOKENS["surface_danger"], "#571d1d")
+
+    def test_error_red_flows_from_the_token_not_a_pasted_copy(self):
+        fake = dict(self.main.TOKENS)
+        fake["state_error"] = "#123456"
+        built = self.deck.build_page(fake)
+        self.assertEqual(built.count("#123456"), 23)
+        self.assertNotIn("#e5534b", built)
+
+    def test_danger_background_flows_from_the_token(self):
+        fake = dict(self.main.TOKENS)
+        fake["surface_danger"] = "#654321"
+        built = self.deck.build_page(fake)
+        self.assertEqual(built.count("#654321"), 2)
+        self.assertNotIn("#571d1d", built)
+
+    def test_template_has_no_converted_literals_left(self):
+        # Strict: neither hex appears ANYWHERE in deck.py source —
+        # template, script, or comments — so a literal cannot creep
+        # back in any of the three. The ember palette values are
+        # still literals by design (see DeckTokenTests) and are
+        # not part of this assertion.
+        with open(self.deck.__file__, encoding="utf-8") as f:
+            source = f.read()
+        self.assertNotIn("#e5534b", source)
+        self.assertNotIn("#571d1d", source)
+        template = self.deck._PAGE_TEMPLATE
+        self.assertEqual(template.count("@{state_error}@"), 23)
+        self.assertEqual(template.count("@{surface_danger}@"), 2)
+
+    def test_served_page_still_carries_both_values(self):
+        self.assertEqual(self.page.count("#e5534b"), 23)
+        self.assertEqual(self.page.count("#571d1d"), 2)
 
 
 class DeckDisconnectTests(unittest.TestCase):
@@ -22369,15 +22421,20 @@ class TokensTests(unittest.TestCase):
     # The pinned STYLE literal: originally the pre-G7 snapshot;
     # regenerated programmatically from build_style(TOKENS) after
     # the 2026-11-09 palette re-base (do not hand-edit — regenerate).
-    EXPECTED_STYLE = "\nQWidget { background:#12100d; color:#eae6df; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }\nQMainWindow { background:#12100d; }\nQFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332e26, stop:0.05 #221f1a, stop:1 #201c17); border:0; }\nQFrame#sidebar { border-right:1px solid rgba(255,179,71,0.30); }\nQFrame#inspector { border-left:1px solid rgba(255,179,71,0.30); }\nQFrame#header { background:#221f1a; border-bottom:1px solid rgba(255,179,71,0.30); }\nQLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:#f3ede0; }\nQLabel#stamp { color:#c9aa7f; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }\nQLabel#muted { color:#a39a8b; }\nQLabel#section { color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQLabel#big { font-size:15px; font-weight:700; color:#f8f7f5; }\nQPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #38322a, stop:1 #2d2922); border:1px solid #554c3e; border-radius:7px; padding:8px 12px; color:#f0ede7; }\nQPushButton:hover { background:#433c31; border-color:rgba(255,179,71,0.45); }\nQPushButton:pressed { background:#201c17; }\nQPushButton:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c2611a, stop:1 #a34d12); border-color:#c2611a; color:white; font-weight:700; }\nQPushButton#primary:hover { background:#c2611a; }\nQPushButton#primary:pressed { background:#a34d12; }\nQPushButton#primary:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#nav { text-align:left; background:transparent; border:0; padding:9px 10px; color:#c4bdae; }\nQPushButton#nav:hover { background:#312c25; color:white; }\nQPushButton#nav:pressed { background:#2e2a20; }\nQPushButton#nav:disabled { color:#a39a8b; }\nQPushButton#navActive { text-align:left; background:#2e2a20; border:1px solid #a34d12; border-radius:7px; padding:9px 10px; color:#ffd9ae; }\nQPushButton#navActive:pressed { background:#201c17; }\nQPushButton#navActive:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:#1b1814; border:1px solid #453e33; border-radius:7px; padding:9px; selection-background-color:#a34d12; }\nQLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:rgba(255,179,71,0.55); }\nQTextBrowser { background:#201d18; border:1px solid rgba(255,179,71,0.38); border-radius:12px; padding:12px; }\nQComboBox QAbstractItemView { background:#27231d; selection-background-color:#a34d12; }\nQProgressBar { background:#1b1814; border:1px solid rgba(255,179,71,0.18); border-radius:5px; height:10px; text-align:center; font-size:9px; color:#e0dacf; }\nQProgressBar::chunk { background:#b47f4a; border-radius:3px; }\nQProgressBar#hot::chunk { background:#d97a26; }\nQProgressBar#crit::chunk { background:#c0392b; }\nQStatusBar { background:#201c17; color:#a39a8b; }\nQSplitter::handle { background:#3f382e; width:1px; }\nQScrollBar:vertical { background:#1b1814; width:10px; margin:0px; border:0; }\nQScrollBar:horizontal { background:#1b1814; height:10px; margin:0px; border:0; }\nQScrollBar::handle:vertical { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-height:20px; }\nQScrollBar::handle:horizontal { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-width:20px; }\nQScrollBar::handle:vertical:hover { background:#433c31; }\nQScrollBar::handle:horizontal:hover { background:#433c31; }\nQScrollBar::handle:vertical:pressed { background:#2d2922; }\nQScrollBar::handle:horizontal:pressed { background:#2d2922; }\nQScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }\nQScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }\nQScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; background:transparent; border:0; }\nQScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }\nQScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }\nQScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }\nQToolTip { background:#231f1a; border:1px solid #4a4236; color:#eae6df; padding:4px 8px; }\nQTabWidget::pane { border:1px solid rgba(255,179,71,0.18); background:#201c17; }\nQTabBar::tab { background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; color:#c4bdae; }\nQTabBar::tab:hover { background:#312c25; color:white; }\nQTabBar::tab:selected { background:#221f1a; border-bottom:2px solid #c2611a; color:#ffd9ae; }\nQCheckBox:disabled { color:#a39a8b; }\nQCheckBox::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:3px; background:#1b1814; }\nQCheckBox::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQCheckBox::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQCheckBox::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQRadioButton:disabled { color:#a39a8b; }\nQRadioButton::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:8px; background:#1b1814; }\nQRadioButton::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQRadioButton::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQRadioButton::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQListWidget::item { padding:4px 8px; color:#eae6df; }\nQListWidget::item:hover { background:#312c25; }\nQListWidget::item:selected { background:#383229; }\nQPushButton#accordion { text-align:left; background:transparent; border:0; padding:4px 2px; color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQPushButton#accordion:hover { color:#e2c9a9; background:transparent; }\nQPushButton#accordion:pressed { background:#312c25; }\nQPushButton#accordion:disabled { color:#a39a8b; }\nQPushButton#topbarBtn { padding:5px 10px; }\nQPushButton#topbarBtn:checked { background:#40392f; border-color:#a34d12; color:#ffd9ae; }\nQPushButton#topbarBtn:pressed { background:#201c17; }\nQPushButton#topbarBtn:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQScrollArea#historyScroll { background:#201c17; border:0; }\nQWidget#historyContent { background:#201c17; }\nQMenu { background:#231f1a; border:1px solid #4a4236; }\nQMenu::item { padding:7px 22px 7px 12px; color:#eae6df; }\nQMenu::item:selected { background:#383229; }\nQMenu::separator { height:1px; background:#3f382e; margin:4px 8px; }\n"
+    EXPECTED_STYLE = "\nQWidget { background:#12100d; color:#eae6df; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }\nQMainWindow { background:#12100d; }\nQFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332e26, stop:0.05 #221f1a, stop:1 #201c17); border:0; }\nQFrame#sidebar { border-right:1px solid rgba(255,179,71,0.30); }\nQFrame#inspector { border-left:1px solid rgba(255,179,71,0.30); }\nQFrame#header { background:#221f1a; border-bottom:1px solid rgba(255,179,71,0.30); }\nQLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:#f3ede0; }\nQLabel#stamp { color:#c9aa7f; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }\nQLabel#muted { color:#a39a8b; }\nQLabel#section { color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQLabel#big { font-size:15px; font-weight:700; color:#f8f7f5; }\nQPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #38322a, stop:1 #2d2922); border:1px solid #554c3e; border-radius:7px; padding:8px 12px; color:#f0ede7; }\nQPushButton:hover { background:#433c31; border-color:rgba(255,179,71,0.45); }\nQPushButton:pressed { background:#201c17; }\nQPushButton:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c2611a, stop:1 #a34d12); border-color:#c2611a; color:white; font-weight:700; }\nQPushButton#primary:hover { background:#c2611a; }\nQPushButton#primary:pressed { background:#a34d12; }\nQPushButton#primary:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#nav { text-align:left; background:transparent; border:0; padding:9px 10px; color:#c4bdae; }\nQPushButton#nav:hover { background:#312c25; color:white; }\nQPushButton#nav:pressed { background:#2e2a20; }\nQPushButton#nav:disabled { color:#a39a8b; }\nQPushButton#navActive { text-align:left; background:#2e2a20; border:1px solid #a34d12; border-radius:7px; padding:9px 10px; color:#ffd9ae; }\nQPushButton#navActive:pressed { background:#201c17; }\nQPushButton#navActive:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:#1b1814; border:1px solid #453e33; border-radius:7px; padding:9px; selection-background-color:#a34d12; }\nQLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:rgba(255,179,71,0.55); }\nQTextBrowser { background:#201d18; border:1px solid rgba(255,179,71,0.38); border-radius:12px; padding:12px; selection-background-color:#a34d12; }\nQComboBox QAbstractItemView { background:#27231d; selection-background-color:#a34d12; }\nQListWidget, QTableWidget { selection-background-color:#a34d12; }\nQProgressBar { background:#1b1814; border:1px solid rgba(255,179,71,0.18); border-radius:5px; height:10px; text-align:center; font-size:9px; color:#e0dacf; }\nQProgressBar::chunk { background:#b47f4a; border-radius:3px; }\nQProgressBar#hot::chunk { background:#d97a26; }\nQProgressBar#crit::chunk { background:#c0392b; }\nQStatusBar { background:#201c17; color:#a39a8b; }\nQSplitter::handle { background:#3f382e; width:1px; }\nQScrollBar:vertical { background:#1b1814; width:10px; margin:0px; border:0; }\nQScrollBar:horizontal { background:#1b1814; height:10px; margin:0px; border:0; }\nQScrollBar::handle:vertical { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-height:20px; }\nQScrollBar::handle:horizontal { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-width:20px; }\nQScrollBar::handle:vertical:hover { background:#433c31; }\nQScrollBar::handle:horizontal:hover { background:#433c31; }\nQScrollBar::handle:vertical:pressed { background:#2d2922; }\nQScrollBar::handle:horizontal:pressed { background:#2d2922; }\nQScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }\nQScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }\nQScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; background:transparent; border:0; }\nQScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }\nQScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }\nQScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }\nQToolTip { background:#231f1a; border:1px solid #4a4236; color:#eae6df; padding:4px 8px; }\nQTabWidget::pane { border:1px solid rgba(255,179,71,0.18); background:#201c17; }\nQTabBar::tab { background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; color:#c4bdae; }\nQTabBar::tab:hover { background:#312c25; color:white; }\nQTabBar::tab:selected { background:#221f1a; border-bottom:2px solid #c2611a; color:#ffd9ae; }\nQCheckBox:disabled { color:#a39a8b; }\nQCheckBox::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:3px; background:#1b1814; }\nQCheckBox::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQCheckBox::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQCheckBox::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQRadioButton:disabled { color:#a39a8b; }\nQRadioButton::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:8px; background:#1b1814; }\nQRadioButton::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQRadioButton::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQRadioButton::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQListWidget::item { padding:4px 8px; color:#eae6df; }\nQListWidget::item:hover { background:#312c25; }\nQListWidget::item:selected { background:#383229; }\nQPushButton#accordion { text-align:left; background:transparent; border:0; padding:4px 2px; color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQPushButton#accordion:hover { color:#e2c9a9; background:transparent; }\nQPushButton#accordion:pressed { background:#312c25; }\nQPushButton#accordion:disabled { color:#a39a8b; }\nQPushButton#topbarBtn { padding:5px 10px; }\nQPushButton#topbarBtn:checked { background:#40392f; border-color:#a34d12; color:#ffd9ae; }\nQPushButton#topbarBtn:pressed { background:#201c17; }\nQPushButton#topbarBtn:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQScrollArea#historyScroll { background:#201c17; border:0; }\nQWidget#historyContent { background:#201c17; }\nQMenu { background:#231f1a; border:1px solid #4a4236; }\nQMenu::item { padding:7px 22px 7px 12px; color:#eae6df; }\nQMenu::item:selected { background:#383229; }\nQMenu::separator { height:1px; background:#3f382e; margin:4px 8px; }\n"
 
     # Tokens STYLE itself consumes (the template's placeholders).
     STYLE_TOKENS = ['accent_primary_bottom', 'accent_primary_top', 'border_button', 'border_input', 'border_menu', 'padding_accordion', 'padding_button', 'padding_chat', 'padding_input', 'padding_menu_item', 'padding_nav', 'padding_topbar', 'progress_chunk', 'progress_crit', 'progress_hot', 'radius_card', 'radius_chunk', 'radius_control', 'radius_progress', 'rim', 'rim_chat', 'rim_focus', 'rim_hover', 'rim_soft', 'surface_base', 'surface_button_bottom', 'surface_button_hover', 'surface_button_top', 'surface_chat', 'surface_combo_view', 'surface_glass_bottom', 'surface_glass_mid', 'surface_glass_top', 'surface_input', 'surface_menu', 'surface_menu_selected', 'surface_nav_active', 'surface_nav_hover', 'surface_splitter', 'surface_topbar_checked', 'text_accordion_hover', 'text_amber_light', 'text_base', 'text_big', 'text_brand', 'text_button', 'text_muted', 'text_nav', 'text_progress', 'text_section', 'text_white']
 
     # Tokens that exist only for inline stylesheets in main.py.
+    # T7 (2026-11-12) adds the state trio: state_error /
+    # state_thinking / state_warn (error, thinking and warning
+    # colors for the agent-state label and connection lamp).
     INLINE_ONLY_TOKENS = ["accent_amber", "radius_compose",
-                          "state_idle", "surface_compose_bottom",
-                          "surface_compose_top"]
+                          "state_error", "state_idle",
+                          "state_thinking", "state_warn",
+                          "surface_compose_bottom",
+                          "surface_compose_top", "surface_danger"]
 
     @classmethod
     def setUpClass(cls):
@@ -31346,6 +31403,92 @@ class ScrollbarStyleTests(unittest.TestCase):
 
 
 
+class SelectionStyleTests(unittest.TestCase):
+    """T4 (GUIFX task list, 2026-11-12): selection-background-color
+    was set only on the input widgets and the combo view, so the chat
+    QTextBrowser, the QListWidgets and the provider table fell back to
+    the system palette highlight — blue on many Linux themes, a palette
+    leak on the most-used surface. Every selectable-text family now
+    carries the same established selection value as the inputs
+    (accent_primary_bottom); no selection-color is set, matching the
+    input pattern."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        import forge.main as main_mod
+        cls.main = main_mod
+
+    @staticmethod
+    def _selection_lines(style):
+        return [ln for ln in style.splitlines()
+                if "selection-background-color" in ln]
+
+    def test_textbrowser_carries_selection_color(self):
+        style = self.main.STYLE
+        lines = [ln for ln in style.splitlines()
+                 if ln.startswith("QTextBrowser {")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("selection-background-color:%s;"
+                      % self.main.TOKENS["accent_primary_bottom"],
+                      lines[0])
+
+    def test_list_and_table_carry_selection_color(self):
+        style = self.main.STYLE
+        lines = [ln for ln in style.splitlines()
+                 if ln.startswith("QListWidget, QTableWidget {")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("selection-background-color:%s;"
+                      % self.main.TOKENS["accent_primary_bottom"],
+                      lines[0])
+
+    def test_selection_is_one_value_app_wide(self):
+        import re
+        values = set()
+        for ln in self._selection_lines(self.main.STYLE):
+            m = re.search(r"selection-background-color:([^;]+);", ln)
+            self.assertIsNotNone(m, "unparsable selection rule: %s" % ln)
+            values.add(m.group(1))
+        self.assertEqual(values,
+                         {self.main.TOKENS["accent_primary_bottom"]},
+                         "selection color is not one value app-wide: %s"
+                         % sorted(values))
+
+    def test_selection_colors_come_from_tokens(self):
+        import re
+        tokens = set(self.main.TOKENS.values())
+        for ln in self._selection_lines(self.main.STYLE):
+            for raw in re.findall(r"#[0-9a-fA-F]{6}\b", ln):
+                self.assertIn(raw, tokens,
+                              "selection color %s is not a TOKENS value"
+                              % raw)
+            for raw in re.findall(r"rgba?\([^)]*\)", ln):
+                self.assertIn(raw, tokens,
+                              "selection color %s is not a TOKENS value"
+                              % raw)
+
+    def test_selection_color_is_not_blue(self):
+        import colorsys
+        value = self.main.TOKENS["accent_primary_bottom"]
+        h = value.lstrip("#")
+        r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        hue, _light, sat = colorsys.rgb_to_hls(r, g, b)
+        self.assertFalse(190.0 <= hue * 360.0 <= 250.0 and sat > 0.08,
+                         "selection color %s is blue (hue %.1f, sat %.3f)"
+                         % (value, hue * 360.0, sat))
+
+    def test_compact_density_keeps_selection_rules(self):
+        compact = self.main.build_style("compact")
+        browser = [ln for ln in compact.splitlines()
+                   if ln.startswith("QTextBrowser {")]
+        self.assertEqual(len(browser), 1)
+        self.assertIn("selection-background-color:", browser[0])
+        self.assertIn("QListWidget, QTableWidget {", compact)
+
+
+
+
 class WidgetFamilyStyleTests(unittest.TestCase):
     """T3 (GUIFX task list, 2026-11-11): four widget families had
     zero template rules and rendered platform-default — tooltips,
@@ -31478,6 +31621,471 @@ class WidgetFamilyStyleTests(unittest.TestCase):
                      "QRadioButton::indicator:checked {",
                      "QListWidget::item:selected {"):
             self.assertIn(frag, compact, "compact lost %s" % frag)
+
+
+class LightMachineChipTests(unittest.TestCase):
+    """T5 (GUIFX task list, 2026-11-12): the Light Machine
+    indicator chip in the header gauge stack. The profile is
+    otherwise invisible (a Settings checkbox only) — the chip
+    shows while the flag is on and hides while it is off, riding
+    the existing 3 s gauge pass (_apply_gauges); no timer of its
+    own. Visibility is asserted with isHidden(): the window is
+    never shown in this harness, so isVisible() would read False
+    for every child regardless of the chip's own state."""
+
+    # A well-formed gauge snapshot: every key _apply_gauges reads.
+    _SNAP = {"avail_gb": 5.0, "total_gb": 8.0, "load_1min": 1.0,
+             "threads": 4, "cpu_busy": 10.0, "ollama_running": True,
+             "ollama_loaded": ["qwen3:2b"],
+             "ollama_loaded_sizes": {"qwen3:2b": 2000000000}}
+
+    @classmethod
+    def setUpClass(cls):
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        # The window's startup model refresh runs on a thread;
+        # drain it before any test runs (the
+        # PrivacyWindowTests pattern).
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.app.processEvents()
+        cls._orig_flag = bool(
+            cls.win.settings.get("light_machine", False))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.settings["light_machine"] = cls._orig_flag
+        cls.win.close()
+
+    def setUp(self):
+        # Each test starts from the flag OFF, chip hidden.
+        self.win.settings["light_machine"] = False
+        self.win._apply_gauges(self._SNAP)
+
+    def tearDown(self):
+        self.win.settings["light_machine"] = False
+        self.win._apply_gauges(self._SNAP)
+
+    def test_chip_exists_in_the_header_gauge_stack(self):
+        from PySide6.QtWidgets import QLabel
+        chip = self.win.light_machine_chip
+        self.assertIsInstance(chip, QLabel)
+        # It lives in the header frame (the gauge stack's home):
+        # widgets added to the header's layout tree reparent to
+        # the header frame.
+        self.assertEqual(chip.parentWidget().objectName(), "header")
+
+    def test_chip_hidden_when_light_machine_off(self):
+        self.win.settings["light_machine"] = False
+        self.win._apply_gauges(self._SNAP)
+        self.assertTrue(self.win.light_machine_chip.isHidden())
+
+    def test_chip_visible_when_light_machine_on(self):
+        self.win.settings["light_machine"] = True
+        self.win._apply_gauges(self._SNAP)
+        self.assertFalse(self.win.light_machine_chip.isHidden())
+
+    def test_chip_follows_flag_toggles(self):
+        win = self.win
+        win.settings["light_machine"] = True
+        win._apply_gauges(self._SNAP)
+        self.assertFalse(win.light_machine_chip.isHidden())
+        win.settings["light_machine"] = False
+        win._apply_gauges(self._SNAP)
+        self.assertTrue(win.light_machine_chip.isHidden())
+        win.settings["light_machine"] = True
+        win._apply_gauges(self._SNAP)
+        self.assertFalse(win.light_machine_chip.isHidden())
+
+    def test_chip_text_matches_the_settings_wording(self):
+        # The Settings checkbox reads "Light machine: one model
+        # in memory at a time" — the chip carries the same name
+        # in the header badges' uppercase idiom (LOCAL ONLY).
+        self.assertEqual(self.win.light_machine_chip.text(),
+                         "LIGHT MACHINE")
+
+    def test_chip_styling_resolves_from_tokens(self):
+        import re
+        import forge.main as main_mod
+        sheet = self.win.light_machine_chip.styleSheet()
+        for token in ("surface_nav_active", "accent_amber", "rim"):
+            self.assertIn(main_mod.TOKENS[token], sheet)
+        # No stray hex in the chip's styling: every color in the
+        # stylesheet is a TOKENS value.
+        for hx in re.findall(r"#[0-9a-fA-F]{6}", sheet):
+            self.assertIn(hx, main_mod.TOKENS.values())
+
+
+
+class HeaderFitTests(unittest.TestCase):
+    """Header fit (GUIFX T5 follow-up, 2026-11-12): Joshua photographed
+    his Mint PC and the header CLIPS — the LIGHT MACHINE chip read
+    "IGHT MACHINE", the CPU readout was cut on both sides, "IN RAM (LO"
+    was cut off, and the title was clipped too. The cause, measured
+    2026-11-12: the header's TRUE content minimum is ~1094 px with
+    real gauge text (the layout's cached minimumSizeHint underreports
+    at 982 — it is frozen from construction time, when the readouts
+    still said "—"), while the center pane gets only 500/756/842/1076
+    px at window widths 1024/1280/1366/1600 (the panels keep their
+    244/268 defaults and the center absorbs the rest, because the
+    center's minimumWidth was only 320). Qt's over-constrained box
+    layout then squeezes labels below their text width and overlaps
+    the fixed-width items (120 px bars, 200/104 px combos). These are
+    GEOMETRY assertions, not screenshots: at each width, with Light
+    Machine on, no two header sections overlap and no header text is
+    clipped. They FAIL on the pre-change code at all four widths."""
+
+    # 1500 is the squeeze-zone regression width: with the old
+    # minimum-based flip threshold the header stayed single-row at
+    # a 976 px center and the title was squeezed to 106 px against
+    # 121 px of text (the threshold is the sizeHint total now).
+    WIDTHS = (1600, 1500, 1366, 1280, 1024)
+
+    # A well-formed gauge snapshot: every key _apply_gauges reads
+    # (the LightMachineChipTests snapshot, Joshua's PC values).
+    _SNAP = {"avail_gb": 5.0, "total_gb": 8.0, "load_1min": 1.0,
+             "threads": 4, "cpu_busy": 10.0, "ollama_running": True,
+             "ollama_loaded": ["qwen3:2b"],
+             "ollama_loaded_sizes": {"qwen3:2b": 2000000000}}
+
+    @classmethod
+    def setUpClass(cls):
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow, STYLE
+        cls.app.setStyleSheet(STYLE)
+        cls.win = ForgeWindow()
+        # Un-collapse the sidebar explicitly: _layout_state derives
+        # "collapsed" from sidebar.isVisible(), and a ForgeWindow
+        # that was created and closed WITHOUT ever being shown (as
+        # other test classes in this process do) saves
+        # layout_sidebar_collapsed=True to the shared settings —
+        # this window would then construct with a hidden sidebar
+        # (size 0, and setSizes cannot restore a hidden widget),
+        # which measures the header at the wrong center width.
+        cls.win.set_sidebar_collapsed(False)
+        # The window's startup model refresh runs on a thread;
+        # drain it before any test runs (the
+        # PrivacyWindowTests pattern).
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.app.processEvents()
+        cls._orig_flag = bool(
+            cls.win.settings.get("light_machine", False))
+        # Joshua's PC state: Light Machine on, gauges populated, a
+        # long model name in the combo (as on his PC).
+        cls.win.settings["light_machine"] = True
+        cls.win._apply_gauges(cls._SNAP)
+        if cls.win.model_combo.findText("maternion/minicpm5-heretic") < 0:
+            cls.win.model_combo.addItem("maternion/minicpm5-heretic")
+        cls.win.model_combo.setCurrentText("maternion/minicpm5-heretic")
+        cls.win.model_combo.addItem("qwen3:2b")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.settings["light_machine"] = cls._orig_flag
+        cls.win.close()
+
+    def _header_frame(self):
+        # The center header: the QFrame named "header" parented to
+        # the center pane (the 42 px topbar carries the same
+        # objectName, so the name alone does not disambiguate).
+        from PySide6.QtWidgets import QFrame
+        center = self.win.main_splitter.widget(1)
+        frames = center.findChildren(QFrame, "header")
+        self.assertEqual(len(frames), 1, "expected one center header")
+        return frames[0]
+
+    def _settle(self, width):
+        # Settle at a width, deterministically: come down from 1600
+        # (single-row mode) every time, so the responsive header's
+        # hysteresis cannot make the result depend on the previous
+        # width. Geometry needs a shown window.
+        import time
+        for target in (1600, width):
+            self.win.resize(target, 800)
+            self.win.show()
+            for _ in range(8):
+                self.app.processEvents()
+                time.sleep(0.05)
+            if target == 1600:
+                # Establish the documented panel state explicitly:
+                # _apply_panel_sizes applies the saved sizes through
+                # a 50-retry singleShot chain, and under a loaded
+                # suite run the retries can exhaust while the window
+                # is still hidden, leaving the sidebar at 0 — the
+                # header would then be measured at the wrong center
+                # width (a pre-existing startup race, not this fix).
+                # The resize to the target width redistributes from
+                # this known state, which is the property under test.
+                self.win.main_splitter.setSizes([244, 1076, 268])
+                for _ in range(4):
+                    self.app.processEvents()
+                    time.sleep(0.05)
+        self.win._apply_gauges(self._SNAP)
+        for _ in range(4):
+            self.app.processEvents()
+            time.sleep(0.05)
+
+    def _tracked(self, header):
+        # (name, widget) for every header section, all in header
+        # coordinates (every header child is parented to the frame).
+        from PySide6.QtWidgets import QLabel
+        title = None
+        stamps = {}
+        for lab in header.findChildren(QLabel):
+            if lab.objectName() == "section" and \
+                    lab.text().startswith("AGENT"):
+                title = lab
+            elif lab.text() in ("RAM", "CPU", "MODELS"):
+                stamps[lab.text()] = lab
+        self.assertIsNotNone(title, "title label not found")
+        return [
+            ("title", title),
+            ("ram_lab", stamps["RAM"]),
+            ("ram_bar", self.win.ram_bar),
+            ("ram_text", self.win.ram_text),
+            ("cpu_lab", stamps["CPU"]),
+            ("cpu_bar", self.win.cpu_bar),
+            ("cpu_text", self.win.cpu_text),
+            ("models_lab", stamps["MODELS"]),
+            ("models_text", self.win.models_text),
+            ("chip", self.win.light_machine_chip),
+            ("loaded_stamp", self.win.loaded_stamp),
+            ("loaded_label", self.win.loaded_label),
+            ("model_combo", self.win.model_combo),
+            ("privacy_badge", self.win.privacy_badge),
+            ("mode_combo", self.win.mode_combo),
+            ("council_check", self.win.council_check),
+            ("connection", self.win.connection),
+        ]
+
+    @staticmethod
+    def _text_fits(label):
+        # The DISPLAYED text fits its rect: a label the code failed
+        # to elide still shows its full text, wider than its rect,
+        # so this catches raw clipping whatever the mechanism.
+        if not label.text():
+            return True
+        need = label.fontMetrics().horizontalAdvance(label.text())
+        return need <= label.width()
+
+    def test_no_header_overlaps_at_any_width(self):
+        for width in self.WIDTHS:
+            with self.subTest(width=width):
+                self._settle(width)
+                header = self._header_frame()
+                items = [(n, w) for n, w in self._tracked(header)
+                         if not w.isHidden()]
+                for i in range(len(items)):
+                    for j in range(i + 1, len(items)):
+                        na, wa = items[i]
+                        nb, wb = items[j]
+                        self.assertFalse(
+                            wa.geometry().intersects(wb.geometry()),
+                            f"{na} overlaps {nb} at {width}px "
+                            f"({wa.geometry().getRect()} vs "
+                            f"{wb.geometry().getRect()})")
+
+    def test_no_clipped_header_text_at_any_width(self):
+        from PySide6.QtWidgets import QLabel
+        for width in self.WIDTHS:
+            with self.subTest(width=width):
+                self._settle(width)
+                header = self._header_frame()
+                for name, widget in self._tracked(header):
+                    if isinstance(widget, QLabel) and \
+                            not widget.isHidden():
+                        self.assertTrue(
+                            self._text_fits(widget),
+                            f"{name} text {widget.text()!r} clipped at "
+                            f"{width}px (needs "
+                            f"{widget.fontMetrics().horizontalAdvance(widget.text())}px, "
+                            f"has {widget.width()}px)")
+
+    def test_chip_clear_of_neighbors(self):
+        for width in self.WIDTHS:
+            with self.subTest(width=width):
+                self._settle(width)
+                header = self._header_frame()
+                chip = self.win.light_machine_chip
+                self.assertFalse(chip.isHidden(),
+                                 "chip hidden with Light Machine on")
+                for name, widget in self._tracked(header):
+                    if name in ("chip", "models_text"):
+                        continue
+                    if widget.isHidden():
+                        continue
+                    self.assertFalse(
+                        chip.geometry().intersects(widget.geometry()),
+                        f"chip overlaps {name} at {width}px")
+
+    def test_gauges_clear_of_loaded_stamp(self):
+        for width in self.WIDTHS:
+            with self.subTest(width=width):
+                self._settle(width)
+                stamp = self.win.loaded_stamp
+                label = self.win.loaded_label
+                for name, widget in (
+                        ("ram_bar", self.win.ram_bar),
+                        ("ram_text", self.win.ram_text),
+                        ("cpu_bar", self.win.cpu_bar),
+                        ("cpu_text", self.win.cpu_text),
+                        ("models_text", self.win.models_text),
+                        ("chip", self.win.light_machine_chip)):
+                    if widget.isHidden():
+                        continue
+                    self.assertFalse(
+                        widget.geometry().intersects(stamp.geometry()),
+                        f"{name} overlaps the loaded stamp at {width}px")
+                    self.assertFalse(
+                        widget.geometry().intersects(label.geometry()),
+                        f"{name} overlaps the loaded label at {width}px")
+
+    def test_title_shows_in_full_at_1600(self):
+        # Elision must not wrongly trigger where there is room —
+        # and at 1366 the header stacks (two-row mode) precisely so
+        # the title still reads in full there too.
+        for width in (1600, 1366):
+            with self.subTest(width=width):
+                self._settle(width)
+                header = self._header_frame()
+                title = dict(self._tracked(header))["title"]
+                self.assertEqual(title.text(), "AGENT WORKSPACE")
+
+    def test_center_minimum_protects_the_header(self):
+        # At the narrowest width the splitter must still give the
+        # center pane at least the two-row header's minimum, without
+        # pushing either panel below its own minimum.
+        self._settle(1024)
+        sizes = self.win.main_splitter.sizes()
+        self.assertGreaterEqual(sizes[0], 180, "sidebar below minimum")
+        self.assertGreaterEqual(sizes[2], 200, "inspector below minimum")
+        double_min = self.win._header_double_min_width()
+        self.assertLessEqual(double_min, 560,
+                             "two-row header minimum grew past its bound")
+        self.assertGreaterEqual(sizes[1], double_min,
+                                "center starved below the two-row minimum")
+
+
+
+class StateTokensTests(unittest.TestCase):
+    """T7 (GUIFX task list, 2026-11-12): TOKENS held no error /
+    danger entry, so state colors drifted in hardcoded per call
+    site — the error red #e5534b in three places, a DIFFERENT red
+    #e28b83 on the agent-state ERROR label, #ff8c3a for the
+    connection warning and #e6c16c for THINKING. That is exactly
+    how the blue drift happened. The three state_* tokens are the
+    one home for those colors now; this class pins the values,
+    pins the sweep (no swept literal may creep back outside the
+    TOKENS table and the dated T7 comment), and pins the swept
+    sites' rendered strings."""
+
+    # The four literals the sweep removed from call sites. #c0392b
+    # is NOT here: it already lives in TOKENS as progress_crit
+    # (diff word-removal reads it through TOKENS).
+    SWEPT = ("#e5534b", "#e28b83", "#ff8c3a", "#e6c16c")
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        import forge.main as main_mod
+        cls.main = main_mod
+
+    def test_state_tokens_exist_with_exact_values(self):
+        tokens = self.main.TOKENS
+        self.assertEqual(tokens["state_error"], "#e5534b")
+        self.assertEqual(tokens["state_thinking"], "#e6c16c")
+        self.assertEqual(tokens["state_warn"], "#ff8c3a")
+
+    def test_compact_density_carries_the_state_tokens(self):
+        # TOKENS_COMPACT overrides paddings only; build_style
+        # merges dict(TOKENS) + TOKENS_COMPACT, so the state
+        # tokens ride through to compact unchanged.
+        merged = dict(self.main.TOKENS)
+        merged.update(self.main.TOKENS_COMPACT)
+        self.assertEqual(merged["state_error"], "#e5534b")
+        self.assertEqual(merged["state_thinking"], "#e6c16c")
+        self.assertEqual(merged["state_warn"], "#ff8c3a")
+        # And they are inline-only: the template holds no
+        # placeholder for them, so their values must not appear
+        # in either density's generated STYLE.
+        for name in ("state_error", "state_thinking", "state_warn"):
+            self.assertNotIn(self.main.TOKENS[name],
+                             self.main.build_style("compact"))
+            self.assertNotIn(self.main.TOKENS[name],
+                             self.main.build_style())
+
+    def test_no_swept_literal_outside_tokens_table_and_t7_comment(
+            self):
+        import os
+        path = os.path.join(os.path.dirname(self.main.__file__),
+                            "main.py")
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+        # Excluded span: the dated T7 comment block through the end
+        # of the TOKENS table (the table's closing brace). The
+        # literals may live there — the token definitions and the
+        # comment recording the sweep — and nowhere else.
+        start = next(i for i, ln in enumerate(lines)
+                     if ln.startswith("# T7 (GUIFX task list"))
+        table_open = next(i for i, ln in enumerate(lines)
+                          if ln.startswith("TOKENS = {"))
+        table_close = next(i for i in range(table_open, len(lines))
+                           if lines[i].rstrip() == "}")
+        self.assertLess(start, table_open)
+        self.assertLess(table_open, table_close)
+        for i, ln in enumerate(lines):
+            if start <= i <= table_close:
+                continue
+            for lit in self.SWEPT:
+                self.assertNotIn(lit, ln,
+                                 "swept literal %s back in main.py "
+                                 "line %d: %s" % (lit, i + 1,
+                                                  ln.strip()))
+
+    def test_swept_sites_reference_the_tokens(self):
+        import os
+        path = os.path.join(os.path.dirname(self.main.__file__),
+                            "main.py")
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        # RunBlock.ERROR_RED reads the token; the Models badge dict,
+        # the connection lamp and the agent-state label do too.
+        self.assertIn('ERROR_RED = TOKENS["state_error"]', src)
+        self.assertIn('modelfit_mod.TOO_LARGE: TOKENS["state_error"]',
+                      src)
+        self.assertIn("TOKENS['state_warn']", src)
+        self.assertIn("TOKENS['state_error']", src)
+        self.assertIn("TOKENS['state_thinking']", src)
+        # The swept sites render exactly the strings they rendered
+        # before — except the ERROR label, which unifies onto the
+        # established error red (its old muted #e28b83 is gone).
+        t = self.main.TOKENS
+        self.assertEqual(
+            f"color:{t['state_error']};font-weight:700;",
+            "color:#e5534b;font-weight:700;")
+        self.assertEqual(
+            f"color:{t['state_thinking']};font-weight:700;",
+            "color:#e6c16c;font-weight:700;")
+        self.assertEqual(
+            f"color:{t['state_warn']};font-size:17px;",
+            "color:#ff8c3a;font-size:17px;")
+        self.assertEqual(self.main.RunBlock.ERROR_RED, "#e5534b")
+
 
 
 class RebaseGuardTests(unittest.TestCase):
@@ -49323,3 +49931,3306 @@ class FinishingTouchesTests(unittest.TestCase):
         self.assertIn("## Finishing touches", prompt)
         # The Fix requests sentence still stands beside it.
         self.assertIn("## Fix requests", prompt)
+
+
+class AutofixLoopTests(unittest.TestCase):
+    """Tier 2 #4 (2026-11-12): Autofix as a
+    bounded loop. A review's findings are fixed a few at a time
+    — one Code turn per round, a re-review after each round —
+    capped at 3 rounds per review chain and 5 findings per
+    round, worst first. The owner clicks every round and
+    approves every write at the existing tool gate; nothing runs
+    on its own. Rounds and re-reviews are recorded in the review
+    under ## Autofix rounds, and the chain round rides the
+    re-review filename (autofix-<stem>-r<N>.md)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _review_text(self, findings):
+        return ("# Review\n\n## Findings\n" + findings +
+                "\n\n## Coverage\nall files.\n")
+
+    # Seven findings, mixed severities, in file order — the
+    # round takes the worst five: both Criticals, both Majors,
+    # then the first Minor.
+    _SEVEN = (
+        "- [Minor · Bug · Source: Review] minor1.py:1 — first "
+        "minor — Fix: tidy it\n"
+        "- [Critical · Security · Source: Review] crit1.py:2 — "
+        "first critical — Fix: lock it down\n"
+        "  Driver: In crit1.py, lock it down; then run the auth "
+        "test and confirm it passes.\n"
+        "- [Trivial · Nitpick · Source: Review] triv1.py:3 — "
+        "only trivial — Fix: rename it\n"
+        "- [Major · Bug · Source: Review] major1.py:4 — first "
+        "major — Fix: guard it\n"
+        "- [Minor · Bug · Source: Review] minor2.py:5 — second "
+        "minor — Fix: tidy it\n"
+        "- [Critical · Bug · Source: Review] crit2.py:6 — "
+        "second critical — Fix: cap it\n"
+        "- [Major · Performance · Source: Review] major2.py:7 "
+        "— second major — Fix: cache it\n"
+        "  Driver: In major2.py, cache it; then run the bench "
+        "and confirm it is faster.\n")
+
+    def _autofix_review_window(self, name="loop-review.md",
+                               findings=None):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(
+            self._review_text(
+                findings if findings is not None else self._SEVEN),
+            encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index(name)
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    def _read_review(self, name="loop-review.md"):
+        return (self.root / ".forge" / "reviews" / name).read_text(
+            encoding="utf-8")
+
+    # -- the chain name ------------------------------------------------------
+
+    def test_chain_name_parsing(self):
+        from forge import modes as modes_mod
+        self.assertEqual(
+            modes_mod.autofix_round_from_name("fix-review.md"), 0)
+        self.assertEqual(
+            modes_mod.autofix_round_from_name(
+                "autofix-fix-review-r1.md"), 1)
+        self.assertEqual(
+            modes_mod.autofix_round_from_name(
+                "autofix-fix-review-r2.md"), 2)
+        self.assertEqual(
+            modes_mod.autofix_round_from_name("autofix-x.md"), 0)
+        self.assertEqual(modes_mod.autofix_round_from_name(""), 0)
+        self.assertEqual(
+            modes_mod.autofix_chain_stem("fix-review.md"),
+            "fix-review")
+        self.assertEqual(
+            modes_mod.autofix_chain_stem(
+                "autofix-fix-review-r1.md"), "fix-review")
+        self.assertEqual(
+            modes_mod.autofix_chain_stem(""), "review")
+
+    # -- round selection -----------------------------------------------------
+
+    def test_next_findings_severity_order_and_cap(self):
+        from forge import modes as modes_mod
+        body = modes_mod.section_body(
+            self._review_text(self._SEVEN), "Findings")
+        parsed = modes_mod.parse_findings_body(body)
+        chosen = modes_mod.autofix_next_findings(parsed, [], [])
+        self.assertEqual(len(chosen), 5)
+        # Worst first, file order within a severity.
+        self.assertEqual(
+            [modes_mod.finding_file(f["text"]) for f in chosen],
+            ["crit1.py", "crit2.py", "major1.py", "major2.py",
+             "minor1.py"])
+        # The cap binds even when more are eligible.
+        self.assertEqual(
+            len(modes_mod.autofix_next_findings(
+                parsed, [], [], cap=2)), 2)
+
+    def test_next_findings_skips_sent_and_requested(self):
+        from forge import modes as modes_mod
+        body = modes_mod.section_body(
+            self._review_text(self._SEVEN), "Findings")
+        parsed = modes_mod.parse_findings_body(body)
+        sent = [parsed[1]["text"]]  # crit1.py, already sent
+        requested = [parsed[3]["text"]]  # major1.py, Fix button
+        chosen = modes_mod.autofix_next_findings(
+            parsed, sent, requested)
+        files = [modes_mod.finding_file(f["text"])
+                 for f in chosen]
+        self.assertNotIn("crit1.py", files)
+        self.assertNotIn("major1.py", files)
+        self.assertEqual(files[0], "crit2.py")
+
+    # -- the record ----------------------------------------------------------
+
+    def test_record_round_and_rereview_round_trip(self):
+        from forge import modes as modes_mod
+        text = self._review_text(self._SEVEN)
+        updated = modes_mod.record_autofix_round(
+            text, "2026-11-12 18:30", 1,
+            ["crit1.py:2 — first critical",
+             "crit2.py:6 — second critical"],
+            "Autofix round 1 for review loop-review.md.")
+        updated = modes_mod.record_autofix_rereview(
+            updated, 1, "autofix-loop-review-r1.md")
+        rounds = modes_mod.autofix_rounds(updated)
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["round"], 1)
+        self.assertEqual(rounds[0]["when"], "2026-11-12 18:30")
+        self.assertEqual(len(rounds[0]["findings"]), 2)
+        self.assertIn("Autofix round 1", rounds[0]["sent"])
+        self.assertEqual(rounds[0]["rereview"],
+                         "autofix-loop-review-r1.md")
+        self.assertEqual(
+            modes_mod.autofix_round_for(
+                updated, "crit1.py:2 — first critical"), 1)
+        self.assertIsNone(
+            modes_mod.autofix_round_for(
+                updated, "minor1.py:1 — first minor"))
+        self.assertEqual(
+            modes_mod.autofix_next_round(updated, "loop-review.md"),
+            2)
+        self.assertIn("## Autofix rounds", updated)
+        self.assertIn("## Coverage\nall files.", updated)
+        self.assertEqual(modes_mod.autofix_rounds(text), [])
+
+    def test_next_round_from_chain_filename(self):
+        from forge import modes as modes_mod
+        text = self._review_text("No findings.\n")
+        # A re-review file carries its chain round in its name.
+        self.assertEqual(
+            modes_mod.autofix_next_round(
+                text, "autofix-loop-review-r1.md"), 2)
+        self.assertEqual(
+            modes_mod.autofix_next_round(
+                text, "autofix-loop-review-r2.md"), 3)
+        # One round recorded in the r2 file spends the chain.
+        updated = modes_mod.record_autofix_round(
+            text, "2026-11-12 18:30", 3, ["x.py:1 — y"], "sent")
+        self.assertEqual(
+            modes_mod.autofix_next_round(
+                updated, "autofix-loop-review-r2.md"), 4)
+
+    # -- the room ------------------------------------------------------------
+
+    def test_buttons_present_and_labelled(self):
+        win, _owner = self._autofix_review_window()
+        try:
+            self.assertEqual(win.autofix_btn.text(), "Autofix")
+            self.assertEqual(win.autofix_rereview_btn.text(),
+                             "Re-review after autofix")
+            self.assertEqual(win.findings_list.count(), 7)
+        finally:
+            win.close()
+
+    def test_round_sends_worst_five_and_records(self):
+        win, owner = self._autofix_review_window()
+        try:
+            win.autofix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            sent = owner.send_calls[0]
+            self.assertIn("Autofix round 1", sent)
+            self.assertIn("crit1.py", sent)
+            self.assertIn("crit2.py", sent)
+            self.assertIn("major1.py", sent)
+            self.assertIn("major2.py", sent)
+            self.assertIn("minor1.py", sent)
+            # The rest stays open for the next round.
+            self.assertNotIn("minor2.py", sent)
+            self.assertNotIn("triv1.py", sent)
+            # Driver lines ride along where the review has them.
+            self.assertIn("In crit1.py, lock it down", sent)
+            self.assertIn("In major2.py, cache it", sent)
+            self.assertEqual(owner.mode_combo.currentText(), "Code")
+            # Recorded in the review; the list marks the five.
+            from forge import modes as modes_mod
+            rounds = modes_mod.autofix_rounds(self._read_review())
+            self.assertEqual(len(rounds), 1)
+            self.assertEqual(rounds[0]["round"], 1)
+            self.assertEqual(len(rounds[0]["findings"]), 5)
+            marked = [win.findings_list.item(i).text()
+                      for i in range(win.findings_list.count())
+                      if "autofix round 1" in
+                      win.findings_list.item(i).text()]
+            self.assertEqual(len(marked), 5)
+            self.assertEqual(win.autofix_btn.text(),
+                             "Autofix round 2")
+            self.assertIn("round 1 sent", win.composer_status.text())
+            self.assertIn("gate", win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_second_round_sends_the_rest(self):
+        win, owner = self._autofix_review_window()
+        try:
+            win.autofix_btn.click()
+            win.autofix_btn.click()
+            self.assertEqual(len(owner.send_calls), 2)
+            self.assertIn("Autofix round 2", owner.send_calls[1])
+            self.assertIn("minor2.py", owner.send_calls[1])
+            self.assertIn("triv1.py", owner.send_calls[1])
+            # Nothing from round 1 is sent again.
+            self.assertNotIn("crit1.py", owner.send_calls[1])
+            from forge import modes as modes_mod
+            rounds = modes_mod.autofix_rounds(self._read_review())
+            self.assertEqual([r["round"] for r in rounds], [1, 2])
+            self.assertEqual(win.autofix_btn.text(),
+                             "Autofix round 3")
+            # A third click finds nothing open.
+            win.autofix_btn.click()
+            self.assertEqual(len(owner.send_calls), 2)
+            self.assertIn("already covered",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_rereview_sends_review_turn_and_records(self):
+        win, owner = self._autofix_review_window()
+        try:
+            # No round yet: the re-review refuses in words.
+            win.autofix_rereview_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            self.assertIn("Run an autofix round first",
+                          win.composer_status.text())
+            win.autofix_btn.click()
+            win.autofix_rereview_btn.click()
+            self.assertEqual(len(owner.send_calls), 2)
+            sent = owner.send_calls[1]
+            self.assertIn("Autofix re-review, round 1", sent)
+            self.assertIn("crit1.py", sent)
+            self.assertIn("major2.py", sent)
+            self.assertIn("autofix-loop-review-r1.md", sent)
+            self.assertEqual(owner.mode_combo.currentText(),
+                             "Review")
+            from forge import modes as modes_mod
+            rounds = modes_mod.autofix_rounds(self._read_review())
+            self.assertEqual(rounds[0]["rereview"],
+                             "autofix-loop-review-r1.md")
+            self.assertIn("Re-review sent",
+                          win.composer_status.text())
+            # The round is no longer outstanding.
+            win.autofix_rereview_btn.click()
+            self.assertEqual(len(owner.send_calls), 2)
+        finally:
+            win.close()
+
+    def test_capped_chain_refuses_in_words(self):
+        from forge import modes as modes_mod
+        text = self._review_text(self._SEVEN)
+        for number in (1, 2, 3):
+            text = modes_mod.record_autofix_round(
+                text, f"2026-11-12 18:3{number}", number,
+                ["crit1.py:2 — first critical"], "sent")
+        win, owner = self._autofix_review_window(
+            findings=self._SEVEN)
+        try:
+            # Rewrite the review with the spent chain, then
+            # re-show it so the room reads the rounds.
+            (self.root / ".forge" / "reviews"
+             / "loop-review.md").write_text(text, encoding="utf-8")
+            viewer = win._doc_tabs["Reviews"][1]
+            viewer.setPlainText(text)
+            win._on_doc_shown(
+                "Reviews",
+                self.root / ".forge" / "reviews" / "loop-review.md")
+            self.assertEqual(win.autofix_btn.text(),
+                             "Autofix — capped")
+            win.autofix_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            self.assertIn("capped at 3 rounds",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_chain_file_starts_at_the_next_round(self):
+        win, owner = self._autofix_review_window(
+            name="autofix-loop-review-r1.md")
+        try:
+            self.assertEqual(win.autofix_btn.text(),
+                             "Autofix round 2")
+            win.autofix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            self.assertIn("Autofix round 2", owner.send_calls[0])
+        finally:
+            win.close()
+
+    def test_no_findings_says_so(self):
+        win, owner = self._autofix_review_window(
+            findings="Nothing to report.\n")
+        try:
+            win.autofix_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            self.assertIn("no findings",
+                          win.composer_status.text())
+        finally:
+            win.close()
+
+    def test_refused_round_is_not_recorded(self):
+        win, owner = self._autofix_review_window()
+        try:
+            def _send_refused():
+                owner._send_refusal = ("Parallel turn limit "
+                                       "reached (1).")
+            owner.send_message = _send_refused
+            win.autofix_btn.click()
+            self.assertEqual(owner.send_calls, [])
+            from forge import modes as modes_mod
+            self.assertEqual(
+                modes_mod.autofix_rounds(self._read_review()), [])
+            self.assertIn("did not go out",
+                          win.composer_status.text())
+            self.assertEqual(win.autofix_btn.text(), "Autofix")
+        finally:
+            win.close()
+
+    def test_reviews_prompt_names_the_autofix_section(self):
+        from forge import projects as proj_mod
+        prompt = proj_mod.FOLDER_PROMPTS["reviews"]
+        self.assertIn("Autofix rounds", prompt)
+        self.assertIn("## Autofix rounds", prompt)
+        # The Fix requests and Finishing touches sentences still
+        # stand beside it.
+        self.assertIn("## Fix requests", prompt)
+        self.assertIn("## Finishing touches", prompt)
+
+
+class ReviewCliContractTests(unittest.TestCase):
+    """Tier 2 #5 (2026-11-12): the Review CLI
+    contract. `forge review --agent` reads a filed review and
+    emits it as structured JSON (schema code-forge-review/1)
+    with an exit-code gate — 0 pass, 1 fail, 2 error — so
+    Joshua's other bots/agents can consume Forge reviews. The
+    CLI never runs a review: no model, no Ollama, no display,
+    deterministic and instant. JSON goes to stdout only; errors
+    go to stderr as one plain line."""
+
+    _REVIEW = (
+        "# Review\n\n"
+        "## Walkthrough\n"
+        "**What changed:** The turn loop now caps retries at 3 "
+        "and surfaces the failure.\n"
+        "**Changes, in dependency order:**\n"
+        "- forge/worker.py — retry loop capped — turns stop "
+        "hanging on a dead server\n"
+        "- forge/main.py — failure shown in the status line\n"
+        "- the docs got a new section\n"
+        "**Effort:** Small — one file, no behavior change.\n"
+        "**Risk:** Low — the cap only fires on repeated 500s.\n\n"
+        "## Findings\n"
+        "- [Critical · Security · Source: Reviewer judgment] "
+        "forge/worker.py:412 — the retry loop never exits when "
+        "the server keeps answering 500 — Fix: cap the retries "
+        "at 3 and surface the failure.\n"
+        "  Driver: In forge/worker.py, cap the retry loop at 3 "
+        "attempts and surface the failure on the third.\n"
+        "- [Major · Bug · Source: Owner learning] "
+        "forge/main.py:88 — the status line never clears after a "
+        "failed turn — Fix: clear it when the turn settles.\n"
+        "- [Minor · Nitpick · Source: Ruff] forge/main.py:9:3 — "
+        "an unused import sits at the top — Fix: remove it.\n"
+        "- Nothing to report on the docs.\n\n"
+        "## Coverage\n"
+        "COVERAGE — read: forge/worker.py, forge/main.py; "
+        "NOT read: the deck.\n")
+
+    # -- the modes.py helpers ------------------------------------------------
+
+    def test_finding_line(self):
+        from forge import modes as modes_mod
+        self.assertEqual(
+            modes_mod.finding_line(
+                "- [Critical · Bug · Source: X] store.py:412 — "
+                "a problem — Fix: fix it."), 412)
+        # A :line:col tail reads as the line, not the column.
+        self.assertEqual(
+            modes_mod.finding_line(
+                "- [Minor · Nitpick · Source: X] main.py:9:3 — "
+                "a nit — Fix: tidy it."), 9)
+        self.assertIsNone(
+            modes_mod.finding_line(
+                "- [Major · Bug · Source: X] store.py — a "
+                "problem — Fix: fix it."))
+        self.assertIsNone(
+            modes_mod.finding_line("Nothing to report."))
+
+    def test_finding_problem_fix(self):
+        from forge import modes as modes_mod
+        problem, fix = modes_mod.finding_problem_fix(
+            "- [Critical · Bug · Source: X] store.py:412 — the "
+            "loop never exits — Fix: cap it at 3.")
+        self.assertEqual(problem, "the loop never exits")
+        self.assertEqual(fix, "cap it at 3.")
+        # No Fix tail: all problem, no fix.
+        problem, fix = modes_mod.finding_problem_fix(
+            "- [Major · Bug · Source: X] store.py:412 — the "
+            "loop never exits.")
+        self.assertEqual(problem, "the loop never exits.")
+        self.assertIsNone(fix)
+        # A plain line is all problem.
+        problem, fix = modes_mod.finding_problem_fix(
+            "Nothing to report on the docs.")
+        self.assertEqual(problem, "Nothing to report on the docs.")
+        self.assertIsNone(fix)
+
+    def test_finding_body_refactor_unchanged(self):
+        # T2-5 extracts the bullet/bracket/legacy strip into
+        # _finding_body; finding_file must read exactly as
+        # before — including the T2-3 legacy-prefix fix.
+        from forge import modes as modes_mod
+        self.assertEqual(
+            modes_mod.finding_file(
+                "- BLOCKER: store.py:3 — a problem — Fix: x."),
+            "store.py")
+        self.assertEqual(
+            modes_mod.finding_file(
+                "- [Major · Bug · Source: X] forge/main.py:88 — "
+                "a problem — Fix: x."),
+            "forge/main.py")
+        self.assertEqual(
+            modes_mod.finding_file("Nothing to report."), "")
+
+    def test_parse_walkthrough(self):
+        from forge import modes as modes_mod
+        walk = modes_mod.parse_walkthrough(self._REVIEW)
+        self.assertEqual(
+            walk["what_changed"],
+            "The turn loop now caps retries at 3 and surfaces "
+            "the failure.")
+        self.assertEqual(len(walk["changes"]), 3)
+        self.assertEqual(walk["changes"][0], {
+            "area": "forge/worker.py",
+            "what": "retry loop capped",
+            "why": "turns stop hanging on a dead server"})
+        self.assertEqual(walk["changes"][1]["area"],
+                         "forge/main.py")
+        self.assertIsNone(walk["changes"][1]["why"])
+        # A row with no separator is all "what".
+        self.assertEqual(walk["changes"][2], {
+            "area": None, "what": "the docs got a new section",
+            "why": None})
+        self.assertEqual(walk["effort"],
+                         "Small — one file, no behavior change.")
+        self.assertEqual(walk["risk"],
+                         "Low — the cap only fires on repeated "
+                         "500s.")
+        # No Walkthrough section reads as None, not an error.
+        self.assertIsNone(modes_mod.parse_walkthrough(
+            "# Review\n\n## Findings\n- a finding.\n"))
+        # A section with only one part leaves the rest absent.
+        partial = modes_mod.parse_walkthrough(
+            "# Review\n\n## Walkthrough\n"
+            "**Effort:** Large — the whole turn loop.\n")
+        self.assertEqual(partial["effort"],
+                         "Large — the whole turn loop.")
+        self.assertIsNone(partial["what_changed"])
+        self.assertEqual(partial["changes"], [])
+        self.assertIsNone(partial["risk"])
+
+    # -- the report ----------------------------------------------------------
+
+    def test_review_to_report(self):
+        from forge import cli as cli_mod
+        report = cli_mod.review_to_report(
+            self._REVIEW, "loop-review.md")
+        self.assertEqual(report["schema"], "code-forge-review/1")
+        self.assertEqual(report["review"], "loop-review.md")
+        self.assertEqual(report["counts"], {
+            "Critical": 1, "Major": 1, "Minor": 1, "Trivial": 0,
+            "unparsed": 1, "total": 4})
+        self.assertEqual(len(report["findings"]), 4)
+        first = report["findings"][0]
+        self.assertEqual(first["severity"], "Critical")
+        self.assertEqual(first["type"], "Security")
+        self.assertEqual(first["source"], "Reviewer judgment")
+        self.assertEqual(first["file"], "forge/worker.py")
+        self.assertEqual(first["line"], 412)
+        self.assertIn("never exits", first["problem"])
+        self.assertIn("cap the retries", first["fix"])
+        self.assertIn("cap the retry loop", first["driver"])
+        # The unparsed line counts, carries no severity, and
+        # names no file.
+        last = report["findings"][3]
+        self.assertIsNone(last["severity"])
+        self.assertIsNone(last["file"])
+        self.assertIsNone(last["line"])
+        self.assertEqual(last["problem"],
+                         "Nothing to report on the docs.")
+        # Default --fail-on is major: Critical + Major fail.
+        self.assertEqual(report["fail_on"], "major")
+        self.assertEqual(report["verdict"], "fail")
+        # A Minor-only review passes at major, fails at minor,
+        # and never fails at none.
+        minor_only = cli_mod.review_to_report(
+            "# Review\n\n## Findings\n"
+            "- [Minor · Nitpick · Source: X] a.py:1 — a nit — "
+            "Fix: tidy it.\n", "minor-review.md")
+        self.assertEqual(minor_only["verdict"], "pass")
+        self.assertEqual(
+            cli_mod.review_to_report(
+                "# Review\n\n## Findings\n"
+                "- [Minor · Nitpick · Source: X] a.py:1 — a nit "
+                "— Fix: tidy it.\n", "minor-review.md",
+                fail_on="minor")["verdict"], "fail")
+        self.assertEqual(
+            cli_mod.review_to_report(
+                self._REVIEW, "loop-review.md",
+                fail_on="none")["verdict"], "pass")
+
+    def test_unparsable_review_fails_closed(self):
+        # The gate fails closed: a review the parsers cannot
+        # read yields valid JSON with an "error" and verdict
+        # "fail" — never a false clean.
+        from unittest import mock
+        from forge import cli as cli_mod
+        with mock.patch(
+                "forge.modes.parse_findings_body",
+                side_effect=RuntimeError("boom")):
+            report = cli_mod.review_to_report(
+                self._REVIEW, "loop-review.md")
+        self.assertEqual(report["verdict"], "fail")
+        self.assertIn("boom", report["error"])
+        self.assertEqual(report["findings"], [])
+
+    def test_latest_review_path(self):
+        import os
+        from forge import cli as cli_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / ".forge" / "reviews"
+            folder.mkdir(parents=True)
+            old = folder / "old-review.md"
+            new = folder / "new-review.md"
+            old.write_text("# old\n", encoding="utf-8")
+            new.write_text("# new\n", encoding="utf-8")
+            (folder / "summary.md").write_text(
+                "# summary\n", encoding="utf-8")
+            # summary.md is newest by write order; pin the
+            # mtimes so the newest REVIEW is unambiguous.
+            os.utime(old, (1000000, 1000000))
+            os.utime(new, (2000000, 2000000))
+            os.utime(folder / "summary.md", (3000000, 3000000))
+            self.assertEqual(
+                cli_mod.latest_review_path(root), new)
+            with tempfile.TemporaryDirectory() as empty_tmp:
+                self.assertIsNone(
+                    cli_mod.latest_review_path(
+                        Path(empty_tmp)))
+
+    def test_resolve_review_path(self):
+        from forge import cli as cli_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / ".forge" / "reviews"
+            folder.mkdir(parents=True)
+            review = folder / "a-review.md"
+            review.write_text("# a\n", encoding="utf-8")
+            self.assertEqual(
+                cli_mod.resolve_review_path(str(review)), review)
+            self.assertEqual(
+                cli_mod.resolve_review_path(str(root)), review)
+            with self.assertRaises(cli_mod.ReviewCliError):
+                cli_mod.resolve_review_path(str(root / "nope.md"))
+            with tempfile.TemporaryDirectory() as bare_tmp:
+                with self.assertRaises(cli_mod.ReviewCliError):
+                    cli_mod.resolve_review_path(bare_tmp)
+
+    # -- the real command, run as a subprocess --------------------------------
+
+    def _run_cli(self, args, cwd=None):
+        import subprocess
+        tree = Path(__file__).resolve().parents[1]
+        return subprocess.run(
+            [sys.executable, "-m", "forge.cli"] + args,
+            cwd=str(cwd or tree), capture_output=True, text=True,
+            timeout=60)
+
+    def _project_with_review(self, tmp, name="loop-review.md",
+                             text=None):
+        root = Path(tmp)
+        folder = root / ".forge" / "reviews"
+        folder.mkdir(parents=True)
+        review = folder / name
+        review.write_text(
+            text if text is not None else self._REVIEW,
+            encoding="utf-8")
+        return root, review
+
+    def test_cli_agent_json_and_exit_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, review = self._project_with_review(tmp)
+            result = self._run_cli(
+                ["review", "--agent", str(review)])
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr, "")
+            report = json.loads(result.stdout)
+            self.assertEqual(report["schema"],
+                             "code-forge-review/1")
+            self.assertEqual(report["verdict"], "fail")
+            self.assertEqual(report["counts"]["Critical"], 1)
+            self.assertEqual(
+                report["walkthrough"]["effort"],
+                "Small — one file, no behavior change.")
+
+    def test_cli_agent_pass_exit_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, review = self._project_with_review(
+                tmp, text="# Review\n\n## Findings\n"
+                "- [Minor · Nitpick · Source: X] a.py:1 — a nit "
+                "— Fix: tidy it.\n")
+            result = self._run_cli(
+                ["review", "--agent", str(review)])
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                json.loads(result.stdout)["verdict"], "pass")
+
+    def test_cli_fail_on_none_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, review = self._project_with_review(tmp)
+            result = self._run_cli(
+                ["review", "--agent", str(review),
+                 "--fail-on", "none"])
+            self.assertEqual(result.returncode, 0)
+
+    def test_cli_project_dir_uses_latest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _review = self._project_with_review(tmp)
+            result = self._run_cli(
+                ["review", "--agent", str(root)])
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(
+                json.loads(result.stdout)["review"],
+                "loop-review.md")
+
+    def test_cli_missing_review_exits_two(self):
+        result = self._run_cli(
+            ["review", "--agent", "/no/such/review.md"])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("no such file", result.stderr)
+
+    def test_cli_without_agent_refuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, review = self._project_with_review(tmp)
+            result = self._run_cli(["review", str(review)])
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("--agent", result.stderr)
+
+    def test_cli_out_writes_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, review = self._project_with_review(tmp)
+            out = Path(tmp) / "report.json"
+            result = self._run_cli(
+                ["review", "--agent", str(review),
+                 "--out", str(out)])
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, "")
+            report = json.loads(
+                out.read_text(encoding="utf-8"))
+            self.assertEqual(report["verdict"], "fail")
+
+    def test_cli_imports_no_qt(self):
+        # The CLI must start with no display and no Qt: a bot
+        # runs it headless. Checked in a fresh process, where
+        # nothing has imported PySide6 yet.
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import forge.cli, sys; print('qt' if 'PySide6' "
+             "in sys.modules else 'clean')"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "clean")
+
+
+class AcceptanceRateTests(unittest.TestCase):
+    """Tier 2 #6 (2026-11-12): acceptance-rate
+    tracking. Every finding the owner sends for fixing (accepted)
+    or teaches from (dismissed) lands as one event in the SAME
+    event log the Turn timeline already views, and the timeline's
+    head shows the rate for the current project — by severity and
+    type. Local only, no dashboard product: one line in an
+    existing window."""
+
+    _FINDINGS = (
+        "- [Critical · Security · Source: Reviewer judgment] "
+        "forge/worker.py:412 — the loop never exits — Fix: cap "
+        "it.\n"
+        "- [Major · Bug · Source: Owner learning] "
+        "forge/main.py:88 — the status never clears — Fix: clear "
+        "it.\n"
+        "- [Minor · Nitpick · Source: Ruff] forge/main.py:9 — an "
+        "unused import — Fix: remove it.\n")
+
+    # -- the record + the stats (no Qt) --------------------------------------
+
+    def test_record_decision_writes_the_event(self):
+        from forge import timeline as timeline_mod
+        seen = []
+
+        class _FakeLog:
+            def record(self, kind, **fields):
+                seen.append((kind, fields))
+
+        timeline_mod.record_finding_decision(
+            _FakeLog(), "accepted", "/proj/a", "r1.md",
+            "- [Critical · Security · Source: Reviewer judgment] "
+            "forge/worker.py:412 — the loop never exits — Fix: "
+            "cap it.")
+        timeline_mod.record_finding_decision(
+            _FakeLog(), "dismissed", "/proj/a", "r1.md",
+            "- [Minor · Nitpick · Source: Ruff] a.py:1 — a nit — "
+            "Fix: tidy it.")
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(seen[0][0], "finding_accepted")
+        self.assertEqual(seen[0][1]["project"], "/proj/a")
+        self.assertEqual(seen[0][1]["review"], "r1.md")
+        self.assertEqual(seen[0][1]["file"], "forge/worker.py")
+        self.assertEqual(seen[0][1]["severity"], "Critical")
+        self.assertEqual(seen[0][1]["type"], "Security")
+        self.assertEqual(seen[0][1]["source"],
+                         "Reviewer judgment")
+        self.assertIn("never exits", seen[0][1]["finding"])
+        self.assertEqual(seen[1][0], "finding_dismissed")
+        self.assertEqual(seen[1][1]["severity"], "Minor")
+
+    def test_record_decision_never_raises(self):
+        from forge import timeline as timeline_mod
+
+        class _BrokenLog:
+            def record(self, kind, **fields):
+                raise RuntimeError("disk gone")
+
+        # A missing log, a broken log, garbage input — none of it
+        # may ever block the fix or the lesson.
+        timeline_mod.record_finding_decision(
+            None, "accepted", "/p", "r.md", "a finding")
+        timeline_mod.record_finding_decision(
+            _BrokenLog(), "dismissed", "/p", "r.md", "a finding")
+        timeline_mod.record_finding_decision(
+            _BrokenLog(), "accepted", None, None, None)
+
+    def _decision(self, kind, severity, ftype, project="/proj/a"):
+        return {"kind": kind, "project": project,
+                "severity": severity, "type": ftype}
+
+    def test_acceptance_stats(self):
+        from forge import timeline as timeline_mod
+        records = [
+            self._decision("finding_accepted", "Critical",
+                           "Security"),
+            self._decision("finding_accepted", "Major", "Bug"),
+            self._decision("finding_dismissed", "Major", "Bug"),
+            self._decision("finding_dismissed", "Minor",
+                           "Nitpick"),
+            self._decision("finding_accepted", "", ""),
+            # Turn records and other kinds never count.
+            {"kind": "request", "prompt": "hi"},
+            {"kind": "turn_complete", "seconds": 1.0},
+            # Another project, filtered out by the project arg.
+            self._decision("finding_accepted", "Critical",
+                           "Security", project="/proj/b"),
+        ]
+        stats = timeline_mod.acceptance_stats(
+            records, project="/proj/a")
+        self.assertEqual(stats["accepted"], 3)
+        self.assertEqual(stats["dismissed"], 2)
+        self.assertAlmostEqual(stats["rate"], 3 / 5)
+        self.assertEqual(
+            stats["by_severity"]["Critical"],
+            {"accepted": 1, "dismissed": 0, "rate": 1.0})
+        self.assertEqual(
+            stats["by_severity"]["Major"],
+            {"accepted": 1, "dismissed": 1, "rate": 0.5})
+        self.assertEqual(
+            stats["by_severity"]["unparsed"],
+            {"accepted": 1, "dismissed": 0, "rate": 1.0})
+        self.assertEqual(
+            stats["by_type"]["Bug"],
+            {"accepted": 1, "dismissed": 1, "rate": 0.5})
+        # No project filter counts everything.
+        self.assertEqual(
+            timeline_mod.acceptance_stats(records)["accepted"], 4)
+        # No decisions: rate None, never a fake zero.
+        empty = timeline_mod.acceptance_stats([])
+        self.assertEqual(empty["accepted"], 0)
+        self.assertIsNone(empty["rate"])
+        self.assertIsNone(
+            empty["by_severity"]["Critical"]["rate"])
+
+    def test_acceptance_line(self):
+        from forge import timeline as timeline_mod
+        records = [
+            self._decision("finding_accepted", "Critical",
+                           "Security"),
+            self._decision("finding_accepted", "Major", "Bug"),
+            self._decision("finding_dismissed", "Major", "Bug"),
+        ]
+        line = timeline_mod.acceptance_line(
+            timeline_mod.acceptance_stats(records))
+        self.assertEqual(
+            line, "Findings: 2 accepted · 1 dismissed — 67% "
+                  "accepted (Critical 1/1 · Major 1/2)")
+        # No decisions: no line at all.
+        self.assertEqual(
+            timeline_mod.acceptance_line(
+                timeline_mod.acceptance_stats([])), "")
+        self.assertEqual(timeline_mod.acceptance_line(None), "")
+
+    # -- the room: Fix accepts, Teach dismisses ------------------------------
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _review_window(self, with_eventlog=True):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "rate-review.md").write_text(
+            "# Review\n\n## Findings\n" + self._FINDINGS +
+            "\n\n## Coverage\nall files.\n", encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        if with_eventlog:
+            seen = []
+
+            class _FakeLog:
+                def record(self, kind, **fields):
+                    seen.append((kind, fields))
+
+            owner.eventlog = _FakeLog()
+            owner._seen_events = seen
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index("rate-review.md")
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    def test_fix_button_records_accepted(self):
+        win, owner = self._review_window()
+        try:
+            win.findings_list.setCurrentRow(0)
+            win.fix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            self.assertEqual(len(owner._seen_events), 1)
+            kind, fields = owner._seen_events[0]
+            self.assertEqual(kind, "finding_accepted")
+            self.assertEqual(fields["project"], str(self.root))
+            self.assertEqual(fields["review"], "rate-review.md")
+            self.assertEqual(fields["file"], "forge/worker.py")
+            self.assertEqual(fields["severity"], "Critical")
+            self.assertEqual(fields["type"], "Security")
+        finally:
+            win.close()
+
+    def test_teach_button_records_dismissed(self):
+        from unittest import mock
+        win, owner = self._review_window()
+        try:
+            win.findings_list.setCurrentRow(1)
+            with mock.patch(
+                    "forge.main.QInputDialog.getText",
+                    return_value=("the status clears on its own "
+                                  "now", True)):
+                win.teach_btn.click()
+            self.assertEqual(len(owner._seen_events), 1)
+            kind, fields = owner._seen_events[0]
+            self.assertEqual(kind, "finding_dismissed")
+            self.assertEqual(fields["severity"], "Major")
+            self.assertEqual(fields["type"], "Bug")
+            self.assertEqual(fields["file"], "forge/main.py")
+            # The learning still saved — the event is extra,
+            # never a replacement.
+            learnings = (self.root / ".forge"
+                         / "learnings.md").read_text(
+                             encoding="utf-8")
+            self.assertIn("the status clears on its own now",
+                          learnings)
+        finally:
+            win.close()
+
+    def test_teach_cancel_records_nothing(self):
+        from unittest import mock
+        win, owner = self._review_window()
+        try:
+            win.findings_list.setCurrentRow(1)
+            with mock.patch(
+                    "forge.main.QInputDialog.getText",
+                    return_value=("", False)):
+                win.teach_btn.click()
+            self.assertEqual(owner._seen_events, [])
+        finally:
+            win.close()
+
+    def test_no_eventlog_is_fine(self):
+        # An owner with no event log (or a log that raises) —
+        # the fix still goes out, the lesson still saves.
+        win, owner = self._review_window(with_eventlog=False)
+        try:
+            win.findings_list.setCurrentRow(0)
+            win.fix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+        finally:
+            win.close()
+
+    # -- the timeline head shows the rate ------------------------------------
+
+    def test_timeline_data_carries_acceptance(self):
+        from forge import timeline as timeline_mod
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            old_log = self.win.eventlog
+            self.win.eventlog = EventLog(root / "log")
+            self.win.workspace = str(root)
+            try:
+                timeline_mod.record_finding_decision(
+                    self.win.eventlog, "accepted", str(root),
+                    "r1.md",
+                    "- [Critical · Security · Source: X] "
+                    "a.py:1 — a flaw — Fix: fix it.")
+                timeline_mod.record_finding_decision(
+                    self.win.eventlog, "dismissed", str(root),
+                    "r1.md",
+                    "- [Major · Bug · Source: X] b.py:2 — a bug "
+                    "— Fix: fix it.")
+                # Another project's decision never leaks in.
+                timeline_mod.record_finding_decision(
+                    self.win.eventlog, "accepted", "/elsewhere",
+                    "r9.md",
+                    "- [Critical · Bug · Source: X] c.py:3 — a "
+                    "flaw — Fix: fix it.")
+                data = self.win.timeline_data(
+                    self.win.conversation_id)
+                acceptance = data["acceptance"]
+                self.assertEqual(acceptance["accepted"], 1)
+                self.assertEqual(acceptance["dismissed"], 1)
+                self.assertAlmostEqual(acceptance["rate"], 0.5)
+            finally:
+                self.win.eventlog = old_log
+        finally:
+            temp.cleanup()
+
+    def test_timeline_head_shows_the_rate(self):
+        from forge import timeline as timeline_mod
+        from forge.main import TimelineWindow
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            old_log = self.win.eventlog
+            self.win.eventlog = EventLog(root / "log")
+            self.win.workspace = str(root)
+            try:
+                timeline_mod.record_finding_decision(
+                    self.win.eventlog, "accepted", str(root),
+                    "r1.md",
+                    "- [Critical · Security · Source: X] "
+                    "a.py:1 — a flaw — Fix: fix it.")
+                timeline_mod.record_finding_decision(
+                    self.win.eventlog, "accepted", str(root),
+                    "r1.md",
+                    "- [Major · Bug · Source: X] b.py:2 — a bug "
+                    "— Fix: fix it.")
+                timeline_mod.record_finding_decision(
+                    self.win.eventlog, "dismissed", str(root),
+                    "r1.md",
+                    "- [Major · Bug · Source: X] c.py:3 — a bug "
+                    "— Fix: fix it.")
+                win = TimelineWindow(self.win)
+                try:
+                    win.refresh()
+                    self.assertIn(
+                        "Findings: 2 accepted · 1 dismissed — "
+                        "67% accepted",
+                        win.head.text())
+                    self.assertIn("Critical 1/1",
+                                  win.head.text())
+                finally:
+                    win.close()
+            finally:
+                self.win.eventlog = old_log
+        finally:
+            temp.cleanup()
+
+    def test_timeline_head_without_decisions_is_unchanged(self):
+        from forge.main import TimelineWindow
+        temp = tempfile.TemporaryDirectory()
+        try:
+            root = Path(temp.name)
+            old_log = self.win.eventlog
+            self.win.eventlog = EventLog(root / "log")
+            self.win.workspace = str(root)
+            try:
+                win = TimelineWindow(self.win)
+                try:
+                    win.refresh()
+                    self.assertNotIn("Findings:",
+                                     win.head.text())
+                finally:
+                    win.close()
+            finally:
+                self.win.eventlog = old_log
+        finally:
+            temp.cleanup()
+
+
+
+class AutofixAcceptanceTests(unittest.TestCase):
+    """Tier 2 #6 follow-up (DEV merge, 2026-11-13): the autofix
+    follow-up hunk. A round of N findings produces N
+    finding_accepted events — the round's review, the round's
+    files — so autofix-fixed findings count in the rate the same
+    way a Fix with Driver does."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self._old_workspace = self.win.workspace
+        self._old_mode = self.win.settings.get("mode")
+        self.win.workspace = str(self.root)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        if self._old_mode is None:
+            self.win.settings.pop("mode", None)
+        else:
+            self.win.settings["mode"] = self._old_mode
+        self.temp.cleanup()
+
+    def _review_text(self, findings):
+        return ("# Review\n\n## Findings\n" + findings +
+                "\n\n## Coverage\nall files.\n")
+
+    # Seven findings, mixed severities, in file order — round 1
+    # takes the worst five (both Criticals, both Majors, then the
+    # first Minor); round 2 takes the last two.
+    _SEVEN = (
+        "- [Minor \u00b7 Bug \u00b7 Source: Review] minor1.py:1 \u2014 first "
+        "minor \u2014 Fix: tidy it\n"
+        "- [Critical \u00b7 Security \u00b7 Source: Review] crit1.py:2 \u2014 "
+        "first critical \u2014 Fix: lock it down\n"
+        "  Driver: In crit1.py, lock it down; then run the auth "
+        "test and confirm it passes.\n"
+        "- [Trivial \u00b7 Nitpick \u00b7 Source: Review] triv1.py:3 \u2014 "
+        "only trivial \u2014 Fix: rename it\n"
+        "- [Major \u00b7 Bug \u00b7 Source: Review] major1.py:4 \u2014 first "
+        "major \u2014 Fix: guard it\n"
+        "- [Minor \u00b7 Bug \u00b7 Source: Review] minor2.py:5 \u2014 second "
+        "minor \u2014 Fix: tidy it\n"
+        "- [Critical \u00b7 Bug \u00b7 Source: Review] crit2.py:6 \u2014 "
+        "second critical \u2014 Fix: cap it\n"
+        "- [Major \u00b7 Performance \u00b7 Source: Review] major2.py:7 "
+        "\u2014 second major \u2014 Fix: cache it\n"
+        "  Driver: In major2.py, cache it; then run the bench "
+        "and confirm it is faster.\n")
+
+    def _autofix_review_window(self, name="loop-review.md"):
+        from PySide6.QtWidgets import QComboBox, QPlainTextEdit, QWidget
+        from forge.main import ReviewWindow
+        folder = self.root / ".forge" / "reviews"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(
+            self._review_text(self._SEVEN), encoding="utf-8")
+        owner = QWidget()
+        owner.workspace = str(self.root)
+        owner.mode_combo = QComboBox()
+        owner.mode_combo.addItems(
+            ["Code", "Plan", "Design", "Architect", "Review",
+             "Ask", "Write", "Research"])
+        owner.input = QPlainTextEdit()
+        owner.send_calls = []
+        owner.send_message = lambda: owner.send_calls.append(
+            owner.input.toPlainText())
+        seen = []
+
+        class _FakeLog:
+            def record(self, kind, **fields):
+                seen.append((kind, fields))
+
+        owner.eventlog = _FakeLog()
+        owner._seen_events = seen
+        win = ReviewWindow(owner, "review")
+        win.set_project(str(self.root))
+        listing, _viewer, paths = win._doc_tabs["Reviews"]
+        idx = [p.name for p in paths].index(name)
+        listing.setCurrentRow(idx)
+        return win, owner
+
+    def test_round_records_each_sent_finding_as_accepted(self):
+        win, owner = self._autofix_review_window()
+        try:
+            win.autofix_btn.click()
+            self.assertEqual(len(owner.send_calls), 1)
+            # Five findings sent, five accepted events — the
+            # round's review, the round's files, worst first.
+            self.assertEqual(len(owner._seen_events), 5)
+            files = []
+            for kind, fields in owner._seen_events:
+                self.assertEqual(kind, "finding_accepted")
+                self.assertEqual(fields["project"], str(self.root))
+                self.assertEqual(fields["review"], "loop-review.md")
+                files.append(fields["file"])
+            self.assertEqual(
+                files,
+                ["crit1.py", "crit2.py", "major1.py", "major2.py",
+                 "minor1.py"])
+            # The severity and type ride along, parsed.
+            _kind, first = owner._seen_events[0]
+            self.assertEqual(first["severity"], "Critical")
+            self.assertEqual(first["type"], "Security")
+        finally:
+            win.close()
+
+    def test_second_round_records_only_the_rest(self):
+        win, owner = self._autofix_review_window()
+        try:
+            win.autofix_btn.click()
+            win.autofix_btn.click()
+            self.assertEqual(len(owner.send_calls), 2)
+            # Seven findings over two rounds, seven events —
+            # nothing sent twice, nothing missed.
+            self.assertEqual(len(owner._seen_events), 7)
+            files = [fields["file"]
+                     for _kind, fields in owner._seen_events]
+            self.assertEqual(
+                files,
+                ["crit1.py", "crit2.py", "major1.py", "major2.py",
+                 "minor1.py", "minor2.py", "triv1.py"])
+            kinds = {kind for kind, _fields in owner._seen_events}
+            self.assertEqual(kinds, {"finding_accepted"})
+        finally:
+            win.close()
+
+
+class PresendSecretsTests(unittest.TestCase):
+    """Pre-send secret scan, item 2 (2026-11-12): forge/secrets.py
+    is the ONE source of truth for secret shapes — the patterns
+    moved here verbatim from the C6 scanner, and scan.py imports
+    them. Every planted value below is a fake shape (the AWS one
+    is AWS's own published documentation example); the redaction
+    assertions require that NONE of them appears whole anywhere
+    in a finding, an evidence string, or a redacted text."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    GITHUB = "ghp_" + "aB1" * 12
+    SK = "sk-" + "Ab1_" * 5
+    SLACK = "xoxb-123456789012-abcdefghij"
+    PASSWORD = "S3cretValue99!"
+
+    def test_each_token_pattern_hits(self):
+        from forge import secrets as secrets_mod
+        cases = [
+            (f"key = {self.AWS}", "aws-key", "AKIA...(20 chars)"),
+            (f"token = {self.GITHUB}", "github-token",
+             f"ghp_...({len(self.GITHUB)} chars)"),
+            (f"api = {self.SK}", "sk-key",
+             f"sk-A...({len(self.SK)} chars)"),
+            (f"hook = {self.SLACK}", "slack-token",
+             f"xoxb...({len(self.SLACK)} chars)"),
+        ]
+        for text, name, evidence in cases:
+            found = secrets_mod.scan_text(text)
+            self.assertEqual(len(found), 1, text)
+            self.assertEqual(found[0]["pattern"], name)
+            self.assertEqual(found[0]["evidence"], evidence)
+            self.assertNotIn(text.split(" = ", 1)[1],
+                             found[0]["evidence"])
+
+    def test_private_key_finding_and_block_span(self):
+        from forge import secrets as secrets_mod
+        block = ("-----BEGIN RSA PRIVATE KEY-----\n"
+                 "MIIEpAIBAAKCAQEA7fakefakefake\n"
+                 "morekeymaterialhere\n"
+                 "-----END RSA PRIVATE KEY-----\n"
+                 "after the block\n")
+        found = secrets_mod.scan_text(block)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["pattern"], "private-key")
+        self.assertEqual(found[0]["evidence"], "PRIVATE KEY block")
+        # The span covers the WHOLE block, not just the BEGIN
+        # line — redacting only the header would send the key.
+        # (The trailing newline after END is not key material
+        # and stays outside the span.)
+        self.assertEqual(block[found[0]["start"]:found[0]["end"]],
+                         "-----BEGIN RSA PRIVATE KEY-----\n"
+                         "MIIEpAIBAAKCAQEA7fakefakefake\n"
+                         "morekeymaterialhere\n"
+                         "-----END RSA PRIVATE KEY-----")
+        redacted = secrets_mod.redact_text(block, found)
+        self.assertNotIn("MIIEpAIBAAKCAQEA7fakefakefake", redacted)
+        self.assertNotIn("morekeymaterialhere", redacted)
+        self.assertIn("after the block", redacted)
+
+    def test_unterminated_private_key_spans_to_end(self):
+        from forge import secrets as secrets_mod
+        text = ("-----BEGIN PRIVATE KEY-----\n"
+                "MIIEpAIBAAKCAQEA7fakefakefake\n")
+        found = secrets_mod.scan_text(text)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["end"], len(text))
+        redacted = secrets_mod.redact_text(text, found)
+        self.assertNotIn("MIIEpAIBAAKCAQEA7fakefakefake", redacted)
+
+    def test_assignment_hits_and_redacts_only_the_value(self):
+        from forge import secrets as secrets_mod
+        text = f'db_password = "{self.PASSWORD}"\n'
+        found = secrets_mod.scan_text(text)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["pattern"],
+                         "hardcoded-assignment")
+        self.assertIn("db_password", found[0]["message"])
+        self.assertEqual(found[0]["evidence"], "S3...(14 chars)")
+        # The span is the VALUE: the variable name survives.
+        self.assertEqual(text[found[0]["start"]:found[0]["end"]],
+                         self.PASSWORD)
+        redacted = secrets_mod.redact_text(text, found)
+        self.assertEqual(redacted, 'db_password = "[redacted]"\n')
+
+    def test_placeholders_do_not_hit(self):
+        from forge import secrets as secrets_mod
+        for value in ("changeme", "your-api-key-here",
+                      "example-password", "xxxxxx-xxxx",
+                      "os.environ[\"API_KEY\"]", "aaaaaaaaaa",
+                      "not-a-real-key-123", "TODO-replace-me"):
+            text = f'password = "{value}"\n'
+            self.assertEqual(secrets_mod.scan_text(text), [],
+                             value)
+
+    def test_token_beats_assignment_on_one_line(self):
+        from forge import secrets as secrets_mod
+        # One finding per secret per line: the sk- shape wins,
+        # the generic assignment is not reported again.
+        text = f'api_key = "{self.SK}"\n'
+        found = secrets_mod.scan_text(text)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["pattern"], "sk-key")
+
+    def test_clean_text_has_no_findings(self):
+        from forge import secrets as secrets_mod
+        self.assertEqual(secrets_mod.scan_text(""), [])
+        self.assertEqual(secrets_mod.scan_text(
+            "def add(a, b):\n    return a + b\n"), [])
+        self.assertEqual(secrets_mod.scan_text(
+            "The password policy requires 8 characters.\n"), [])
+
+    def test_redaction_never_leaks_and_keeps_the_rest(self):
+        from forge import secrets as secrets_mod
+        text = (f"before {self.AWS} middle\n"
+                f'api_key = "{self.SK}"\n'
+                "after\n")
+        found = secrets_mod.scan_text(text)
+        self.assertEqual(len(found), 2)
+        for planted in (self.AWS, self.SK):
+            for item in found:
+                self.assertNotIn(planted, item["evidence"])
+                self.assertNotIn(planted, item["message"])
+        redacted = secrets_mod.redact_text(text, found)
+        self.assertNotIn(self.AWS, redacted)
+        self.assertNotIn(self.SK, redacted)
+        self.assertEqual(
+            redacted,
+            "before [redacted] middle\n"
+            'api_key = "[redacted]"\n'
+            "after\n")
+
+    def test_redact_text_without_findings_is_identity(self):
+        from forge import secrets as secrets_mod
+        text = "nothing secret here\n"
+        self.assertEqual(secrets_mod.redact_text(text, []), text)
+        self.assertIs(secrets_mod.redact_text(text, []), text)
+
+    def test_scan_py_still_works_from_another_directory(self):
+        # The __file__-relative fallback: scan.py run as a real
+        # subprocess with a cwd that has no forge on its path.
+        import subprocess
+        skills_dir = Path(__file__).resolve().parent.parent / "skills"
+        scanner = (skills_dir / "project-security-scan" / "scan.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text(
+                f'aws_key = "{self.AWS}"\n', encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(scanner), str(root)],
+                capture_output=True, text=True, timeout=60,
+                cwd="/tmp")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            report = json.loads(proc.stdout)
+            self.assertEqual(len(report["findings"]), 1)
+            self.assertEqual(report["findings"][0]["evidence"],
+                             "AKIA...(20 chars)")
+            self.assertNotIn(self.AWS, proc.stdout)
+
+
+class PresendScanTests(unittest.TestCase):
+    """Pre-send secret scan, item 3 (2026-11-12): the facade's
+    cloud branch scans outbound messages before any request is
+    built; a hit raises SecretBlocked and NOTHING is sent. The
+    Decisions lane scans its input the same way. Planted values
+    are fake shapes (AWS's own documentation example key)."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    MODEL = "groq:openai/gpt-oss-20b"
+
+    def _facade(self, captured):
+        from forge import providers as p
+
+        def fake_urlopen(req, timeout=None):
+            captured.setdefault("calls", []).append(req.full_url)
+            captured["payload"] = json.loads(
+                req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [
+                    {"delta": {"content": "Hi"},
+                     "finish_reason": None}]}),
+                json.dumps({"choices": [
+                    {"delta": {}, "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        config = {"groq_api_key": "k"}
+        return p.ProviderClient("http://127.0.0.1:11434", config,
+                                urlopen=fake_urlopen)
+
+    def test_clean_cloud_send_passes_byte_identical(self):
+        from forge import providers as p
+        captured = {}
+        client = self._facade(captured)
+        messages = [{"role": "user", "content": "hello"}]
+        events = list(client.chat_stream(
+            self.MODEL, messages, {}, []))
+        self.assertEqual(len(captured["calls"]), 1)
+        self.assertEqual(captured["payload"]["messages"], messages)
+        self.assertTrue(any(
+            e.get("message", {}).get("content") == "Hi"
+            for e in events))
+
+    def test_planted_secret_blocks_before_any_send(self):
+        from forge import providers as p
+        captured = {}
+        client = self._facade(captured)
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user",
+             "content": f"my key is {self.AWS}, use it"}]
+        with self.assertRaises(p.SecretBlocked) as ctx:
+            list(client.chat_stream(self.MODEL, messages, {}, []))
+        # NOTHING was sent: the fake network was never touched.
+        self.assertEqual(captured.get("calls"), None)
+        self.assertEqual(captured.get("payload"), None)
+        exc = ctx.exception
+        self.assertEqual(exc.provider, "groq")
+        self.assertEqual(exc.model, self.MODEL)
+        self.assertEqual(len(exc.findings), 1)
+        self.assertEqual(exc.findings[0]["pattern"], "aws-key")
+        self.assertEqual(exc.findings[0]["evidence"],
+                         "AKIA...(20 chars)")
+        self.assertEqual(exc.findings[0]["where"],
+                         "message 2 (user)")
+        # The exception message is redacted-only: it flows into
+        # logs and dialogs, so the secret must never be in it.
+        self.assertNotIn(self.AWS, str(exc))
+        self.assertIn("AKIA...(20 chars)", str(exc))
+
+    def test_secret_blocked_is_not_an_ollama_error(self):
+        from forge import providers as p
+        from forge.ollama_client import OllamaError
+        captured = {}
+        client = self._facade(captured)
+        with self.assertRaises(p.SecretBlocked) as ctx:
+            list(client.chat_stream(
+                self.MODEL,
+                [{"role": "user", "content": self.AWS}], {}, []))
+        self.assertNotIsInstance(ctx.exception, OllamaError)
+
+    def test_secret_in_tool_call_arguments_blocks(self):
+        from forge import providers as p
+        captured = {}
+        client = self._facade(captured)
+        messages = [{
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {
+                "name": "run_command",
+                "arguments": {"cmd": f"export K={self.AWS}"}}}]}]
+        with self.assertRaises(p.SecretBlocked):
+            list(client.chat_stream(self.MODEL, messages, {}, []))
+        self.assertEqual(captured.get("calls"), None)
+
+    def test_secret_in_tool_result_blocks(self):
+        from forge import providers as p
+        captured = {}
+        client = self._facade(captured)
+        messages = [
+            {"role": "user", "content": "read the config"},
+            {"role": "tool", "tool_name": "read_file",
+             "content": f"api_key={self.AWS}"}]
+        with self.assertRaises(p.SecretBlocked) as ctx:
+            list(client.chat_stream(self.MODEL, messages, {}, []))
+        self.assertEqual(ctx.exception.findings[0]["where"],
+                         "message 2 (tool)")
+        self.assertEqual(captured.get("calls"), None)
+
+    def test_scan_off_sends_unscanned(self):
+        from forge import providers as p
+        captured = {}
+        client = self._facade(captured)
+        client.presend_scan = False
+        messages = [{"role": "user", "content": self.AWS}]
+        events = list(client.chat_stream(
+            self.MODEL, messages, {}, []))
+        self.assertEqual(len(captured["calls"]), 1)
+        self.assertIn(self.AWS,
+                      captured["payload"]["messages"][0]["content"])
+        self.assertTrue(events)
+
+    def test_skip_flag_sends_after_an_owner_decision(self):
+        from forge import providers as p
+        captured = {}
+        client = self._facade(captured)
+        messages = [{"role": "user", "content": self.AWS}]
+        events = list(client.chat_stream(
+            self.MODEL, messages, {}, [],
+            skip_presend_scan=True))
+        self.assertEqual(len(captured["calls"]), 1)
+        self.assertTrue(events)
+
+    def test_local_model_is_never_scanned(self):
+        from forge import providers as p
+
+        class _Recording:
+            def chat_stream(self, model, messages, options, tools,
+                            images=None, keep_alive="30m",
+                            cancel_event=None):
+                yield {"message": {"content": "local ok",
+                                   "tool_calls": []}, "done": True}
+
+        facade = p.ProviderClient(config={})
+        facade.local = _Recording()
+        events = list(facade.chat_stream(
+            "llama3.2:latest",
+            [{"role": "user", "content": self.AWS}], {}, []))
+        self.assertEqual(events[0]["message"]["content"], "local ok")
+
+    def test_decisions_lane_blocks_before_any_send(self):
+        from forge import decisions as decisions_mod
+        from forge import providers as p
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return _ProviderFakeResponse(json.dumps(
+                {"answers": {"score": {
+                    "type": "score", "score": 2,
+                    "probabilities": {}, "legend": {},
+                    "confidence": 0.9}}}))
+
+        client = decisions_mod.DecisionsClient(
+            "k", urlopen=fake_urlopen)
+        with self.assertRaises(p.SecretBlocked) as ctx:
+            client.score_text(f"config holds {self.AWS}",
+                              ["bad", "ok", "good"], "quality?")
+        self.assertEqual(calls, [])
+        self.assertNotIn(self.AWS, str(ctx.exception))
+        self.assertEqual(ctx.exception.provider, "gemini")
+
+    def test_decisions_lane_clean_text_scores(self):
+        from forge import decisions as decisions_mod
+
+        def fake_urlopen(req, timeout=None):
+            return _ProviderFakeResponse(json.dumps(
+                {"answers": {"score": {
+                    "type": "score", "score": 2,
+                    "probabilities": {}, "legend": {},
+                    "confidence": 0.9}}}))
+
+        client = decisions_mod.DecisionsClient(
+            "k", urlopen=fake_urlopen)
+        result = client.score_text("clean text here",
+                                   ["bad", "ok", "good"], "quality?")
+        self.assertEqual(result.fzi, 100)
+
+    def test_scan_outbound_messages_annotations(self):
+        from forge import providers as p
+        messages = [
+            {"role": "user", "content": "first line\n"},
+            {"role": "user",
+             "content": f"second has {self.AWS} in it\n"}]
+        found = p.scan_outbound_messages(messages)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["where"], "message 2 (user)")
+        self.assertEqual(found[0]["line"],
+                         "second has [redacted] in it")
+
+
+class PresendSettingsTests(unittest.TestCase):
+    """Pre-send secret scan, item 3 (settings half): the
+    `scan_before_cloud_send` key defaults ON, the Settings
+    checkbox round-trips it, and _sync_presend_scan mirrors
+    it (plus the workspace) into the provider facade."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._saved = dict(self.win.settings)
+        self._saved_workspace = self.win.workspace
+
+    def tearDown(self):
+        self.win.settings.clear()
+        self.win.settings.update(self._saved)
+        self.win.workspace = self._saved_workspace
+        self.win._sync_presend_scan()
+
+    def test_default_is_on_and_mirrored(self):
+        self.win.settings.pop("scan_before_cloud_send", None)
+        self.win._sync_presend_scan()
+        self.assertTrue(self.win.client.presend_scan)
+        self.assertEqual(self.win.client.presend_workspace,
+                         self.win.workspace)
+
+    def test_settings_dialog_checkbox_round_trips(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import SettingsDialog
+        settings = {"scan_before_cloud_send": True}
+        parent = QWidget()
+        try:
+            dialog = SettingsDialog(parent, settings)
+            self.assertTrue(
+                dialog.scan_before_cloud_send.isChecked())
+            dialog.scan_before_cloud_send.setChecked(False)
+            self.assertFalse(
+                dialog.values()["scan_before_cloud_send"])
+            dialog.scan_before_cloud_send.setChecked(True)
+            self.assertTrue(
+                dialog.values()["scan_before_cloud_send"])
+        finally:
+            parent.close()
+
+    def test_rebuild_keeps_the_toggle(self):
+        self.win.settings["scan_before_cloud_send"] = False
+        self.win._rebuild_provider_client()
+        self.assertFalse(self.win.client.presend_scan)
+        self.assertEqual(self.win.client.presend_workspace,
+                         self.win.workspace)
+        self.win.settings["scan_before_cloud_send"] = True
+        self.win._rebuild_provider_client()
+        self.assertTrue(self.win.client.presend_scan)
+
+
+class PresendDecisionTests(unittest.TestCase):
+    """Pre-send secret scan, item 4 (worker half): the
+    _stream_checked wrapper asks the owner through the secret
+    bridge and retries once per the choice. Planted values are
+    fake shapes (AWS's own documentation example key)."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    MODEL = "groq:openai/gpt-oss-20b"
+
+    def _facade(self, captured):
+        from forge import providers as p
+
+        def fake_urlopen(req, timeout=None):
+            captured.setdefault("calls", []).append(req.full_url)
+            captured["payload"] = json.loads(
+                req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [
+                    {"delta": {"content": "Hi"},
+                     "finish_reason": None}]}),
+                json.dumps({"choices": [
+                    {"delta": {}, "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        config = {"groq_api_key": "k"}
+        return p.ProviderClient("http://127.0.0.1:11434", config,
+                                urlopen=fake_urlopen)
+
+    def _worker(self, client, choice):
+        import tempfile
+        from forge.worker import AgentWorker
+        worker = AgentWorker(client, self.MODEL, [], {},
+                             tempfile.mkdtemp())
+        payloads = []
+        if choice is not None:
+            worker.secret_decision_needed.connect(
+                lambda p: (payloads.append(p),
+                           worker.resolve_secret_decision(choice)))
+        return worker, payloads
+
+    def test_send_anyway_retries_and_sends(self):
+        captured = {}
+        worker, payloads = self._worker(self._facade(captured),
+                                        "send")
+        messages = [{"role": "user",
+                     "content": f"my key is {self.AWS}, use it"}]
+        events = list(worker._stream_checked(
+            self.MODEL, messages, {}, []))
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["provider"], "groq")
+        self.assertEqual(len(captured["calls"]), 1)
+        sent = captured["payload"]["messages"][0]["content"]
+        self.assertEqual(sent, messages[0]["content"])
+        self.assertTrue(events)
+
+    def test_redact_retries_with_redacted_text(self):
+        captured = {}
+        worker, _ = self._worker(self._facade(captured), "redact")
+        messages = [{"role": "user",
+                     "content": f"my key is {self.AWS}, use it"}]
+        list(worker._stream_checked(self.MODEL, messages, {}, []))
+        self.assertEqual(len(captured["calls"]), 1)
+        sent = captured["payload"]["messages"][0]["content"]
+        self.assertEqual(sent, "my key is [redacted], use it")
+        self.assertNotIn(self.AWS, sent)
+
+    def test_redact_covers_tool_call_arguments(self):
+        captured = {}
+        worker, _ = self._worker(self._facade(captured), "redact")
+        messages = [{
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {
+                "name": "run_command",
+                "arguments": {"cmd": f"export K={self.AWS}"}}}]}]
+        list(worker._stream_checked(self.MODEL, messages, {}, []))
+        # The facade prepends a user message when the list opens
+        # with an assistant turn, and stringifies tool arguments
+        # — so find the assistant message and read its args as a
+        # string. The dict still parsing is pinned at the unit
+        # level in test_redact_messages_keeps_args_parseable.
+        sent = [m for m in captured["payload"]["messages"]
+                if m.get("role") == "assistant"][0]
+        args = sent["tool_calls"][0]["function"]["arguments"]
+        self.assertIsInstance(args, str)
+        self.assertIn("export K=[redacted]", args)
+        self.assertNotIn(self.AWS, json.dumps(sent))
+
+    def test_cancel_raises_and_sends_nothing(self):
+        from forge.worker import PresendCancelled
+        captured = {}
+        worker, _ = self._worker(self._facade(captured), "cancel")
+        with self.assertRaises(PresendCancelled) as ctx:
+            list(worker._stream_checked(
+                self.MODEL,
+                [{"role": "user", "content": self.AWS}], {}, []))
+        self.assertEqual(captured.get("calls"), None)
+        self.assertNotIn(self.AWS, str(ctx.exception))
+        self.assertIn("Nothing was sent", str(ctx.exception))
+
+    def test_cancel_releases_a_parked_ask(self):
+        import threading
+        from forge import providers as p
+        captured = {}
+        worker, _ = self._worker(self._facade(captured), None)
+        # No resolver connected for THIS ask: the worker parks
+        # until cancel() releases it — on a thread, because the
+        # wait is untimed (F8).
+        worker2 = worker
+        blocked = p.SecretBlocked(
+            "groq", self.MODEL,
+            [{"pattern": "aws-key",
+              "evidence": "AKIA...(20 chars)"}])
+        outcome = {}
+
+        def ask():
+            outcome["choice"] = worker2._ask_secret_decision(
+                blocked, [{"role": "user", "content": "x"}])
+
+        thread = threading.Thread(target=ask, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        self.assertTrue(thread.is_alive())
+        worker2.cancel()
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome["choice"], "cancel")
+
+    def test_unknown_choice_is_a_cancel(self):
+        import threading
+        captured = {}
+        worker, _ = self._worker(self._facade(captured), "send")
+        decision = {"choice": "cancel"}
+        worker._secret_decision = decision
+        worker._secret_decision_event = threading.Event()
+        worker.resolve_secret_decision("bogus")
+        self.assertEqual(decision["choice"], "cancel")
+        self.assertTrue(worker._secret_decision_event.is_set())
+
+    def test_preview_redacts_everything(self):
+        from forge.worker import _secret_preview
+        preview = _secret_preview([
+            {"role": "user",
+             "content": f"key {self.AWS} here"},
+            {"role": "assistant", "content": "clean text"}])
+        self.assertIn("[redacted]", preview)
+        self.assertNotIn(self.AWS, preview)
+        self.assertIn("clean text", preview)
+        long_preview = _secret_preview([
+            {"role": "user", "content": "x" * 900}])
+        self.assertTrue(long_preview.endswith("…"))
+        self.assertEqual(len(long_preview), 601)
+
+    def test_redact_messages_leaves_the_caller_untouched(self):
+        from forge import providers as p
+        from forge.worker import _redact_messages
+        messages = [{"role": "user",
+                     "content": f"key {self.AWS} here"}]
+        found = p.scan_outbound_messages(messages)
+        redacted = _redact_messages(messages, found)
+        self.assertEqual(redacted[0]["content"],
+                         "key [redacted] here")
+        self.assertIn(self.AWS, messages[0]["content"])
+
+    def test_redact_messages_keeps_args_parseable(self):
+        from forge import providers as p
+        from forge.worker import _redact_messages
+        messages = [{
+            "role": "assistant", "content": "",
+            "tool_calls": [{"function": {
+                "name": "run_command",
+                "arguments": {"cmd": f"export K={self.AWS}"}}}]}]
+        found = p.scan_outbound_messages(messages)
+        redacted = _redact_messages(messages, found)
+        args = redacted[0]["tool_calls"][0]["function"]["arguments"]
+        self.assertIsInstance(args, dict)
+        self.assertEqual(args["cmd"], "export K=[redacted]")
+
+    def test_clean_stream_passes_through_unchanged(self):
+        captured = {}
+        worker, payloads = self._worker(self._facade(captured),
+                                        "send")
+        messages = [{"role": "user", "content": "hello"}]
+        events = list(worker._stream_checked(
+            self.MODEL, messages, {}, []))
+        self.assertEqual(payloads, [])
+        self.assertEqual(len(captured["calls"]), 1)
+        self.assertTrue(events)
+
+    def test_non_facade_client_is_unaffected(self):
+        import tempfile
+        from forge.worker import AgentWorker
+
+        class _FixedClient:
+            def chat_stream(self, model, messages, options,
+                            schemas, keep_alive=None):
+                yield {"message": {"content": "local ok",
+                                   "tool_calls": []}}
+
+        worker = AgentWorker(_FixedClient(), "fake", [], {},
+                             tempfile.mkdtemp())
+        events = list(worker._stream_checked(
+            "fake", [{"role": "user", "content": "hi"}], {}, []))
+        self.assertEqual(events[0]["message"]["content"], "local ok")
+
+
+class PresendDialogTests(unittest.TestCase):
+    """Pre-send secret scan, item 4 (dialog half): the
+    SecretScanDialog shows redacted matches only, has no
+    default button, and close/Esc is Cancel."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _payload(self):
+        from forge import providers as p
+        from forge.worker import _secret_preview
+        messages = [
+            {"role": "user",
+             "content": f"my key is {self.AWS}, use it"},
+            {"role": "assistant", "content": "checking"}]
+        return {
+            "provider": "groq",
+            "model": "groq:openai/gpt-oss-20b",
+            "findings": p.scan_outbound_messages(messages),
+            "message_count": len(messages),
+            "preview": _secret_preview(messages)}
+
+    def _dialog(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import SecretScanDialog
+        parent = QWidget()
+        dialog = SecretScanDialog(parent, self._payload())
+        self.addCleanup(parent.close)
+        return dialog
+
+    def test_send_button_chooses_send(self):
+        from PySide6.QtWidgets import QDialog
+        dialog = self._dialog()
+        dialog.send_button.click()
+        self.assertEqual(dialog.choice, "send")
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+
+    def test_redact_button_chooses_redact(self):
+        from PySide6.QtWidgets import QDialog
+        dialog = self._dialog()
+        dialog.redact_button.click()
+        self.assertEqual(dialog.choice, "redact")
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+
+    def test_cancel_button_chooses_cancel(self):
+        from PySide6.QtWidgets import QDialog
+        dialog = self._dialog()
+        dialog.cancel_button.click()
+        self.assertEqual(dialog.choice, "cancel")
+        self.assertEqual(dialog.result(), QDialog.Rejected)
+
+    def test_no_default_button(self):
+        dialog = self._dialog()
+        self.assertFalse(dialog.send_button.isDefault())
+        self.assertFalse(dialog.redact_button.isDefault())
+        self.assertFalse(dialog.cancel_button.isDefault())
+
+    def test_close_is_cancel(self):
+        dialog = self._dialog()
+        dialog.reject()
+        self.assertEqual(dialog.choice, "cancel")
+
+    def test_dialog_shows_no_secret(self):
+        from PySide6.QtWidgets import QLabel, QPlainTextEdit
+        dialog = self._dialog()
+        texts = [w.text() for w in dialog.findChildren(QLabel)]
+        texts += [w.toPlainText()
+                  for w in dialog.findChildren(QPlainTextEdit)]
+        joined = "\n".join(texts)
+        self.assertNotIn(self.AWS, joined)
+        self.assertIn("AKIA...(20 chars)", joined)
+        self.assertIn("[redacted]", joined)
+
+
+class PresendQueueTests(unittest.TestCase):
+    """Pre-send secret scan, item 4 (window half): one secret
+    dialog at a time — a second ask queues, a dead ask is
+    dropped, a presented ask resolves its worker."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._saved_queue = list(self.win._secret_queue)
+        self._saved_presenting = self.win._secret_presenting
+
+    def tearDown(self):
+        self.win._secret_queue = self._saved_queue
+        self.win._secret_presenting = self._saved_presenting
+
+    def _stream(self, worker):
+        return {"id": 4242, "worker": worker, "title": "test turn",
+                "gate": None, "secret": None, "settled": None,
+                "status_text": ""}
+
+    def _payload(self):
+        return {"provider": "groq",
+                "model": "groq:openai/gpt-oss-20b",
+                "findings": [{"pattern": "aws-key",
+                              "evidence": "AKIA...(20 chars)",
+                              "where": "message 1 (user)",
+                              "line": "key [redacted]"}],
+                "message_count": 1, "preview": "key [redacted]"}
+
+    def test_second_ask_queues_behind_first(self):
+        import tempfile
+        from forge.worker import AgentWorker
+        worker = AgentWorker(None, "fake", [], {},
+                             tempfile.mkdtemp())
+        stream = self._stream(worker)
+        self.win._secret_presenting = True
+        self.win._ws_secret(stream, self._payload())
+        self.win._ws_secret(stream, self._payload())
+        self.assertEqual(len(self.win._secret_queue), 2)
+        self.assertEqual(stream["secret"], {"queued": True})
+        self.assertEqual(
+            self.win._stream_state_text(stream),
+            "Secret decision queued")
+
+    def test_pump_drops_a_dead_ask(self):
+        import tempfile
+        from forge.worker import AgentWorker
+        worker = AgentWorker(None, "fake", [], {},
+                             tempfile.mkdtemp())
+        stream = self._stream(worker)
+        self.win._secret_queue.append((stream, self._payload()))
+        # The worker was never started: isRunning() is False, so
+        # the ask is dropped and no dialog is ever presented.
+        self.win._pump_secret_queue()
+        self.assertEqual(self.win._secret_queue, [])
+        self.assertIsNone(stream["secret"])
+
+    def test_present_resolves_the_worker(self):
+        import tempfile
+        import threading
+        import forge.main as main_mod
+        from forge.worker import AgentWorker
+        worker = AgentWorker(None, "fake", [], {},
+                             tempfile.mkdtemp())
+        worker._secret_decision = {"choice": "cancel"}
+        worker._secret_decision_event = threading.Event()
+        worker.isRunning = lambda: True
+        stream = self._stream(worker)
+
+        class _FakeDialog:
+            def __init__(self, parent, payload, context=""):
+                self.choice = "send"
+            def exec(self):
+                return 1
+
+        real_dialog = main_mod.SecretScanDialog
+        main_mod.SecretScanDialog = _FakeDialog
+        try:
+            self.win._present_secret((stream, self._payload()))
+        finally:
+            main_mod.SecretScanDialog = real_dialog
+        self.assertEqual(worker._secret_decision["choice"], "send")
+        self.assertTrue(worker._secret_decision_event.is_set())
+        self.assertIsNone(stream["secret"])
+        self.assertFalse(self.win._secret_presenting)
+
+    def test_state_text_names_the_secret_pause(self):
+        stream = self._stream(None)
+        stream["secret"] = {"queued": False}
+        self.assertEqual(self.win._stream_state_text(stream),
+                         "Paused — secret scan")
+
+
+class PresendAllowlistTests(unittest.TestCase):
+    """Pre-send secret scan, item 5 (storage + facade half): the
+    per-project allow-list in owner settings (APP_DIR, keyed by
+    workspace — security review, 2026-11-12) — entries match
+    pattern + redacted anchor, never store a secret value, and a
+    listed match passes while an unlisted one still blocks.
+    Planted values are fake shapes (AWS's own documentation
+    example key)."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    MODEL = "groq:openai/gpt-oss-20b"
+
+    def setUp(self):
+        # The allow-list lives in owner settings (APP_DIR), not
+        # the project — point it at a temp dir so these tests
+        # never touch the real app dir.
+        import tempfile
+        from forge import secrets as secrets_mod
+        self._appdir = tempfile.TemporaryDirectory()
+        self._old_appdir = secrets_mod.APP_DIR_OVERRIDE
+        secrets_mod.APP_DIR_OVERRIDE = self._appdir.name
+
+    def tearDown(self):
+        from forge import secrets as secrets_mod
+        secrets_mod.APP_DIR_OVERRIDE = self._old_appdir
+        self._appdir.cleanup()
+
+    def _facade(self, captured):
+        from forge import providers as p
+
+        def fake_urlopen(req, timeout=None):
+            captured.setdefault("calls", []).append(req.full_url)
+            captured["payload"] = json.loads(
+                req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [
+                    {"delta": {"content": "Hi"},
+                     "finish_reason": None}]}),
+                json.dumps({"choices": [
+                    {"delta": {}, "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        config = {"groq_api_key": "k"}
+        return p.ProviderClient("http://127.0.0.1:11434", config,
+                                urlopen=fake_urlopen)
+
+    def _finding(self):
+        from forge import providers as p
+        messages = [{"role": "user",
+                     "content": f"my key is {self.AWS}, use it"}]
+        return p.scan_outbound_messages(messages)[0], messages
+
+    def test_save_load_round_trip_stores_no_secret(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            found, _ = self._finding()
+            entries = secrets_mod.add_allowlist_entry(
+                td, found["pattern"], found["line"], "test key")
+            self.assertEqual(len(entries), 1)
+            path = secrets_mod.allowlist_path(td)
+            self.assertTrue(path.exists())
+            self.assertNotIn(self.AWS,
+                             path.read_text(encoding="utf-8"))
+            loaded = secrets_mod.load_allowlist(td)
+            self.assertEqual(loaded[0]["pattern"], "aws-key")
+            self.assertEqual(loaded[0]["anchor"],
+                             "my key is [redacted], use it")
+            self.assertEqual(loaded[0]["reason"], "test key")
+            self.assertTrue(loaded[0]["added"])
+
+    def test_add_is_idempotent(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, "aws-key", "line one", "r")
+            entries = secrets_mod.add_allowlist_entry(
+                td, "aws-key", "line one", "different reason")
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["reason"], "r")
+
+    def test_remove_drops_only_that_entry(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(td, "aws-key", "a", "")
+            secrets_mod.add_allowlist_entry(td, "sk-key", "b", "")
+            left = secrets_mod.remove_allowlist_entry(
+                td, "aws-key", "a")
+            self.assertEqual(len(left), 1)
+            self.assertEqual(left[0]["pattern"], "sk-key")
+            self.assertEqual(len(secrets_mod.load_allowlist(td)), 1)
+
+    def test_corrupt_file_fails_closed(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            path = secrets_mod.allowlist_path(td)
+            path.parent.mkdir(parents=True)
+            path.write_text("{not json", encoding="utf-8")
+            self.assertEqual(secrets_mod.load_allowlist(td), [])
+            found, _ = self._finding()
+            kept = secrets_mod.filter_allowed([found], td)
+            self.assertEqual(kept, [found])
+
+    def test_no_workspace_fails_closed(self):
+        from forge import secrets as secrets_mod
+        found, _ = self._finding()
+        self.assertEqual(secrets_mod.load_allowlist(None), [])
+        self.assertEqual(secrets_mod.filter_allowed([found], None),
+                         [found])
+
+    def test_is_allowed_matches_pattern_and_anchor(self):
+        from forge import secrets as secrets_mod
+        entries = [{"pattern": "aws-key",
+                    "anchor": "my key is [redacted], use it",
+                    "reason": "", "added": ""}]
+        found, _ = self._finding()
+        self.assertTrue(secrets_mod.is_allowed(found, entries))
+        other_pattern = dict(found, pattern="sk-key")
+        self.assertFalse(
+            secrets_mod.is_allowed(other_pattern, entries))
+        other_anchor = dict(found, line="other [redacted] line")
+        self.assertFalse(
+            secrets_mod.is_allowed(other_anchor, entries))
+
+    def test_allowed_match_passes_the_facade(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        found, messages = self._finding()
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, found["pattern"], found["line"], "test key")
+            captured = {}
+            client = self._facade(captured)
+            client.presend_workspace = td
+            events = list(client.chat_stream(
+                self.MODEL, messages, {}, []))
+            self.assertEqual(len(captured["calls"]), 1)
+            self.assertTrue(events)
+
+    def test_per_call_workspace_wins(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        found, messages = self._finding()
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, found["pattern"], found["line"], "test key")
+            captured = {}
+            client = self._facade(captured)
+            # Mirrored attribute is None; the per-call kwarg
+            # carries the workspace instead.
+            events = list(client.chat_stream(
+                self.MODEL, messages, {}, [],
+                presend_workspace=td))
+            self.assertEqual(len(captured["calls"]), 1)
+            self.assertTrue(events)
+
+    def test_unlisted_match_still_blocks(self):
+        import tempfile
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+        found, messages = self._finding()
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, "aws-key", "a different [redacted] line", "")
+            captured = {}
+            client = self._facade(captured)
+            client.presend_workspace = td
+            with self.assertRaises(p.SecretBlocked):
+                list(client.chat_stream(
+                    self.MODEL, messages, {}, []))
+            self.assertEqual(captured.get("calls"), None)
+
+    def test_removal_reblocks(self):
+        import tempfile
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+        found, messages = self._finding()
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, found["pattern"], found["line"], "test key")
+            captured = {}
+            client = self._facade(captured)
+            client.presend_workspace = td
+            list(client.chat_stream(self.MODEL, messages, {}, []))
+            self.assertEqual(len(captured["calls"]), 1)
+            secrets_mod.remove_allowlist_entry(
+                td, found["pattern"], found["line"])
+            with self.assertRaises(p.SecretBlocked):
+                list(client.chat_stream(
+                    self.MODEL, messages, {}, []))
+            self.assertEqual(len(captured["calls"]), 1)
+
+    def test_decisions_lane_honors_the_allowlist(self):
+        import tempfile
+        from forge import decisions as decisions_mod
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+
+        def fake_urlopen(req, timeout=None):
+            return _ProviderFakeResponse(json.dumps(
+                {"answers": {"score": {
+                    "type": "score", "score": 2,
+                    "probabilities": {}, "legend": {},
+                    "confidence": 0.9}}}))
+
+        with tempfile.TemporaryDirectory() as td:
+            text = f"config holds {self.AWS}"
+            found = p.scan_outbound_text(
+                text, where="decisions input")[0]
+            client = decisions_mod.DecisionsClient(
+                "k", urlopen=fake_urlopen)
+            client.presend_workspace = td
+            with self.assertRaises(p.SecretBlocked):
+                client.score_text(text, ["bad", "ok", "good"],
+                                  "quality?")
+            secrets_mod.add_allowlist_entry(
+                td, found["pattern"], found["line"], "test key")
+            result = client.score_text(text, ["bad", "ok", "good"],
+                                       "quality?")
+            self.assertEqual(result.fzi, 100)
+
+    def test_allow_choice_retries_and_sends(self):
+        import tempfile
+        from forge.worker import AgentWorker
+        captured = {}
+        worker = AgentWorker(self._facade(captured), self.MODEL,
+                             [], {}, tempfile.mkdtemp())
+        worker.secret_decision_needed.connect(
+            lambda p: worker.resolve_secret_decision("allow"))
+        messages = [{"role": "user", "content": self.AWS}]
+        events = list(worker._stream_checked(
+            self.MODEL, messages, {}, []))
+        self.assertEqual(len(captured["calls"]), 1)
+        self.assertTrue(events)
+
+
+class PresendAllowlistDialogTests(unittest.TestCase):
+    """Pre-send secret scan, item 5 (dialog half): "Allow +
+    send" asks for a reason, and the AllowListDialog lists +
+    removes entries."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        # The allow-list lives in owner settings (APP_DIR), not
+        # the project — point it at a temp dir so these tests
+        # never touch the real app dir.
+        import tempfile
+        from forge import secrets as secrets_mod
+        self._appdir = tempfile.TemporaryDirectory()
+        self._old_appdir = secrets_mod.APP_DIR_OVERRIDE
+        secrets_mod.APP_DIR_OVERRIDE = self._appdir.name
+
+    def tearDown(self):
+        from forge import secrets as secrets_mod
+        secrets_mod.APP_DIR_OVERRIDE = self._old_appdir
+        self._appdir.cleanup()
+
+    def _payload(self):
+        from forge import providers as p
+        from forge.worker import _secret_preview
+        messages = [
+            {"role": "user",
+             "content": f"my key is {self.AWS}, use it"}]
+        return {
+            "provider": "groq",
+            "model": "groq:openai/gpt-oss-20b",
+            "findings": p.scan_outbound_messages(messages),
+            "message_count": len(messages),
+            "preview": _secret_preview(messages)}
+
+    def _dialog(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import SecretScanDialog
+        parent = QWidget()
+        dialog = SecretScanDialog(parent, self._payload())
+        self.addCleanup(parent.close)
+        return dialog
+
+    def _patch_input(self, answer):
+        import forge.main as main_mod
+
+        class _FakeInput:
+            @staticmethod
+            def getText(*args, **kwargs):
+                return answer
+
+        real = main_mod.QInputDialog
+        main_mod.QInputDialog = _FakeInput
+        self.addCleanup(setattr, main_mod, "QInputDialog", real)
+
+    def test_allow_button_asks_for_a_reason(self):
+        from PySide6.QtWidgets import QDialog
+        self._patch_input(("test key", True))
+        dialog = self._dialog()
+        dialog.allow_button.click()
+        self.assertEqual(dialog.choice, "allow")
+        self.assertEqual(dialog.allow_reason, "test key")
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+
+    def test_allow_cancel_keeps_the_dialog_open(self):
+        self._patch_input(("", False))
+        dialog = self._dialog()
+        dialog.show()
+        self.addCleanup(dialog.close)
+        dialog.allow_button.click()
+        self.assertEqual(dialog.choice, "cancel")
+        self.assertTrue(dialog.isVisible())
+
+    def test_allow_button_has_no_default(self):
+        dialog = self._dialog()
+        self.assertFalse(dialog.allow_button.isDefault())
+
+    def test_allowlist_dialog_lists_and_removes(self):
+        import tempfile
+        from PySide6.QtWidgets import QLabel, QPushButton, QWidget
+        from forge import secrets as secrets_mod
+        from forge.main import AllowListDialog
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, "aws-key", "first [redacted] line", "one")
+            secrets_mod.add_allowlist_entry(
+                td, "sk-key", "second [redacted] line", "two")
+            parent = QWidget()
+            try:
+                dialog = AllowListDialog(parent, td)
+                removes = [b for b in dialog.findChildren(
+                    QPushButton) if b.text() == "Remove"]
+                self.assertEqual(len(removes), 2)
+                removes[0].click()
+                left = secrets_mod.load_allowlist(td)
+                self.assertEqual(len(left), 1)
+                self.assertEqual(left[0]["pattern"], "sk-key")
+                removes = [b for b in dialog.findChildren(
+                    QPushButton) if b.text() == "Remove"]
+                self.assertEqual(len(removes), 1)
+                removes[0].click()
+                self.assertEqual(secrets_mod.load_allowlist(td),
+                                 [])
+                labels = [w.text() for w in dialog.findChildren(
+                    QLabel)]
+                self.assertIn("No allowed matches in this "
+                              "project.", labels)
+            finally:
+                parent.close()
+
+    def test_settings_button_opens_the_allowlist(self):
+        import tempfile
+        import forge.main as main_mod
+        from PySide6.QtWidgets import QWidget
+        from forge.main import SettingsDialog
+        seen = {}
+
+        class _FakeAllowList:
+            def __init__(self, parent, workspace):
+                seen["workspace"] = workspace
+            def exec(self):
+                return 1
+
+        real = main_mod.AllowListDialog
+        main_mod.AllowListDialog = _FakeAllowList
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                parent = QWidget()
+                parent.workspace = td
+                try:
+                    dialog = SettingsDialog(parent, {})
+                    dialog.allowlist_button.click()
+                    self.assertEqual(seen.get("workspace"), td)
+                finally:
+                    parent.close()
+                # Without a workspace the button does nothing.
+                seen.clear()
+                parent2 = QWidget()
+                try:
+                    dialog2 = SettingsDialog(parent2, {})
+                    dialog2.allowlist_button.click()
+                    self.assertEqual(seen, {})
+                finally:
+                    parent2.close()
+        finally:
+            main_mod.AllowListDialog = real
+
+
+class PresendAllowWindowTests(unittest.TestCase):
+    """Pre-send secret scan, item 5 (window half): presenting an
+    "allow" decision records one entry per match before the
+    worker is resolved."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        # The allow-list lives in owner settings (APP_DIR), not
+        # the project — point it at a temp dir so these tests
+        # never touch the real app dir.
+        import tempfile
+        from forge import secrets as secrets_mod
+        self._appdir = tempfile.TemporaryDirectory()
+        self._old_appdir = secrets_mod.APP_DIR_OVERRIDE
+        secrets_mod.APP_DIR_OVERRIDE = self._appdir.name
+
+    def tearDown(self):
+        from forge import secrets as secrets_mod
+        secrets_mod.APP_DIR_OVERRIDE = self._old_appdir
+        self._appdir.cleanup()
+
+    def test_present_allow_records_entries(self):
+        import tempfile
+        import threading
+        import forge.main as main_mod
+        from forge import secrets as secrets_mod
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            worker = AgentWorker(None, "fake", [], {}, td)
+            worker._secret_decision = {"choice": "cancel"}
+            worker._secret_decision_event = threading.Event()
+            worker.isRunning = lambda: True
+            stream = {"id": 4243, "worker": worker,
+                      "title": "test turn", "gate": None,
+                      "secret": None, "settled": None,
+                      "status_text": ""}
+            payload = {"provider": "groq",
+                       "model": "groq:openai/gpt-oss-20b",
+                       "findings": [{"pattern": "aws-key",
+                                     "evidence": "AKIA...(20 chars)",
+                                     "where": "message 1 (user)",
+                                     "line": "key [redacted]"}],
+                       "message_count": 1,
+                       "preview": "key [redacted]"}
+
+            class _FakeDialog:
+                def __init__(self, parent, payload, context=""):
+                    self.choice = "allow"
+                    self.allow_reason = "test key"
+                def exec(self):
+                    return 1
+
+            real_dialog = main_mod.SecretScanDialog
+            main_mod.SecretScanDialog = _FakeDialog
+            try:
+                self.win._present_secret((stream, payload))
+            finally:
+                main_mod.SecretScanDialog = real_dialog
+            entries = secrets_mod.load_allowlist(td)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["pattern"], "aws-key")
+            self.assertEqual(entries[0]["anchor"], "key [redacted]")
+            self.assertEqual(entries[0]["reason"], "test key")
+            self.assertEqual(worker._secret_decision["choice"],
+                             "allow")
+
+
+class PresendLoggingTests(unittest.TestCase):
+    """Pre-send secret scan, item 6 (worker half): the block, the
+    owner's decision, and un-scanned sends are on the event log —
+    redacted evidence only, never a secret value. Planted values
+    are fake shapes (AWS's own documentation example key)."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    MODEL = "groq:openai/gpt-oss-20b"
+
+    def _facade(self, captured):
+        from forge import providers as p
+
+        def fake_urlopen(req, timeout=None):
+            captured.setdefault("calls", []).append(req.full_url)
+            captured["payload"] = json.loads(
+                req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [
+                    {"delta": {"content": "Hi"},
+                     "finish_reason": None}]}),
+                json.dumps({"choices": [
+                    {"delta": {}, "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        config = {"groq_api_key": "k"}
+        return p.ProviderClient("http://127.0.0.1:11434", config,
+                                urlopen=fake_urlopen)
+
+    def _worker(self, client, choice, root):
+        import tempfile
+        from forge.eventlog import EventLog
+        from forge.worker import AgentWorker
+        workspace = root / "myproject"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worker = AgentWorker(client, self.MODEL, [], {},
+                             str(workspace),
+                             eventlog=EventLog(root / "log"))
+        if choice is not None:
+            worker.secret_decision_needed.connect(
+                lambda p: worker.resolve_secret_decision(choice))
+        return worker
+
+    def _records(self, root):
+        from forge import timeline as timeline_mod
+        return timeline_mod.read_records(root / "log")
+
+    def test_block_and_decision_are_logged(self):
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as td:
+            root = _Path(td)
+            captured = {}
+            worker = self._worker(self._facade(captured),
+                                  "redact", root)
+            messages = [{"role": "user",
+                         "content": f"my key is {self.AWS}"}]
+            list(worker._stream_checked(
+                self.MODEL, messages, {}, []))
+            records = [r for r in self._records(root)
+                       if r.get("kind", "").startswith("presend")]
+            self.assertEqual(
+                [r["kind"] for r in records],
+                ["presend_blocked", "presend_decision"])
+            blocked, decision = records
+            self.assertEqual(blocked["provider"], "groq")
+            self.assertEqual(blocked["model"], self.MODEL)
+            self.assertEqual(blocked["project"], "myproject")
+            self.assertEqual(blocked["matches"],
+                             [{"pattern": "aws-key",
+                               "evidence": "AKIA...(20 chars)"}])
+            self.assertEqual(decision["decision"], "redact")
+            self.assertEqual(decision["matches"],
+                             blocked["matches"])
+
+    def test_scan_off_is_logged_per_send(self):
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as td:
+            root = _Path(td)
+            captured = {}
+            client = self._facade(captured)
+            client.presend_scan = False
+            worker = self._worker(client, None, root)
+            messages = [{"role": "user", "content": "hello"}]
+            list(worker._stream_checked(
+                self.MODEL, messages, {}, []))
+            list(worker._stream_checked(
+                self.MODEL, messages, {}, []))
+            offs = [r for r in self._records(root)
+                    if r.get("kind") == "presend_scan_off"]
+            self.assertEqual(len(offs), 2)
+            self.assertEqual(offs[0]["provider"], "groq")
+            self.assertEqual(offs[0]["project"], "myproject")
+
+    def test_local_model_scan_off_logs_nothing(self):
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as td:
+            root = _Path(td)
+            captured = {}
+            client = self._facade(captured)
+            client.presend_scan = False
+
+            class _Recording:
+                def chat_stream(self, model, messages, options,
+                                tools, images=None,
+                                keep_alive="30m",
+                                cancel_event=None):
+                    yield {"message": {"content": "local ok",
+                                       "tool_calls": []},
+                           "done": True}
+
+            client.local = _Recording()
+            worker = self._worker(client, None, root)
+            list(worker._stream_checked(
+                "llama3.2:latest",
+                [{"role": "user", "content": "hello"}], {}, []))
+            presend = [r for r in self._records(root)
+                       if r.get("kind", "").startswith("presend")]
+            self.assertEqual(presend, [])
+
+    def test_clean_send_logs_nothing(self):
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as td:
+            root = _Path(td)
+            captured = {}
+            worker = self._worker(self._facade(captured), None,
+                                  root)
+            list(worker._stream_checked(
+                self.MODEL, [{"role": "user", "content": "hello"}],
+                {}, []))
+            presend = [r for r in self._records(root)
+                       if r.get("kind", "").startswith("presend")]
+            self.assertEqual(presend, [])
+
+    def test_no_secret_value_anywhere_in_the_log(self):
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as td:
+            root = _Path(td)
+            captured = {}
+            worker = self._worker(self._facade(captured),
+                                  "redact", root)
+            messages = [{"role": "user",
+                         "content": f"my key is {self.AWS}"}]
+            list(worker._stream_checked(
+                self.MODEL, messages, {}, []))
+            worker.client.presend_scan = False
+            list(worker._stream_checked(
+                self.MODEL, [{"role": "user", "content": "hi"}],
+                {}, []))
+            for path in (root / "log").glob("*"):
+                self.assertNotIn(
+                    self.AWS, path.read_text(encoding="utf-8"))
+
+
+class PresendTimelineTests(unittest.TestCase):
+    """Pre-send secret scan, item 6 (timeline half): the stats
+    count blocks + decisions over the log's records, and the
+    head line renders them — or nothing at all when the scan
+    has nothing to say."""
+
+    def _records(self):
+        return [
+            {"kind": "presend_blocked", "project": "alpha"},
+            {"kind": "presend_blocked", "project": "alpha"},
+            {"kind": "presend_blocked", "project": "beta"},
+            {"kind": "presend_decision", "decision": "send",
+             "project": "alpha"},
+            {"kind": "presend_decision", "decision": "redact",
+             "project": "alpha"},
+            {"kind": "presend_decision", "decision": "allow",
+             "project": "alpha"},
+            {"kind": "presend_decision", "decision": "cancel",
+             "project": "alpha"},
+            {"kind": "presend_decision", "decision": "bogus",
+             "project": "alpha"},
+            {"kind": "presend_scan_off", "project": "alpha"},
+            {"kind": "presend_scan_off", "project": "alpha"},
+            {"kind": "request", "project": "alpha"},
+            "not a record",
+        ]
+
+    def test_presend_stats_counts(self):
+        from forge import timeline as timeline_mod
+        stats = timeline_mod.presend_stats(self._records())
+        self.assertEqual(stats, {"blocked": 3, "send": 1,
+                                 "redact": 1, "allow": 1,
+                                 "cancel": 1, "scan_off": 2,
+                                 "exempted": 0})
+        alpha = timeline_mod.presend_stats(self._records(),
+                                           "alpha")
+        self.assertEqual(alpha["blocked"], 2)
+        self.assertEqual(alpha["send"], 1)
+        beta = timeline_mod.presend_stats(self._records(), "beta")
+        self.assertEqual(beta, {"blocked": 1, "send": 0,
+                                "redact": 0, "allow": 0,
+                                "cancel": 0, "scan_off": 0,
+                                "exempted": 0})
+
+    def test_presend_line(self):
+        from forge import timeline as timeline_mod
+        stats = {"blocked": 3, "send": 2, "redact": 1,
+                 "allow": 1, "cancel": 0, "scan_off": 4,
+                 "exempted": 2}
+        self.assertEqual(
+            timeline_mod.presend_line(stats),
+            "Pre-send scan: 3 blocked · 2 sent anyway · "
+            "1 redacted · 1 allowed · 2 exempted · "
+            "0 cancelled · 4 sent un-scanned")
+        empty = {"blocked": 0, "send": 0, "redact": 0,
+                 "allow": 0, "cancel": 0, "scan_off": 0,
+                 "exempted": 0}
+        self.assertEqual(timeline_mod.presend_line(empty), "")
+        self.assertEqual(timeline_mod.presend_line({}), "")
+        self.assertEqual(timeline_mod.presend_line(None), "")
+
+
+class PresendTimelineWindowTests(unittest.TestCase):
+    """Pre-send secret scan, item 6 (window half): timeline_data
+    carries the current project's scan counts, and the Turn
+    Timeline head shows the line with turns and without."""
+
+    MODEL = "groq:openai/gpt-oss-20b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self._saved_eventlog = self.win.eventlog
+        self._saved_store = self.win.store
+        self._saved_workspace = self.win.workspace
+        project = root / "myproject"
+        project.mkdir()
+        self.win.workspace = str(project)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win._turn_marks = {}
+        self.cid = self.win.store.save(
+            None, [{"role": "user", "content": "seed"}],
+            model=None, project=None)
+        self.win.conversation_id = self.cid
+
+    def tearDown(self):
+        self.win.eventlog = self._saved_eventlog
+        self.win.store = self._saved_store
+        self.win.workspace = self._saved_workspace
+        if self.win.timeline_win is not None:
+            self.win.timeline_win.hide()
+        self.temp.cleanup()
+
+    def _seed_presend(self):
+        self.win.eventlog.record(
+            "presend_blocked", model=self.MODEL, provider="groq",
+            project="myproject",
+            matches=[{"pattern": "aws-key",
+                      "evidence": "AKIA...(20 chars)"}])
+        self.win.eventlog.record(
+            "presend_decision", model=self.MODEL, provider="groq",
+            decision="redact", project="myproject",
+            matches=[{"pattern": "aws-key",
+                      "evidence": "AKIA...(20 chars)"}])
+        # Another project's block must not leak into this one.
+        self.win.eventlog.record(
+            "presend_blocked", model=self.MODEL, provider="groq",
+            project="other",
+            matches=[{"pattern": "sk-key",
+                      "evidence": "sk-A...(23 chars)"}])
+
+    def test_timeline_data_carries_presend(self):
+        self._seed_presend()
+        data = self.win.timeline_data(self.cid)
+        self.assertEqual(data["presend"],
+                         {"blocked": 1, "send": 0, "redact": 1,
+                          "allow": 0, "cancel": 0, "scan_off": 0,
+                          "exempted": 0})
+
+    def test_refresh_shows_the_line_without_turns(self):
+        from forge.main import TimelineWindow
+        self._seed_presend()
+        window = TimelineWindow(self.win)
+        try:
+            window.refresh()
+            self.assertIn("Pre-send scan: 1 blocked · "
+                          "0 sent anyway · 1 redacted",
+                          window.head.text())
+        finally:
+            window.close()
+
+    def test_refresh_shows_the_line_with_turns(self):
+        from forge.main import TimelineWindow
+        self._seed_presend()
+        self.win.eventlog.record("request", model=self.MODEL,
+                                 prompt="do the thing")
+        self.win.eventlog.record("turn_complete", model=self.MODEL,
+                                 seconds=5.0, generations=1,
+                                 prompt_tokens=10, eval_tokens=20)
+        self.win._turn_marks[self.cid] = [{
+            "prompt": "do the thing", "model": self.MODEL,
+            "mode": "code", "outcome": "finished"}]
+        window = TimelineWindow(self.win)
+        try:
+            window.refresh()
+            self.assertIn("Pre-send scan: 1 blocked · "
+                          "0 sent anyway · 1 redacted",
+                          window.head.text())
+            self.assertIn("1 turn(s) this session",
+                          window.head.text())
+        finally:
+            window.close()
+
+    def test_refresh_shows_no_line_when_quiet(self):
+        from forge.main import TimelineWindow
+        window = TimelineWindow(self.win)
+        try:
+            window.refresh()
+            self.assertNotIn("Pre-send scan", window.head.text())
+        finally:
+            window.close()
+
+
+class PresendWindowLoggingTests(unittest.TestCase):
+    """Pre-send secret scan, item 6 (window events): the toggle
+    flip, allow-list additions, and allow-list removals are on
+    the record."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        from forge.eventlog import EventLog
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self._saved_eventlog = self.win.eventlog
+        self._saved_settings = dict(self.win.settings)
+        self._saved_workspace = self.win.workspace
+        self.win.eventlog = EventLog(root / "log")
+        self.root = root
+        # The allow-list lives in owner settings (APP_DIR), not
+        # the project — point it at a temp dir so these tests
+        # never touch the real app dir.
+        self._appdir = tempfile.TemporaryDirectory()
+        self._old_appdir = secrets_mod.APP_DIR_OVERRIDE
+        secrets_mod.APP_DIR_OVERRIDE = self._appdir.name
+
+    def tearDown(self):
+        from forge import secrets as secrets_mod
+        secrets_mod.APP_DIR_OVERRIDE = self._old_appdir
+        self._appdir.cleanup()
+        self.win.eventlog = self._saved_eventlog
+        self.win.settings.clear()
+        self.win.settings.update(self._saved_settings)
+        self.win.workspace = self._saved_workspace
+        self.win._sync_presend_scan()
+        self.temp.cleanup()
+
+    def _presend_records(self):
+        from forge import timeline as timeline_mod
+        return [r for r in timeline_mod.read_records(
+            self.root / "log")
+            if r.get("kind", "").startswith("presend")]
+
+    def test_toggle_flip_is_recorded_once(self):
+        import forge.main as main_mod
+        from PySide6.QtWidgets import QDialog
+        win = self.win
+        win.settings["scan_before_cloud_send"] = True
+
+        class _FakeSettings:
+            def __init__(self, parent, settings):
+                self._values = dict(settings)
+                self._values["scan_before_cloud_send"] = False
+                # A loopback URL: an empty/missing one earns the
+                # S5 warning dialog (modal), which would hang the
+                # test with no one to click it — and the toggle
+                # flip is what this test proves.
+                self._values["ollama_url"] = \
+                    "http://127.0.0.1:11434"
+            def exec(self):
+                return QDialog.Accepted
+            def values(self):
+                return self._values
+
+        real = main_mod.SettingsDialog
+        main_mod.SettingsDialog = _FakeSettings
+        try:
+            win.open_settings()
+        finally:
+            main_mod.SettingsDialog = real
+        kinds = [r["kind"] for r in self._presend_records()]
+        self.assertEqual(kinds, ["presend_scan_disabled"])
+        self.assertFalse(
+            win.settings["scan_before_cloud_send"])
+        # A save with no flip records nothing more.
+        main_mod.SettingsDialog = _FakeSettings
+        try:
+            win.open_settings()
+        finally:
+            main_mod.SettingsDialog = real
+        kinds = [r["kind"] for r in self._presend_records()]
+        self.assertEqual(kinds, ["presend_scan_disabled"])
+
+    def test_allow_add_is_recorded(self):
+        import tempfile
+        import threading
+        import forge.main as main_mod
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            worker = AgentWorker(None, "fake", [], {}, td)
+            worker._secret_decision = {"choice": "cancel"}
+            worker._secret_decision_event = threading.Event()
+            worker.isRunning = lambda: True
+            stream = {"id": 4244, "worker": worker,
+                      "title": "test turn", "gate": None,
+                      "secret": None, "settled": None,
+                      "status_text": ""}
+            payload = {"provider": "groq",
+                       "model": "groq:openai/gpt-oss-20b",
+                       "findings": [{"pattern": "aws-key",
+                                     "evidence": "AKIA...(20 chars)",
+                                     "where": "message 1 (user)",
+                                     "line": "key [redacted]"}],
+                       "message_count": 1,
+                       "preview": "key [redacted]"}
+
+            class _FakeDialog:
+                def __init__(self, parent, payload, context=""):
+                    self.choice = "allow"
+                    self.allow_reason = "test key"
+                def exec(self):
+                    return 1
+
+            real_dialog = main_mod.SecretScanDialog
+            main_mod.SecretScanDialog = _FakeDialog
+            try:
+                self.win._present_secret((stream, payload))
+            finally:
+                main_mod.SecretScanDialog = real_dialog
+            records = self._presend_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["kind"],
+                             "presend_allowlist_add")
+            self.assertEqual(records[0]["pattern"], "aws-key")
+            self.assertEqual(records[0]["anchor"], "key [redacted]")
+            self.assertEqual(records[0]["reason"], "test key")
+            self.assertEqual(records[0]["project"],
+                             Path(td).name)
+
+    def test_allowlist_remove_is_recorded(self):
+        import tempfile
+        import forge.main as main_mod
+        from forge import secrets as secrets_mod
+        from forge.main import SettingsDialog
+        with tempfile.TemporaryDirectory() as td:
+            secrets_mod.add_allowlist_entry(
+                td, "aws-key", "key [redacted]", "test key")
+            self.win.workspace = td
+
+            class _FakeAllowList:
+                def __init__(self, parent, workspace):
+                    self._workspace = workspace
+                def exec(self):
+                    secrets_mod.remove_allowlist_entry(
+                        self._workspace, "aws-key",
+                        "key [redacted]")
+                    return 1
+
+            real = main_mod.AllowListDialog
+            main_mod.AllowListDialog = _FakeAllowList
+            try:
+                dialog = SettingsDialog(self.win,
+                                        dict(self.win.settings))
+                dialog._open_allowlist()
+            finally:
+                main_mod.AllowListDialog = real
+            records = self._presend_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["kind"],
+                             "presend_allowlist_remove")
+            self.assertEqual(records[0]["pattern"], "aws-key")
+            self.assertEqual(records[0]["anchor"], "key [redacted]")
+            self.assertEqual(records[0]["project"], Path(td).name)
+
+
+class PresendSecurityReviewTests(unittest.TestCase):
+    """Pre-send secret scan, security-review fixes (2026-11-12):
+    Flag 1 — an anchor redacts EVERY secret span on its line, so
+    a sibling secret can't leak through it (and a line inside a
+    PEM block redacts whole). Flag 2 — the allow-list lives in
+    owner settings (APP_DIR, keyed by workspace), never in the
+    project, and every exemption is recorded as a presend_allowed
+    event. Planted values are fake shapes (AWS's own
+    documentation example key, synthetic token shapes)."""
+
+    AWS = "AKIAIOSFODNN7EXAMPLE"
+    SK = "sk-abcdefghij1234567890"
+    GHP = "ghp_" + "a" * 36
+    MODEL = "groq:openai/gpt-oss-20b"
+
+    def setUp(self):
+        import tempfile
+        from forge import secrets as secrets_mod
+        self._appdir = tempfile.TemporaryDirectory()
+        self._old_appdir = secrets_mod.APP_DIR_OVERRIDE
+        secrets_mod.APP_DIR_OVERRIDE = self._appdir.name
+
+    def tearDown(self):
+        from forge import secrets as secrets_mod
+        secrets_mod.APP_DIR_OVERRIDE = self._old_appdir
+        self._appdir.cleanup()
+
+    def _facade(self, captured):
+        from forge import providers as p
+
+        def fake_urlopen(req, timeout=None):
+            captured.setdefault("calls", []).append(req.full_url)
+            captured["payload"] = json.loads(
+                req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [
+                    {"delta": {"content": "Hi"},
+                     "finish_reason": None}]}),
+                json.dumps({"choices": [
+                    {"delta": {}, "finish_reason": "stop"}]}),
+                "[DONE]",
+            ]))
+
+        config = {"groq_api_key": "k"}
+        return p.ProviderClient("http://127.0.0.1:11434", config,
+                                urlopen=fake_urlopen)
+
+    def _worker(self, client, choice, root):
+        from forge.eventlog import EventLog
+        from forge.worker import AgentWorker
+        workspace = root / "myproject"
+        workspace.mkdir(parents=True, exist_ok=True)
+        worker = AgentWorker(client, self.MODEL, [], {},
+                             str(workspace),
+                             eventlog=EventLog(root / "log"))
+        if choice is not None:
+            worker.secret_decision_needed.connect(
+                lambda p: worker.resolve_secret_decision(choice))
+        return worker
+
+    def _records(self, root):
+        from forge import timeline as timeline_mod
+        return timeline_mod.read_records(root / "log")
+
+    # -- Flag 1: the anchor redacts every span on its line. --
+
+    def test_two_secrets_one_line_neither_anchor_leaks(self):
+        from forge import providers as p
+        messages = [{"role": "user",
+                     "content": f"first {self.SK} and {self.GHP} "
+                                "here"}]
+        found = p.scan_outbound_messages(messages)
+        self.assertEqual(len(found), 2)
+        for item in found:
+            self.assertEqual(
+                item["line"],
+                "first [redacted] and [redacted] here")
+            self.assertNotIn(self.SK, item["line"])
+            self.assertNotIn(self.GHP, item["line"])
+
+    def test_finding_line_without_full_set_redacts_own_span(self):
+        # The documented fallback: a caller with one finding gets
+        # only its own span redacted. Production anchors always
+        # come through _annotate with the full set (pinned above),
+        # so this contract is explicit, not accidental.
+        from forge import secrets as secrets_mod
+        text = f"first {self.SK} and {self.GHP} here"
+        found = secrets_mod.scan_text(text)
+        self.assertEqual(len(found), 2)
+        line = secrets_mod.finding_line(text, found[0])
+        self.assertIn("[redacted]", line)
+        self.assertIn(self.SK if found[0]["pattern"] == "github-token"
+                      else self.GHP, line)
+
+    def test_token_inside_pem_block_anchor_is_whole_line(self):
+        from forge import secrets as secrets_mod
+        text = ("-----BEGIN RSA PRIVATE KEY-----\n"
+                "MIIEowIBAAKCAQEA7x\n"
+                f"{self.SK}\n"
+                "-----END RSA PRIVATE KEY-----\n")
+        found = secrets_mod.scan_text(text)
+        key = [f for f in found if f["pattern"] == "private-key"]
+        token = [f for f in found if f["pattern"] == "sk-key"]
+        self.assertEqual(len(key), 1)
+        self.assertEqual(len(token), 1)
+        # The body line is key material — it redacts whole.
+        self.assertEqual(
+            secrets_mod.finding_line(text, token[0], found),
+            "[redacted]")
+        # The BEGIN header holds no material and stays verbatim.
+        self.assertEqual(
+            secrets_mod.finding_line(text, key[0], found),
+            "-----BEGIN RSA PRIVATE KEY-----")
+
+    # -- Flag 2: owner-settings storage + the exemption trail. --
+
+    def test_allowlist_lives_in_app_dir_keyed_by_workspace(self):
+        import re
+        import tempfile
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            path = secrets_mod.allowlist_path(td)
+            self.assertEqual(
+                path.parent,
+                secrets_mod.app_dir() / "presend-allowlist")
+            self.assertTrue(
+                re.fullmatch(r"[0-9a-f]{16}\.json", path.name))
+            self.assertEqual(path, secrets_mod.allowlist_path(td))
+        with tempfile.TemporaryDirectory() as other:
+            self.assertNotEqual(
+                path, secrets_mod.allowlist_path(other))
+        self.assertIsNone(secrets_mod.allowlist_path(None))
+
+    def test_planted_project_allowlist_is_ignored(self):
+        import tempfile
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            found = p.scan_outbound_messages([{
+                "role": "user",
+                "content": f"my key is {self.AWS}, use it"}])
+            # The OLD location, planted by project content: an
+            # entry that would exempt the finding if it were read.
+            forge_dir = Path(td) / ".forge"
+            forge_dir.mkdir()
+            (forge_dir / "presend-allowlist.json").write_text(
+                json.dumps({"entries": [{
+                    "pattern": found[0]["pattern"],
+                    "anchor": found[0]["line"],
+                    "reason": "planted", "added": "never"}]}),
+                encoding="utf-8")
+            self.assertEqual(secrets_mod.load_allowlist(td), [])
+            self.assertEqual(
+                secrets_mod.filter_allowed(found, td), found)
+
+    def test_exemption_is_logged_on_clean_send(self):
+        import tempfile
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            captured = {}
+            worker = self._worker(self._facade(captured), None,
+                                  root)
+            workspace = str(root / "myproject")
+            found = p.scan_outbound_messages([{
+                "role": "user",
+                "content": f"my key is {self.AWS}, use it"}])
+            secrets_mod.add_allowlist_entry(
+                workspace, found[0]["pattern"], found[0]["line"],
+                "test key")
+            messages = [{"role": "user",
+                         "content": f"my key is {self.AWS}, use it"}]
+            events = list(worker._stream_checked(
+                self.MODEL, messages, {}, []))
+            self.assertTrue(events)
+            self.assertEqual(len(captured["calls"]), 1)
+            records = [r for r in self._records(root)
+                       if r.get("kind") == "presend_allowed"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["pattern"], "aws-key")
+            self.assertEqual(records[0]["anchor"],
+                             "my key is [redacted], use it")
+            self.assertEqual(records[0]["project"], "myproject")
+            self.assertNotIn(self.AWS, json.dumps(records))
+            kinds = [r.get("kind") for r in self._records(root)]
+            self.assertNotIn("presend_blocked", kinds)
+
+    def test_exemption_is_logged_on_blocked_send(self):
+        import tempfile
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            captured = {}
+            worker = self._worker(self._facade(captured), "send",
+                                  root)
+            workspace = str(root / "myproject")
+            text = f"keys: {self.AWS} and {self.GHP}"
+            found = p.scan_outbound_messages(
+                [{"role": "user", "content": text}])
+            allowed = [f for f in found
+                       if f["pattern"] == "aws-key"][0]
+            secrets_mod.add_allowlist_entry(
+                workspace, allowed["pattern"], allowed["line"],
+                "test key")
+            list(worker._stream_checked(
+                self.MODEL, [{"role": "user", "content": text}],
+                {}, []))
+            records = self._records(root)
+            allowed_records = [r for r in records
+                               if r.get("kind") == "presend_allowed"]
+            self.assertEqual(len(allowed_records), 1)
+            self.assertEqual(allowed_records[0]["pattern"],
+                             "aws-key")
+            # The anchor is the FULLY redacted line — the sibling
+            # token must not leak through the exemption record.
+            self.assertEqual(allowed_records[0]["anchor"],
+                             "keys: [redacted] and [redacted]")
+            self.assertNotIn(self.AWS, json.dumps(records))
+            self.assertNotIn(self.GHP, json.dumps(records))
+            kinds = [r.get("kind") for r in records]
+            self.assertIn("presend_blocked", kinds)
+            self.assertIn("presend_decision", kinds)
+
+    def test_decisions_lane_stashes_exemptions(self):
+        import tempfile
+        from forge import decisions as decisions_mod
+        from forge import providers as p
+        from forge import secrets as secrets_mod
+
+        def fake_urlopen(req, timeout=None):
+            return _ProviderFakeResponse(json.dumps(
+                {"answers": {"score": {
+                    "type": "score", "score": 2,
+                    "probabilities": {}, "legend": {},
+                    "confidence": 0.9}}}))
+
+        with tempfile.TemporaryDirectory() as td:
+            found = p.scan_outbound_text(
+                f"config holds {self.AWS}")
+            secrets_mod.add_allowlist_entry(
+                td, found[0]["pattern"], found[0]["line"],
+                "test key")
+            client = decisions_mod.DecisionsClient(
+                "k", urlopen=fake_urlopen)
+            client.presend_workspace = td
+            result = client.score_text(
+                f"config holds {self.AWS}",
+                ["bad", "ok", "good"], "quality?")
+            self.assertEqual(result.fzi, 100)
+            taken = client.take_allowed_findings()
+            self.assertEqual(len(taken), 1)
+            self.assertEqual(taken[0]["pattern"], "aws-key")
+            self.assertEqual(client.take_allowed_findings(), [])
+
+    def test_presend_stats_counts_exemptions(self):
+        from forge import timeline as timeline_mod
+        records = [
+            {"kind": "presend_allowed", "pattern": "aws-key",
+             "anchor": "k [redacted]", "project": "alpha"},
+            {"kind": "presend_allowed", "pattern": "sk-key",
+             "anchor": "k [redacted]", "project": "alpha"},
+            {"kind": "presend_blocked", "project": "alpha",
+             "matches": []},
+        ]
+        stats = timeline_mod.presend_stats(records)
+        self.assertEqual(stats["exempted"], 2)
+        self.assertEqual(stats["blocked"], 1)
+        self.assertIn("2 exempted",
+                      timeline_mod.presend_line(stats))
+        self.assertEqual(
+            timeline_mod.presend_stats(records, "beta"),
+            {"blocked": 0, "send": 0, "redact": 0, "allow": 0,
+             "cancel": 0, "scan_off": 0, "exempted": 0})

@@ -39,6 +39,7 @@ or error messages.
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,6 +47,120 @@ import urllib.request
 from .ollama_client import (START_TIMEOUT_MESSAGE, CancelWatch,
                             OllamaClient, OllamaError,
                             ensure_user_message, llama_start_timeout)
+from . import secrets as secrets_mod
+
+
+class SecretBlocked(Exception):
+    """A cloud send refused by the pre-send secret scan (2026-11-12):
+    the outbound text looks like it contains a secret. Raised BEFORE
+    any request is built, so nothing is sent. Deliberately NOT an
+    OllamaError — callers must tell "refused before sending" from
+    "the provider failed". Carries provider, model, and the REDACTED
+    findings only; the message names patterns + redacted evidence,
+    never a secret value, because it flows into logs and dialogs."""
+
+    def __init__(self, provider, model, findings):
+        self.provider = str(provider or "")
+        self.model = str(model or "")
+        self.findings = [dict(f) for f in (findings or [])]
+        shown = self.findings[:3]
+        names = ", ".join(
+            f"{f.get('pattern')} {f.get('evidence')}" for f in shown)
+        if len(self.findings) > 3:
+            names += f" (+{len(self.findings) - 3} more)"
+        super().__init__(
+            f"Blocked: this {self.provider} send looks like it "
+            f"contains a secret ({names}). Nothing was sent.")
+
+
+class _AllowedStash:
+    """Per-thread stash for findings an allow-list entry exempted
+    (security review, 2026-11-12): the scan lives in the client
+    but the event log lives in the worker, so the client stashes
+    and the worker drains + logs each exemption as a
+    presend_allowed event. Thread-local — parallel turns share
+    one client and must not see each other's exemptions."""
+
+    def __init__(self):
+        self._tls = threading.local()
+
+    def store(self, findings):
+        self._tls.findings = list(findings or [])
+
+    def take(self):
+        found = getattr(self._tls, "findings", None) or []
+        self._tls.findings = []
+        return found
+
+
+def _annotate(text, findings, where, message_index=None, field=None,
+              call_index=None):
+    """scan_text findings annotated with where they sit and their
+    redacted line (the allow-list anchor + the dialog's "where").
+    The structured location (message_index / field / call_index)
+    is what the worker's redaction uses to apply a finding's span
+    to exactly the string it was scanned from — spans are relative
+    to their own part, so "where" alone cannot place them."""
+    out = []
+    for found in findings:
+        item = dict(found)
+        item["where"] = where
+        # The full finding set rides along: finding_line redacts
+        # EVERY span on the line, so a sibling secret can't leak
+        # through this finding's anchor (security review,
+        # 2026-11-12). This is the one fix point — the dialog, the
+        # allow-list file, and the event log all read item["line"].
+        item["line"] = secrets_mod.finding_line(text, found, findings)
+        item["message_index"] = message_index
+        item["field"] = field
+        item["call_index"] = call_index
+        out.append(item)
+    return out
+
+
+def scan_outbound_text(text, where="text"):
+    """Secret findings in one bare text (the Decisions lane's
+    input), annotated with where they sit. Empty when clean."""
+    return _annotate(str(text or ""),
+                     secrets_mod.scan_text(text), where)
+
+
+def scan_outbound_messages(messages):
+    """Secret findings across a chat message list, annotated with
+    where they sit (message index + role) and their redacted line.
+    Scans every message's content plus any tool-call arguments —
+    a tool result can carry a secret the model is about to quote
+    back. Tool SCHEMAS are static definitions, not user content,
+    and are never scanned."""
+    findings = []
+    for index, message in enumerate(messages or []):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        where = (f"message {index + 1} ({role})" if role
+                 else f"message {index + 1}")
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(part.get("text", ""))
+                for part in content if isinstance(part, dict))
+        if isinstance(content, str) and content:
+            findings.extend(_annotate(
+                content, secrets_mod.scan_text(content), where,
+                message_index=index, field="content"))
+        for call_index, call in enumerate(
+                message.get("tool_calls") or []):
+            fn = (call or {}).get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, dict):
+                args = json.dumps(args, sort_keys=True)
+            if isinstance(args, str) and args:
+                findings.extend(_annotate(
+                    args, secrets_mod.scan_text(args),
+                    where + " tool call",
+                    message_index=index, field="tool_call",
+                    call_index=call_index))
+    return findings
 
 
 PROVIDERS = ("groq", "gemini", "exaone")
@@ -1244,6 +1359,16 @@ class ProviderClient:
                  urlopen=None):
         self.config = config if isinstance(config, dict) else {}
         self._urlopen = urlopen
+        # Pre-send secret scan (2026-11-12): mirrored from the
+        # window's settings by _sync_presend_scan — the facade
+        # holds the connector config, not settings, so the toggle
+        # and the workspace ride as attributes. Default ON and
+        # no workspace (no allow-list applies until one is set).
+        self.presend_scan = True
+        self.presend_workspace = None
+        # Findings the allow-list exempted on this thread's last
+        # scan — the worker drains + logs them (presend_allowed).
+        self._allowed = _AllowedStash()
         self.local = OllamaClient(ollama_url or DEFAULT_OLLAMA_URL)
         # Some existing surfaces read a timeout attribute (bench's
         # per-task wall); keep the local client's value visible.
@@ -1448,8 +1573,22 @@ class ProviderClient:
             return START_TIMEOUT_MESSAGE
         return scrubbed
 
+    def take_allowed_findings(self):
+        """Findings the allow-list exempted on this thread's last
+        scan, drained (the stash empties). The worker logs each
+        one as a presend_allowed event after the send settles."""
+        return self._allowed.take()
+
     def chat_stream(self, model, messages, options, tools,
-                    images=None, keep_alive="30m", cancel_event=None):
+                    images=None, keep_alive="30m", cancel_event=None,
+                    skip_presend_scan=False, presend_workspace=None):
+        # skip_presend_scan / presend_workspace are consumed HERE
+        # by the facade and never forwarded: the retry after an
+        # owner decision (send-anyway or redacted) skips the scan
+        # for that one send, and the caller passes its own
+        # workspace (authoritative per turn) for the allow-list —
+        # the mirrored attribute is the fallback for callers that
+        # don't know the project.
         provider, _bare = split_model_id(model)
         if provider in PROVIDERS:
             if not is_approved_provider_model(model):
@@ -1463,6 +1602,28 @@ class ProviderClient:
             if not provider_api_key(self.config, provider):
                 raise OllamaError(
                     f"{PROVIDER_LABELS[provider]} API key is not set")
+            # Pre-send secret scan (2026-11-12): the choke point.
+            # Every cloud chat send passes through here; the local
+            # branch below never scans. A hit raises BEFORE any
+            # request is built — nothing is sent.
+            if not skip_presend_scan and self.presend_scan:
+                scanned = scan_outbound_messages(messages)
+                # Item 5: the project's allow-list covers matches
+                # the owner already accepted (per-call workspace
+                # wins; the mirrored attribute is the fallback).
+                # Without a workspace there is no list to consult
+                # — fail closed, nothing is filtered. The exempted
+                # half is stashed for the worker to log: an
+                # exemption must never be silent (security review,
+                # 2026-11-12).
+                workspace = (presend_workspace
+                             if presend_workspace is not None
+                             else self.presend_workspace)
+                findings, allowed = secrets_mod.partition_allowed(
+                    scanned, workspace)
+                self._allowed.store(allowed)
+                if findings:
+                    raise SecretBlocked(provider, model, findings)
             client = self._provider_client(provider)
             yield from client.chat_stream(
                 model, messages, options, tools, images=images,

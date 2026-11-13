@@ -185,7 +185,11 @@ carries its own fix history. When the owner runs a finishing
 touch (docstrings or unit tests for the reviewed files), the
 request is recorded the same way under a '## Finishing touches'
 section at the end (date, kind, files, and the prompt that was
-sent). Reviews change nothing by
+sent). An autofix loop runs the same way: each round (up to 5
+findings, worst first) and each re-review is recorded under a
+'## Autofix rounds' section at the end, capped at 3 rounds per
+review chain, and the owner approves every write at the gate.
+Reviews change nothing by
 themselves — they are the record the owner acts on.
 Incremental reviews cover only the files changed since the last
 review the owner marked reviewed; after filing a report, update

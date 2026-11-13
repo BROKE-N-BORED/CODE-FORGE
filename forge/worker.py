@@ -247,6 +247,7 @@ from . import snapshots as snapshots_mod
 from . import checkpoints as checkpoints_mod
 from . import testcadence as cadence_mod
 from . import providers as providers_mod
+from . import secrets as secrets_mod
 from . import decisions as decisions_mod
 from . import lightmachine as light_mod
 
@@ -1041,6 +1042,108 @@ _READ_REFUSAL_PREFIXES = ("Tool error", "Denied", "Tool execution "
                           "tool", "Mode is ")
 
 
+class PresendCancelled(Exception):
+    """The owner cancelled a cloud send the pre-send scan blocked.
+    Deliberately NOT an OllamaError: the main generation's turn
+    fails on it with this plain message, while the fold/review
+    stages catch it as a skip and the turn continues."""
+
+
+def _redact_messages(messages, findings):
+    """Apply the BLOCKED findings' spans to the messages they came
+    from, for a "Redact + send" retry. Only the blocked findings
+    are applied — an allow-listed match is not among them, so it
+    survives the send exactly as the owner chose (Item 5). Spans
+    are relative to the string each finding was scanned from, so
+    the finding's message_index / field / call_index places it.
+    Returns new message dicts; the caller's list is untouched."""
+    by_part = {}
+    for found in findings or []:
+        key = (found.get("message_index"), found.get("field"),
+               found.get("call_index"))
+        by_part.setdefault(key, []).append(found)
+    out = []
+    for index, message in enumerate(messages or []):
+        if not isinstance(message, dict):
+            out.append(message)
+            continue
+        new = dict(message)
+        content = message.get("content")
+        if isinstance(content, list):
+            # The facade scans list parts joined on "\n"; redact
+            # the joined text and send it as one string.
+            content = "\n".join(
+                str(part.get("text", ""))
+                for part in content if isinstance(part, dict))
+            found = by_part.get((index, "content", None), [])
+            if found:
+                new["content"] = secrets_mod.redact_text(
+                    content, found)
+        elif isinstance(content, str):
+            found = by_part.get((index, "content", None), [])
+            if found:
+                new["content"] = secrets_mod.redact_text(
+                    content, found)
+        calls = message.get("tool_calls") or []
+        if calls:
+            new_calls = []
+            for call_index, call in enumerate(calls):
+                fn = (call or {}).get("function") or {}
+                args = fn.get("arguments")
+                found = by_part.get(
+                    (index, "tool_call", call_index), [])
+                if not found or args is None:
+                    new_calls.append(call)
+                    continue
+                if isinstance(args, dict):
+                    dumped = json.dumps(args, sort_keys=True)
+                    redacted = secrets_mod.redact_text(dumped, found)
+                    try:
+                        new_args = json.loads(redacted)
+                    except ValueError:
+                        # The redacted text must stay sendable even
+                        # if the replacement broke the JSON shape.
+                        new_args = redacted
+                else:
+                    new_args = secrets_mod.redact_text(
+                        str(args), found)
+                new_call = dict(call)
+                new_call["function"] = dict(fn)
+                new_call["function"]["arguments"] = new_args
+                new_calls.append(new_call)
+            new["tool_calls"] = new_calls
+        out.append(new)
+    return out
+
+
+def _secret_preview(messages, limit=600):
+    """What was about to send, for the decision dialog — every
+    message's content RE-SCANNED and redacted. Re-scanning (not
+    the blocked findings) is deliberate: an allow-listed match
+    stays in the SEND but must never appear on SCREEN, and the
+    preview is display-only, so over-redacting costs nothing.
+    First three messages, truncated to `limit` chars."""
+    lines = []
+    for message in list(messages or [])[:3]:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(
+                str(part.get("text", ""))
+                for part in content if isinstance(part, dict))
+        if not isinstance(content, str) or not content:
+            continue
+        role = str(message.get("role") or "")
+        text = secrets_mod.redact_text(
+            content, secrets_mod.scan_text(content))
+        lines.append(f"[{role}] {text}" if role else text)
+    preview = "\n\n".join(lines)
+    if len(preview) > limit:
+        preview = preview[:limit] + "…"
+    return preview
+
+
 class AgentWorker(QThread):
     token = Signal(str)
     status = Signal(str)
@@ -1048,6 +1151,12 @@ class AgentWorker(QThread):
     # diffview.DiffResult or None, computed HERE on the worker thread
     # at ask time and carried to the window's approval slot.
     approval_needed = Signal(str, object, object, object)
+    # Pre-send secret scan (2026-11-12): a blocked cloud send asks
+    # the owner what to do — one dict payload {provider, model,
+    # findings, message_count, preview}, REDACTED only. The bridge
+    # is its own signal + resolver (the approval bridge carries
+    # only a bool, and this choice is three-way).
+    secret_decision_needed = Signal(object)
     receipt = Signal(str)
     finished_text = Signal(str, object)
     # C3 (auto-test cadence): this turn's file-change tally
@@ -1364,6 +1473,8 @@ class AgentWorker(QThread):
         self._turn_changes: dict[str, int] = {}
         self._decision = None
         self._decision_event = None
+        self._secret_decision = None
+        self._secret_decision_event = None
         self._cancel = False
         # Bite #1: Stop must reach a command that is already running.
         # execute_tool's run_command polls this event; cancel() sets it.
@@ -1383,6 +1494,133 @@ class AgentWorker(QThread):
         if self._decision is not None:
             self._decision["approved"] = approved
             self._decision_event.set()
+
+    def resolve_secret_decision(self, choice):
+        """The window's answer to a secret ask — "send", "redact",
+        "allow", or "cancel". Anything else is a cancel: the safe
+        default is to send nothing. "allow" rides like "send"
+        here: the window records the allow-list entries before
+        resolving (it owns the dialog's reason), so by the time
+        this worker retries, the entries exist."""
+        if self._secret_decision is not None:
+            self._secret_decision["choice"] = (
+                choice if choice in ("send", "redact", "allow")
+                else "cancel")
+            self._secret_decision_event.set()
+
+    def _ask_secret_decision(self, blocked, messages):
+        """The secret bridge (2026-11-12): a mirror of the
+        approval bridge — the worker emits, waits on its own
+        event (F8: the human clock, no timeout), and cancel()
+        releases the wait as a cancellation. The payload carries
+        REDACTED findings only plus a redacted preview of what
+        was about to send. Returns "send", "redact", or
+        "cancel"."""
+        decision = {"choice": "cancel"}
+        event = threading.Event()
+        self._secret_decision, self._secret_decision_event = \
+            decision, event
+        self.status.emit("Paused — this send looks like it "
+                         "contains a secret…")
+        self.secret_decision_needed.emit({
+            "provider": blocked.provider, "model": blocked.model,
+            "findings": [dict(f) for f in blocked.findings],
+            "message_count": len(messages or []),
+            "preview": _secret_preview(messages)})
+        event.wait()  # F8: NO timeout — paused on the human clock.
+        self._secret_decision = self._secret_decision_event = None
+        return decision["choice"]
+
+    def _log_allowed_findings(self, client=None):
+        """Drain a client's exempted-findings stash and put each
+        exemption on the record (security review, 2026-11-12): an
+        allow-list entry exempting a secret must never be silent.
+        One presend_allowed event per finding (pattern + redacted
+        anchor + project). Clients without a stash (test doubles,
+        older callers) simply have nothing to drain."""
+        client = self.client if client is None else client
+        take = getattr(client, "take_allowed_findings", None)
+        if take is None:
+            return
+        allowed = take() or []
+        if not allowed:
+            return
+        project = Path(self.workspace).name or self.workspace
+        for found in allowed:
+            self._log("presend_allowed", pattern=found.get("pattern"),
+                      anchor=found.get("line"), project=project)
+
+    def _stream_checked(self, model, messages, options, schemas,
+                        **kwargs):
+        """chat_stream with the pre-send secret decision
+        (2026-11-12): a SecretBlocked asks the owner (send anyway
+        / redact + send / cancel) through the secret bridge and
+        retries once per the choice. A cancel raises
+        PresendCancelled — the main generation's turn fails on
+        it, the fold/review stages catch it as a skip. The scan
+        itself lives in the facade; this wrapper only decides
+        what a block means. The presend kwargs ride only to the
+        ProviderClient facade: the seam's other clients (and
+        their test doubles) carry fixed signatures, and an
+        unexpected kwarg would raise TypeError in every one of
+        them — the same guard _stream_cancel_kwargs applies."""
+        scan_kwargs = {}
+        if isinstance(self.client, providers_mod.ProviderClient):
+            scan_kwargs["presend_workspace"] = self.workspace
+        # Item 6: a cloud send going out un-scanned (the toggle
+        # off) is on the record, one event per send. Local models
+        # are never scanned by design, so they never log this.
+        provider, _bare = providers_mod.split_model_id(model)
+        if provider in providers_mod.PROVIDERS \
+                and isinstance(self.client,
+                               providers_mod.ProviderClient) \
+                and not self.client.presend_scan:
+            # _log already stamps the worker's model on every
+            # record; the generation model is the blocked one.
+            self._log("presend_scan_off", provider=provider,
+                      project=Path(self.workspace).name
+                      or self.workspace)
+        blocked = None
+        try:
+            yield from self.client.chat_stream(
+                model, messages, options, schemas,
+                **scan_kwargs, **kwargs)
+            # Clean send: any findings the allow-list exempted
+            # along the way go on the record now.
+            self._log_allowed_findings()
+            return
+        except providers_mod.SecretBlocked as exc:
+            # Copied out: the `as` target is cleared when the
+            # except suite exits (PEP 3110), and the ask below
+            # needs the exception after it.
+            blocked = exc
+            # The blocked scan may still have exempted findings
+            # (listed ones don't block) — they go on the record
+            # too, before the block itself.
+            self._log_allowed_findings()
+        # Item 6: the block and the owner's decision, both on the
+        # record — matches carry pattern + redacted evidence only,
+        # never a secret value.
+        matches = [{"pattern": f.get("pattern"),
+                    "evidence": f.get("evidence")}
+                   for f in blocked.findings]
+        project = Path(self.workspace).name or self.workspace
+        self._log("presend_blocked", provider=blocked.provider,
+                  project=project, matches=matches)
+        choice = self._ask_secret_decision(blocked, messages)
+        self._log("presend_decision", decision=choice,
+                  provider=blocked.provider,
+                  project=project, matches=matches)
+        if choice == "cancel":
+            raise PresendCancelled(
+                f"Send cancelled — this {blocked.provider} send "
+                "looks like it contains a secret. Nothing was "
+                "sent.")
+        if choice == "redact":
+            messages = _redact_messages(messages, blocked.findings)
+        yield from self.client.chat_stream(
+            model, messages, options, schemas,
+            skip_presend_scan=True, **scan_kwargs, **kwargs)
 
     def _ask_continue_long_turn(self) -> bool:
         """S6 (audit S1-33): the one soft long-turn prompt, asked
@@ -1494,6 +1732,12 @@ class AgentWorker(QThread):
             if self._plan_decision is not None:
                 self._plan_decision["action"] = "kill"
             self._plan_event.set()
+        # Release a parked secret decision as a cancel (same F8
+        # pattern) — Stop means send nothing.
+        if self._secret_decision_event is not None:
+            if self._secret_decision is not None:
+                self._secret_decision["choice"] = "cancel"
+            self._secret_decision_event.set()
 
     def _log(self, kind: str, **fields):
         if self.eventlog is not None:
@@ -1937,7 +2181,7 @@ class AgentWorker(QThread):
             self._log("plan_recited",
                       done=len(self._plan_done),
                       total=len(_plan_steps))
-        for event in self.client.chat_stream(
+        for event in self._stream_checked(
                 self.model, request_messages, options, schemas,
                 **self._stream_cancel_kwargs(_keep_alive)):
             if self._cancel:
@@ -3022,7 +3266,7 @@ class AgentWorker(QThread):
         chunks = []
         try:
             self._prepare_residency(self.model)
-            for event in self.client.chat_stream(
+            for event in self._stream_checked(
                     self.model, request, options, [],
                     **self._stream_cancel_kwargs(
                         self.options.get("keep_alive", "30m"))):
@@ -3217,7 +3461,7 @@ class AgentWorker(QThread):
             self.status.emit("GoFish review — fresh eyes on the plan…")
             self._prepare_residency(reviewer)
             chunks = []
-            for event in self.client.chat_stream(
+            for event in self._stream_checked(
                     reviewer, messages, options, [],
                     **self._stream_cancel_kwargs(
                         self._seat_keep_alive(reviewer, "5m"))):
@@ -4394,6 +4638,10 @@ class AgentWorker(QThread):
             for path in self._skribe_queue.paths():
                 result = decisions_mod.score_fzi(
                     client, self._read_decisions_input(path))
+                # Any findings the allow-list exempted for this
+                # file go on the record (presend_allowed), before
+                # the next file's scan can stash over them.
+                self._log_allowed_findings(client)
                 fzi = result.fzi
                 verdicts[skribe_mod.normalize_path(path).lower()] = {
                     "fzi": fzi,
@@ -4534,7 +4782,7 @@ class AgentWorker(QThread):
             # Light Machine: single residency first, and the guest
             # lease becomes an immediate unload (see _seat_keep_alive).
             self._prepare_residency(reviewer)
-            for event in self.client.chat_stream(
+            for event in self._stream_checked(
                     reviewer, messages, options, [],
                     **self._stream_cancel_kwargs(
                         self._seat_keep_alive(reviewer, "5m"))):
@@ -4577,7 +4825,7 @@ class AgentWorker(QThread):
             options = {"temperature": 0.3, "num_predict": 512,
                        "num_ctx": self.options.get("num_ctx", 8192)}
             chunks = []
-            for event in self.client.chat_stream(
+            for event in self._stream_checked(
                     reviewer, messages, options, [],
                     **self._stream_cancel_kwargs("5m")):
                 if self._cancel:

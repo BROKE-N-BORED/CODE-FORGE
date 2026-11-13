@@ -16,6 +16,13 @@ name only — their contents are never even read.
 This is a pattern-based pass, not a full audit. Code-pattern checks
 are line-level heuristics and are labelled as such in the report.
 
+The secret shapes themselves live in forge/secrets.py — the ONE
+source of truth shared with the pre-send scan (2026-11-12), so
+the on-demand skill and the Provider send path can never drift
+apart. This file imports that module (with a __file__-relative
+path fallback for standalone runs) and keeps only the
+file-walking, the code-pattern heuristics, and the report.
+
 Usage:
     python3 scan.py <project-root>           # JSON report (default)
     python3 scan.py <project-root> --text    # plain-text report
@@ -39,6 +46,21 @@ import re
 import sys
 from pathlib import Path
 
+try:
+    from forge import secrets as secrets_mod
+except ImportError:
+    # Standalone run (python3 <skill folder>/scan.py ...): the
+    # tree root is two levels up from this file; put it on the
+    # path so the shared patterns resolve from forge/secrets.py.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    try:
+        from forge import secrets as secrets_mod
+    except ImportError:
+        print("scan.py: cannot find forge/secrets.py — run this "
+              "scanner from inside the Code Forge tree.",
+              file=sys.stderr)
+        raise SystemExit(2)
+
 MAX_FILE_BYTES = 1_000_000  # files larger than this are skipped
 SNIFF_BYTES = 8192          # binary sniff window
 
@@ -57,54 +79,8 @@ CODE_EXTS = {
 SEVERITY_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 
 # ------------------------------------------------------------------
-# Secret shapes. Each pattern yields (category, message, redaction).
-# ------------------------------------------------------------------
-
-PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----")
-
-TOKEN_PATTERNS = [
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-     "secret", "AWS access key id in source"),
-    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
-     "secret", "GitHub token in source"),
-    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
-     "secret", "API key (sk-...) in source"),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
-     "secret", "Slack token in source"),
-]
-
-ASSIGNMENT_RE = re.compile(
-    r"""(?i)\b([a-z0-9_$]*(?:password|passwd|secret|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|access[_-]?token|client[_-]?secret)[a-z0-9_$]*)"""
-    r"""\s*[:=]\s*["']([^"'\n]{8,})["']""")
-
-# Values that are obviously placeholders, not real secrets.
-_PLACEHOLDER_WORDS = (
-    "changeme", "change-me", "example", "placeholder", "your-", "your_",
-    "insert-", "insert_", "replace-", "replace_", "todo", "none", "null",
-    "xxxx", "****", "....", "<", "${", "os.environ", "environ", "getenv",
-    "dummy", "sample", "test-only", "not-a-real", "fake",
-)
-
-
-def _is_placeholder(value: str) -> bool:
-    low = value.strip().lower()
-    if not low:
-        return True
-    if any(w in low for w in _PLACEHOLDER_WORDS):
-        return True
-    if len(set(low)) <= 2:          # "aaaaaaaa", "--------"
-        return True
-    return False
-
-
-def _redact(token: str, keep: int = 4) -> str:
-    """The only form in which a secret may appear in the report."""
-    return f"{token[:keep]}...({len(token)} chars)"
-
-
-# ------------------------------------------------------------------
-# Risky code patterns (line-level heuristics, labelled as such).
+# Secret shapes live in forge/secrets.py (see the module
+# docstring) — this file keeps only the code-pattern heuristics.
 # ------------------------------------------------------------------
 
 def _eval_exec(line: str):
@@ -166,27 +142,13 @@ def _finding(severity, category, path, line, message, evidence=""):
 def _scan_lines(rel: str, lines: list[str], is_code: bool,
                 findings: list[dict]) -> None:
     for lineno, line in enumerate(lines, start=1):
-        if PRIVATE_KEY_RE.search(line):
+        # Secret shapes come from the shared module, in its
+        # order (private key, tokens, assignment) — the report
+        # this file produces is unchanged.
+        for found in secrets_mod.scan_text(line):
             findings.append(_finding(
                 "HIGH", "secret", rel, lineno,
-                "private key block in source — key material must not be committed",
-                "PRIVATE KEY block"))
-        token_hit = False
-        for pattern, category, message in TOKEN_PATTERNS:
-            for m in pattern.finditer(line):
-                token_hit = True
-                findings.append(_finding(
-                    "HIGH", category, rel, lineno, message,
-                    _redact(m.group(0))))
-        # One finding per secret per line: a value already caught
-        # by a specific token shape is not reported again as a
-        # generic assignment.
-        m = None if token_hit else ASSIGNMENT_RE.search(line)
-        if m and not _is_placeholder(m.group(2)):
-            findings.append(_finding(
-                "HIGH", "secret", rel, lineno,
-                f"hardcoded value assigned to '{m.group(1).lower()}'",
-                _redact(m.group(2), keep=2)))
+                found["message"], found["evidence"]))
         if is_code:
             for check, severity in CODE_CHECKS:
                 message = check(line)

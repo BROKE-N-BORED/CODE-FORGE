@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-13 — Review workflow, pre-send secret scan, and bench polish
+
+- Review window gains Autofix: findings are fixed a few at a time, one Code turn per round, with a re-review after each round — capped at 3 rounds and 5 findings per round, and the owner clicks every round. Rounds are recorded in the review file.
+- New `forge review --agent` command: reads a filed review and emits it as structured JSON with an exit-code gate, so other bots and agents can consume Forge reviews. It never runs a review — no model, no display.
+- The Turn Timeline head now shows the findings acceptance rate for the current project: how many findings were sent for fixing vs taught from, overall and by severity. Blank until the owner decides on a finding.
+- Pre-send secret scan: before any message goes to a cloud provider, Forge scans it for secrets (keys, tokens, private keys). A hit blocks the send and the owner decides — send anyway, redact and send, allow, or cancel. Nothing is sent before the decision. Local Ollama turns are never scanned. The allow-list lives in the owner's settings, and every exemption is logged.
+- Bench polish: selected text now highlights in the warm accent color; a LIGHT MACHINE chip appears in the header when the Light Machine profile is on; the header reflows to two rows at narrow window widths instead of clipping; the subtitle reads "v2.5 · LOCAL AGENT"; state colors (error, thinking, warning) come from the bench tokens; the phone deck's danger colors come from the same tokens, with the served page byte-identical.
+- Removed seven third-party brand mentions that arrived with the review-workflow code from comments and documentation.
+- Full test suite green: 2,636 tests, zero failures.
+
 ## 2026-11-12 — Decisions lane, finishing touches, GoFish rename, and doc cleanup
 
 - SKRIBE grading gets an optional Decisions lane: with the lane on, each queued draft is scored through the Gemini Decisions API (free tier, on the existing Gemini key) and the shell's finalize rule still makes the call. Off by default; when off, grading works exactly as before.

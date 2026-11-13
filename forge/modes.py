@@ -554,6 +554,266 @@ def fix_requested_for(review_text: str, finding_text: str):
         return None
 
 
+# ---------- Autofix as a bounded loop (Tier 2 #4) ----------
+#
+# Continuous fix-until-clean, Forge-scale: a review's
+# findings are fixed a few at a time, one Code turn per round, with
+# a re-review after each round — and the loop is BOUNDED. Three
+# rounds per review chain, five findings per round, and the owner
+# clicks every round: nothing runs on its own, and every write the
+# fix turn makes is approved by the owner at the existing tool
+# gate (worker.py approval_needed with a diff). Never an
+# autonomous commit mode.
+#
+# State lives in the review file's ## Autofix rounds section, the
+# way fix requests live under ## Fix requests. The chain bound
+# rides the re-review filename (autofix-<stem>-r<N>.md) — the
+# model files its own reports, so the prompt instructs that name
+# and the room reads the round back from it. A model that names
+# its report differently restarts the count for that file; the
+# hard backstops are the owner's click per round and the per-file
+# cap, so a disobedient filename can never make the loop run away.
+
+AUTOFIX_MAX_ROUNDS = 3
+AUTOFIX_MAX_FINDINGS_PER_ROUND = 5
+
+_AUTOFIX_ROUND_RE = re.compile(
+    r"^-\s+Round\s+(\d+)\s+—\s+(\S+(?:\s+\S+)?)\s+—\s+"
+    r"(\d+)\s+findings?\s+sent$")
+_AUTOFIX_FINDING_RE = re.compile(r"^\s*Finding:\s+(.*)$")
+_AUTOFIX_REREVIEW_RE = re.compile(
+    r"^-\s+Round\s+(\d+)\s+re-review:\s+(.*)$")
+_AUTOFIX_NAME_RE = re.compile(r"^autofix-(.+)-r(\d+)\.md$")
+
+
+def autofix_round_from_name(filename: str) -> int:
+    """The chain round a re-review filename carries — 1 for
+    autofix-fix-review-r1.md — or 0 when the name carries none
+    (an original review, or a model that named its report
+    differently). Never raises."""
+    try:
+        match = _AUTOFIX_NAME_RE.match(
+            (filename or "").strip())
+        return int(match.group(2)) if match else 0
+    except Exception:
+        return 0
+
+
+def autofix_chain_stem(filename: str) -> str:
+    """The chain's base stem: the review filename without a
+    leading "autofix-" and a trailing "-r<N>", and without the
+    .md — so the next re-review in the chain is named
+    autofix-<stem>-r<N>.md instead of stacking prefixes.
+    "fix-review.md" reads as "fix-review". Never raises."""
+    try:
+        stem = (filename or "").strip()
+        if stem.endswith(".md"):
+            stem = stem[:-3]
+        match = _AUTOFIX_NAME_RE.match((filename or "").strip())
+        if match:
+            return match.group(1)
+        if stem.startswith("autofix-"):
+            stem = stem[len("autofix-"):]
+        return stem or "review"
+    except Exception:
+        return "review"
+
+
+def autofix_next_findings(parsed, sent_lines, fix_requested_lines,
+                          cap=AUTOFIX_MAX_FINDINGS_PER_ROUND):
+    """The next findings for an autofix round, in severity order
+    (Critical first, file order within a severity, unparsed
+    severity last), capped at `cap`. Findings already sent in an
+    earlier round, or with an individual fix request (CR9), are
+    skipped — the round covers only what is still open. A
+    finding naming no file is skipped too: a fix turn has
+    nothing to open for it (a Findings section that just says
+    "Nothing to report." is one such line, and must never become
+    a round). `parsed` is parse_findings_body output (dicts with
+    text/severity/driver); the returned dicts are the same
+    dicts, in round order. Never raises."""
+    try:
+        limit = max(1, int(cap))
+    except Exception:
+        limit = AUTOFIX_MAX_FINDINGS_PER_ROUND
+    out = []
+    try:
+        sent = {_flatten_one_line(s) for s in (sent_lines or [])}
+        requested = {_flatten_one_line(s)
+                     for s in (fix_requested_lines or [])}
+        order = {name: i for i, name in enumerate(
+            FINDING_SEVERITIES)}
+        pool = []
+        for found in parsed or []:
+            text = _flatten_one_line((found or {}).get("text", ""))
+            if not text or text in sent or text in requested:
+                continue
+            if not finding_file(text):
+                continue
+            severity = (found or {}).get("severity")
+            pool.append((order.get(severity, len(order)), found))
+        # Python's sort is stable: file order holds within a
+        # severity.
+        pool.sort(key=lambda pair: pair[0])
+        out = [found for _rank, found in pool[:limit]]
+    except Exception:
+        return out
+    return out
+
+
+def _autofix_append(text: str, entry: str) -> str:
+    """`text` with `entry` appended under ## Autofix rounds at
+    the end (the section is created when the review has none),
+    before any following section. The original text is otherwise
+    untouched. Never raises."""
+    try:
+        body = section_body(text, "Autofix rounds")
+        if body is None:
+            if text and not text.endswith("\n"):
+                text += "\n"
+            return text + f"\n## Autofix rounds\n\n{entry}"
+        lines = text.splitlines(keepends=True)
+        in_section = False
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                if in_section:
+                    insert_at = i
+                    break
+                if stripped == "## Autofix rounds":
+                    in_section = True
+                continue
+        if insert_at == len(lines) and lines \
+                and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.insert(insert_at, entry)
+        return "".join(lines)
+    except Exception:
+        return text or ""
+
+
+def record_autofix_round(review_text: str, when: str, round_n: int,
+                         findings, sent: str) -> str:
+    """The review text with one autofix round recorded under
+    ## Autofix rounds: "- Round N — <when> — K findings sent",
+    one indented "Finding: <line>" per finding sent, and an
+    indented "Sent: <the prompt that went to Code mode>". Never
+    raises."""
+    try:
+        text = review_text or ""
+        when = (when or "").strip() or "unknown time"
+        try:
+            number = max(1, int(round_n))
+        except Exception:
+            number = 1
+        lines = list(findings or [])
+        entry = (f"- Round {number} — {when} — {len(lines)} "
+                 f"finding{'s' if len(lines) != 1 else ''} sent\n")
+        for line in lines:
+            entry += f"  Finding: {_flatten_one_line(line)}\n"
+        entry += f"  Sent: {_flatten_one_line(sent)}\n"
+        return _autofix_append(text, entry)
+    except Exception:
+        return review_text or ""
+
+
+def record_autofix_rereview(review_text: str, round_n: int,
+                            filename: str) -> str:
+    """The review text with one re-review recorded under
+    ## Autofix rounds: "- Round N re-review: <filename>".
+    Never raises."""
+    try:
+        text = review_text or ""
+        try:
+            number = max(1, int(round_n))
+        except Exception:
+            number = 1
+        entry = (f"- Round {number} re-review: "
+                 f"{(filename or '').strip() or '(unnamed)'}\n")
+        return _autofix_append(text, entry)
+    except Exception:
+        return review_text or ""
+
+
+def autofix_rounds(review_text: str) -> list[dict]:
+    """The recorded autofix rounds from a review's
+    ## Autofix rounds section, in file order: {round, when,
+    findings, sent, rereview}. A Finding or Sent line belongs to
+    the round above it; a re-review line fills that round's
+    rereview. No section reads as []. Never raises."""
+    out: list[dict] = []
+    try:
+        body = section_body(review_text or "", "Autofix rounds")
+    except Exception:
+        return out
+    if not body:
+        return out
+    by_round: dict[int, dict] = {}
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = _AUTOFIX_ROUND_RE.match(line)
+        if match:
+            number = int(match.group(1))
+            entry = {"round": number,
+                     "when": match.group(2).strip(),
+                     "findings": [], "sent": "",
+                     "rereview": ""}
+            out.append(entry)
+            by_round[number] = entry
+            continue
+        rereview = _AUTOFIX_REREVIEW_RE.match(line)
+        if rereview:
+            entry = by_round.get(int(rereview.group(1)))
+            if entry is not None:
+                entry["rereview"] = rereview.group(2).strip()
+            continue
+        finding = _AUTOFIX_FINDING_RE.match(line)
+        if finding and out:
+            out[-1]["findings"].append(finding.group(1).strip())
+            continue
+        sent = _FIX_SENT_RE.match(line)
+        if sent and out:
+            out[-1]["sent"] = sent.group(1).strip()
+    return out
+
+
+def autofix_round_for(review_text: str, finding_text: str):
+    """The round number that sent this exact finding line, or
+    None when no round sent it. Never raises."""
+    try:
+        wanted = _flatten_one_line(finding_text)
+        for entry in autofix_rounds(review_text):
+            if wanted in [_flatten_one_line(f)
+                          for f in entry.get("findings", [])]:
+                return entry.get("round")
+        return None
+    except Exception:
+        return None
+
+
+def autofix_next_round(review_text: str, filename: str) -> int:
+    """The next autofix round for this review: one past the
+    furthest round the chain has reached — the chain round its
+    filename carries, or the highest round recorded in this
+    file, whichever is further. Recorded round numbers are
+    chain-absolute (round 3 recorded in an r2 file already
+    includes the base), so the two are compared, never added:
+    adding them double-counts the base. An original review with
+    no rounds reads as 1; autofix-x-r1.md with no rounds reads
+    as 2. Never raises."""
+    try:
+        base = autofix_round_from_name(filename)
+        done = [entry.get("round", 0)
+                for entry in autofix_rounds(review_text)]
+        furthest = max([base] + done)
+        return furthest + 1
+    except Exception:
+        return 1
+
+
 # ---------- Finishing Touches (Tier 2 #3 — docstrings + unit tests) ----------
 #
 # The finishing moves, offered as checkboxes at the end of a
@@ -568,6 +828,33 @@ _FINISHING_TOUCH_RE = re.compile(
     r"^-\s+(\S+(?:\s+\S+)?)\s+—\s+(Docstrings|Unit tests) for\s+(.*)$")
 
 
+def _finding_body(line: str) -> str:
+    """A finding line with its bullet, bracket header and legacy
+    severity word stripped — the "FILE:PLACE — PROBLEM — Fix:
+    FIX" body, or the plain line as written. The strip is shared
+    by finding_file, finding_line and finding_problem_fix so the
+    three never disagree about where the body starts. Never
+    raises."""
+    try:
+        text = _FINDING_BULLET_RE.sub(
+            "", str(line or "").strip()).strip()
+        if not text:
+            return ""
+        bracket = _FINDING_BRACKET_RE.match(text)
+        if bracket:
+            return bracket.group(2).strip()
+        # Legacy lines lead with the old severity word
+        # ("BLOCKER: store.py:3 — ...") — the same strip
+        # finding_display applies, so the word never reads as
+        # part of the file.
+        legacy = _FINDING_LEGACY_RE.match(text)
+        if legacy:
+            return legacy.group(2).strip()
+        return text
+    except Exception:
+        return ""
+
+
 def finding_file(line: str) -> str:
     """The file a finding line names, or "" when it names none.
 
@@ -578,21 +865,7 @@ def finding_file(line: str) -> str:
     no file — the file is never guessed from the prose. Never
     raises."""
     try:
-        text = _FINDING_BULLET_RE.sub(
-            "", str(line or "").strip()).strip()
-        if not text:
-            return ""
-        bracket = _FINDING_BRACKET_RE.match(text)
-        if bracket:
-            text = bracket.group(2).strip()
-        else:
-            # Legacy lines lead with the old severity word
-            # ("BLOCKER: store.py:3 — ...") — the same strip
-            # finding_display applies, so the word never reads
-            # as part of the file.
-            legacy = _FINDING_LEGACY_RE.match(text)
-            if legacy:
-                text = legacy.group(2).strip()
+        text = _finding_body(line)
         if " — " not in text:
             return ""
         head = text.split(" — ", 1)[0].strip()
@@ -600,6 +873,45 @@ def finding_file(line: str) -> str:
         return head
     except Exception:
         return ""
+
+
+def finding_line(line: str):
+    """The line number a finding line's FILE:PLACE names, or None
+    when it names none. "store.py:412" reads as 412; a ":line:col"
+    tail reads as the line (412, not the column); a file with no
+    place reads as None. Never raises."""
+    try:
+        text = _finding_body(line)
+        if " — " not in text:
+            return None
+        head = text.split(" — ", 1)[0].strip()
+        match = re.search(r":(\d+)(?::\d+)?$", head)
+        return int(match.group(1)) if match else None
+    except Exception:
+        return None
+
+
+def finding_problem_fix(line: str) -> tuple[str, str | None]:
+    """A finding line's (problem, fix): the problem is the text
+    between the file head and the "Fix:" tail, the fix is the
+    text after "Fix:", or None when the line carries no fix. A
+    line with no " — " separator is all problem — a plain line
+    like "Nothing to report." states its own problem and has no
+    fix to give. Never raises."""
+    try:
+        text = _finding_body(line)
+        if not text:
+            return "", None
+        parts = text.split(" — ")
+        if len(parts) < 2:
+            return text, None
+        if parts[-1].startswith("Fix:"):
+            fix = parts[-1][len("Fix:"):].strip() or None
+            problem = " — ".join(parts[1:-1]).strip()
+            return problem, fix
+        return " — ".join(parts[1:]).strip(), None
+    except Exception:
+        return "", None
 
 
 def review_files(lines, cap=10) -> list[str]:
@@ -749,6 +1061,76 @@ def finding_counts_text(parsed_findings) -> str:
     if not any(counts.values()):
         return ""
     return " · ".join(f"{counts[s]} {s}" for s in FINDING_SEVERITIES)
+
+
+_WALKTHROUGH_PART_RE = re.compile(
+    r"^\s*\*{0,2}(What changed|Changes, in dependency order"
+    r"|Effort|Risk):\*{0,2}\s*(.*)$")
+
+
+def parse_walkthrough(review_text: str):
+    """A review's ## Walkthrough section as a dict — {what_changed,
+    changes, effort, risk} — or None when the report has no
+    Walkthrough section (pre-CR3 reports). The four parts follow
+    the Review prompt's shape: What changed is 1–3 sentences (it
+    may run over several lines, until the next part); Changes, in
+    dependency order is a list of {area, what, why} rows, each
+    "FILE/AREA — what changed — why it matters" (a row with
+    fewer separators keeps what it has, the rest reads as None);
+    Effort and Risk are one line each. A part the report skips
+    reads as None (changes as []), never an error — the parser
+    reports what the report says and invents nothing. The bold
+    markers are optional: a model that drops them still parses.
+    Never raises."""
+    try:
+        body = section_body(review_text or "", "Walkthrough")
+    except Exception:
+        return None
+    if body is None:
+        return None
+    out = {"what_changed": None, "changes": [],
+           "effort": None, "risk": None}
+    try:
+        parts: dict[str, list[str]] = {}
+        current = None
+        for raw in body.splitlines():
+            match = _WALKTHROUGH_PART_RE.match(raw)
+            if match:
+                current = match.group(1)
+                parts.setdefault(current, [])
+                if match.group(2).strip():
+                    parts[current].append(match.group(2).strip())
+                continue
+            if current is not None and raw.strip():
+                parts[current].append(raw.strip())
+        changed = parts.get("What changed", [])
+        if changed:
+            out["what_changed"] = " ".join(changed).strip() or None
+        for row in parts.get("Changes, in dependency order", []):
+            text = _FINDING_BULLET_RE.sub("", row).strip()
+            if not text:
+                continue
+            bits = [bit.strip() for bit in text.split(" — ")]
+            if len(bits) >= 3:
+                out["changes"].append(
+                    {"area": bits[0] or None, "what": bits[1],
+                     "why": " — ".join(bits[2:])})
+            elif len(bits) == 2:
+                out["changes"].append(
+                    {"area": bits[0] or None, "what": bits[1],
+                     "why": None})
+            else:
+                out["changes"].append(
+                    {"area": None, "what": bits[0], "why": None})
+        effort = parts.get("Effort", [])
+        if effort:
+            out["effort"] = " ".join(effort).strip() or None
+        risk = parts.get("Risk", [])
+        if risk:
+            out["risk"] = " ".join(risk).strip() or None
+    except Exception:
+        return out
+    return out
 
 
 def homework_note(mode: str, reads: list[str], project_files: list[str]) -> str:

@@ -177,7 +177,7 @@ h1{font-size:16px;color:@{accent_amber}@;letter-spacing:.1em;margin:2px 0 0}
 .sec{color:@{text_section}@;font-size:11px;letter-spacing:.12em;margin-bottom:8px}
 button{font-size:15px;padding:11px 16px;border-radius:8px;border:1px solid @{border_button}@;background:@{surface_button_bottom}@;color:@{text_base}@}
 button.ok{background:@{accent_primary_bottom}@;border-color:@{accent_amber}@;color:@{text_amber_light}@}
-button.stop{background:#571d1d;border-color:#e5534b;color:@{text_white}@}
+button.stop{background:@{surface_danger}@;border-color:@{state_error}@;color:@{text_white}@}
 textarea,select,input{width:100%;box-sizing:border-box;font-size:16px;padding:11px;border-radius:8px;border:1px solid @{border_input}@;background:@{surface_input}@;color:@{text_base}@}
 textarea{min-height:64px}
 pre{white-space:pre-wrap;font-size:12px;color:@{state_idle}@;margin:4px 0}
@@ -203,7 +203,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 #tabbar .tab .tic{font-size:19px;line-height:1.1}
 #tabbar .tab.active{color:@{accent_amber}@}
 #tabbar .tab.active::after{content:'';position:absolute;top:-7px;left:24%;right:24%;height:2px;background:@{accent_amber}@;border-radius:2px}
-.badge{position:absolute;top:3px;right:calc(50% - 21px);background:#e5534b;color:@{text_white}@;font-size:10px;font-weight:700;min-width:16px;height:16px;line-height:16px;border-radius:8px;text-align:center;padding:0 4px;box-sizing:border-box}
+.badge{position:absolute;top:3px;right:calc(50% - 21px);background:@{state_error}@;color:@{text_white}@;font-size:10px;font-weight:700;min-width:16px;height:16px;line-height:16px;border-radius:8px;text-align:center;padding:0 4px;box-sizing:border-box}
 .collaphead{width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;padding:2px 0;color:@{text_base}@;font-size:15px;text-align:left}
 .collaphead .sec{margin-bottom:0}
 .collap .collapbody{margin-top:8px}
@@ -215,14 +215,14 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 .attachitem{position:relative;display:inline-block;margin:2px 10px 8px 2px;vertical-align:top}
 .attachitem img{width:54px;height:54px;object-fit:cover;border-radius:8px;border:1px solid @{rim}@;display:block}
 .attachitem .aname{font-size:11px;color:@{text_muted}@;max-width:76px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
-.attachitem .ax{position:absolute;top:-7px;right:-7px;width:22px;height:22px;padding:0;border-radius:11px;background:#571d1d;border:1px solid #e5534b;color:@{text_white}@;font-size:13px;line-height:1}
+.attachitem .ax{position:absolute;top:-7px;right:-7px;width:22px;height:22px;padding:0;border-radius:11px;background:@{surface_danger}@;border:1px solid @{state_error}@;color:@{text_white}@;font-size:13px;line-height:1}
 .afile{display:inline-flex;align-items:center;background:@{surface_input}@;border:1px solid @{rim}@;border-radius:8px;padding:9px 10px;font-size:13px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style></head><body>
 <header id="appbar">
 <div class="brandrow"><span class="wordmark">CODE FORGE · PHONE DECK</span><span class="stamp">B/N/B STUDIO · EST. 2026</span></div>
 <div class="hstatus"><span class="dot amber">●</span> <b id="hstate">…</b> <span class="dim" id="hmodel"></span></div>
 </header>
-<div class="card" id="disc" style="display:none;border-color:#e5534b;color:@{text_white}@">⚠ Deck disconnected — the Forge restarted or this link expired. Reopen the deck from the Forge to reconnect.</div>
+<div class="card" id="disc" style="display:none;border-color:@{state_error}@;color:@{text_white}@">⚠ Deck disconnected — the Forge restarted or this link expired. Reopen the deck from the Forge to reconnect.</div>
 
 <main>
 <section class="screen" id="scr-chat">
@@ -482,8 +482,8 @@ async function planAction(action){
     const r = await fetch('/plan?k='+K, {method:'POST', body: JSON.stringify({action: action})});
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Plan action failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Plan action failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
 function renderProposals(s){
@@ -511,21 +511,21 @@ async function proposalDecision(id, accept){
     const r = await fetch('/proposal?k='+K, {method:'POST', body: JSON.stringify({id: id, accept: accept})});
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Proposal decision failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Proposal decision failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
 async function planComment(){
   const msg = document.getElementById('planmsg');
   const box = document.getElementById('plancommenttext');
   const text = (box.value || '').trim();
-  if(!text){ msg.style.color = '#e5534b'; msg.textContent = '✗ Type the change you want first — an empty comment cannot revise the plan.'; return; }
+  if(!text){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Type the change you want first — an empty comment cannot revise the plan.'; return; }
   try{
     const r = await fetch('/plan?k='+K, {method:'POST', body: JSON.stringify({action: 'comment', comment: text})});
     const d = await r.json();
     if(d.ok){ box.value = ''; msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Plan action failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Plan action failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
 function renderAttach(s){
@@ -560,8 +560,8 @@ async function removeAttach(i){
     const r = await fetch('/attach-remove?k='+K, {method:'POST', body: JSON.stringify({index: i})});
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Removed'); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Remove failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Remove failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
 async function uploadAttach(input){
@@ -574,8 +574,8 @@ async function uploadAttach(input){
     const r = await fetch('/attach-upload?k='+K+'&name='+encodeURIComponent(f.name), {method:'POST', body: f});
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Attached'); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Attach failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed — nothing was attached'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Attach failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed — nothing was attached'; }
   tick();
 }
 function renderProjects(s){
@@ -599,8 +599,8 @@ async function postProject(target){
     const r = await fetch('/project?k='+K, {method:'POST', body: JSON.stringify({project: target})});
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || ('Project: ' + (d.project || target))); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Switch failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Switch failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
 async function pickProject(v){ if(v) await postProject(v); }
@@ -611,8 +611,8 @@ async function postPrompt(text){
     const r = await fetch('/prompt?k='+K, {method:'POST', body: JSON.stringify({text: text})});
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Sent'); return true; }
-    msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Not sent'); return false;
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed — the prompt was NOT sent'; return false; }
+    msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Not sent'); return false;
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed — the prompt was NOT sent'; return false; }
 }
 async function sendPrompt(){ const el = document.getElementById('prompt'); const v = el.value; if(!v.trim()) return; if(await postPrompt(v)) el.value=''; tick(); }
 async function chip(t){ await postPrompt(t); tick(); }
@@ -620,15 +620,15 @@ async function fanOut(){
   const msg = document.getElementById('fanoutmsg');
   const box = document.getElementById('fanoutitems');
   const items = (box.value || '').split('\\n').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
-  if(!items.length){ msg.style.color = '#e5534b'; msg.textContent = '✗ Type at least one item — one per line.'; return; }
+  if(!items.length){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Type at least one item — one per line.'; return; }
   const indep = document.getElementById('fanoutindep').checked;
-  if(!indep){ msg.style.color = '#e5534b'; msg.textContent = '✗ Fan-out needs independent items — tick the box to confirm none of these waits on another.'; return; }
+  if(!indep){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Fan-out needs independent items — tick the box to confirm none of these waits on another.'; return; }
   try{
     const r = await fetch('/fanout?k='+K, {method:'POST', body: JSON.stringify({items: items, independent: indep})});
     const d = await r.json();
     if(d.ok){ box.value = ''; msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Done'); }
-    else { msg.style.color = '#e5534b'; msg.textContent = '✗ ' + (d.error || 'Fan-out failed'); }
-  }catch(e){ msg.style.color = '#e5534b'; msg.textContent = '✗ Deck request failed'; }
+    else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Fan-out failed'); }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed'; }
   tick();
 }
 // ---- fire bar (Note 23): the bench ember's sim + palette, in JS ----
@@ -718,15 +718,16 @@ tick(); setInterval(tick, 3000); setInterval(tickAlive, 1000);
 # from, so the two surfaces cannot drift apart again. PAGE stays the
 # raw template until main binds the built page (main imports this
 # module before its TOKENS table exists, so the build cannot happen
-# at deck import time). The only literals left in the template are
-# the disclosed exceptions pinned in tests' DeckTokenTests: the
-# desktop's established error red (#e5534b — RunBlock.ERROR_RED in
-# main.py, a named literal, not a TOKENS entry), the danger-button
-# background (#571d1d — no TOKENS surface carries a red tint), and
-# the ember simulation's painted palette (the FIRE_PALETTE ramp, the
-# coal-bed tones #141210/#26221e and the smoke rgb(150,155,165) —
-# mirrored literally by the desktop's own ember painter; painted
-# simulation colors, never stylesheet colors on either surface).
+# at deck import time). T8 (2026-11-12) converted the last two
+# stylesheet literals to tokens: the error red rides state_error
+# (T7's token — the desktop's established error red, RunBlock.
+# ERROR_RED in main.py) and the danger-button background rides
+# surface_danger. The only literals left in the template are the
+# disclosed exceptions pinned in tests' DeckTokenTests: the ember
+# simulation's painted palette (the FIRE_PALETTE ramp, the coal-bed
+# tones #141210/#26221e and the smoke rgb(150,155,165) — mirrored
+# literally by the desktop's own ember painter; painted simulation
+# colors, never stylesheet colors on either surface).
 _TOKEN_PLACEHOLDER = re.compile(r"@\{([a-z_0-9]+)(?::([0-9.]+))?\}@")
 
 

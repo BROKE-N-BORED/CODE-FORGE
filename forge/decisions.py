@@ -38,6 +38,7 @@ import json
 import urllib.request
 
 from . import providers as providers_mod
+from . import secrets as secrets_mod
 from .ollama_client import OllamaError
 
 DECISION_MODEL = "gemini-decision-1"
@@ -114,6 +115,20 @@ class DecisionsClient(providers_mod._ProviderHTTP):
                  base_url=None):
         super().__init__(api_key, urlopen=urlopen, timeout=timeout)
         self.base_url = str(base_url or self.BASE_URL).rstrip("/")
+        # Pre-send secret scan (2026-11-12): mirrored from the
+        # window's settings like the facade's own attributes.
+        # Default ON; no workspace until one is set.
+        self.presend_scan = True
+        self.presend_workspace = None
+        # Findings the allow-list exempted on this thread's last
+        # scan — the SKRIBE lane drains + logs them
+        # (presend_allowed), like the chat facade's stash.
+        self._allowed = providers_mod._AllowedStash()
+
+    def take_allowed_findings(self):
+        """Findings the allow-list exempted on this thread's last
+        scan, drained (the stash empties)."""
+        return self._allowed.take()
 
     def _headers(self, content_type=False):
         headers = {"x-goog-api-key": self.api_key,
@@ -132,6 +147,27 @@ class DecisionsClient(providers_mod._ProviderHTTP):
         rubric (a programming error, not an API failure). No
         retries — the caller falls back to local grading."""
         self._require_key()
+        # Pre-send secret scan (2026-11-12): the Decisions lane
+        # sends queued FILE contents to Gemini — a secret in a
+        # queued file must never make the trip. A hit raises
+        # BEFORE the request is built; the caller's existing
+        # fallback grades the batch locally instead. No dialog
+        # here: this lane is a background optimization, and the
+        # local pass is the safe answer.
+        if self.presend_scan:
+            scanned = providers_mod.scan_outbound_text(
+                text, where="decisions input")
+            # Item 5: the project's allow-list covers matches the
+            # owner already accepted. Without a workspace there is
+            # no list to consult — fail closed. The exempted half
+            # is stashed for the caller to log (security review,
+            # 2026-11-12).
+            findings, allowed = secrets_mod.partition_allowed(
+                scanned, self.presend_workspace)
+            self._allowed.store(allowed)
+            if findings:
+                raise providers_mod.SecretBlocked(
+                    "gemini", "decisions", findings)
         levels = [str(level).strip() for level in (rubric_levels or [])]
         if len(levels) < 2:
             raise ValueError(

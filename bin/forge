@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Code Forge's command line launcher — the agent surface.
+# `./bin/forge review --agent [PATH]` reads a filed review as
+# JSON with an exit-code gate (see forge/cli.py). The GUI
+# launcher is run.sh; this one never opens a window. It lives
+# in bin/ because the tree root already has a forge/ package
+# directory — a file named `forge` cannot sit beside it.
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$ROOT"
+if [[ ! -x "$ROOT/.venv/bin/python" ]]; then
+  echo "Environment missing or incomplete. Run ./install.sh first." >&2
+  exit 2
+fi
+exec "$ROOT/.venv/bin/python" -m forge.cli "$@"

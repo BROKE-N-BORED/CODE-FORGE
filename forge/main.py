@@ -77,6 +77,7 @@ from . import review_state as review_state_mod
 from . import gate_checks as gate_checks_mod
 from . import linters as linters_mod
 from . import decisions as decisions_mod
+from . import secrets as secrets_mod
 from . import diffview as diff_mod
 from . import snapshots as snap_mod
 from . import checkpoints as ckpt_mod
@@ -171,8 +172,20 @@ HOUSE_RULES = """House rules (set by the owner, always in force):
 # tests/test_core.py pins the pre-G7 snapshot). Change a value by
 # changing its token, never by editing the template's prose. A few
 # tokens (accent_amber, the compose-frame surfaces and radius,
-# state_idle) are not used by STYLE itself; they exist for the
+# state_idle and the state_error / state_thinking / state_warn
+# trio) are not used by STYLE itself; they exist for the
 # inline stylesheets elsewhere in this file that share the palette.
+# T7 (GUIFX task list, 2026-11-12): TOKENS held no error/danger
+# entry, so state colors drifted in hardcoded per call site — the
+# error red #e5534b in three places, a DIFFERENT red #e28b83 on the
+# agent-state ERROR label, #ff8c3a for the connection warning and
+# #e6c16c for THINKING. That is exactly how the blue drift happened.
+# The three state_* tokens below are the one home for those colors
+# now; every call site references them (the muted ERROR red converts
+# to the established error red, so "error" is one red everywhere).
+# #c0392b needs no token: it already lives here as progress_crit
+# (diff word-removal reads it through TOKENS). The deck's #e5534b
+# literals are T8's job, not this one — deck.py untouched.
 TOKENS = {
     "surface_base": "#12100d",
     "surface_glass_top": "#332e26",
@@ -192,6 +205,9 @@ TOKENS = {
     "surface_splitter": "#3f382e",
     "surface_compose_top": "#2c2720",
     "surface_compose_bottom": "#201d18",
+    # T8 (2026-11-12): the danger-button background (deck stop/kill
+    # buttons) — the deck's only surface literal with no token.
+    "surface_danger": "#571d1d",
     "rim": "rgba(255,179,71,0.30)",
     "rim_hover": "rgba(255,179,71,0.45)",
     "rim_focus": "rgba(255,179,71,0.55)",
@@ -218,6 +234,9 @@ TOKENS = {
     "progress_hot": "#d97a26",
     "progress_crit": "#c0392b",
     "state_idle": "#b8ac9a",
+    "state_error": "#e5534b",
+    "state_thinking": "#e6c16c",
+    "state_warn": "#ff8c3a",
     "radius_control": "7px",
     "radius_card": "12px",
     "radius_progress": "5px",
@@ -257,6 +276,17 @@ TOKENS = {
 # new token may be added for a padding here). Checked indicators
 # use the amber primary token so the state reads unambiguously;
 # disabled indicators follow the T1 pattern (flattened, muted).
+# T4 (GUIFX task list, 2026-11-12): selection-background-color was
+# set only on the input widgets and the combo view, so the chat
+# QTextBrowser, the QListWidgets and the provider table fell back
+# to the system palette highlight — blue on many Linux themes, a
+# palette leak on the most-used surface. The rules below give every
+# selectable-text family the same established selection value as
+# the inputs (accent_primary_bottom); no selection-color is set,
+# matching the input pattern (cream text reads on the dark ember).
+# Note for the T3 port: T3's QListWidget::item:selected background
+# takes visual precedence over this selection-background-color on
+# list items; this rule is the fallback and covers the table.
 _STYLE_TEMPLATE = Template("""
 QWidget { background:$surface_base; color:$text_base; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }
 QMainWindow { background:$surface_base; }
@@ -286,8 +316,9 @@ QPushButton#navActive:pressed { background:$surface_glass_bottom; }
 QPushButton#navActive:disabled { background:$surface_input; border-color:$border_input; color:$text_muted; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:$surface_input; border:1px solid $border_input; border-radius:$radius_control; padding:$padding_input; selection-background-color:$accent_primary_bottom; }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:$rim_focus; }
-QTextBrowser { background:$surface_chat; border:1px solid $rim_chat; border-radius:$radius_card; padding:$padding_chat; }
+QTextBrowser { background:$surface_chat; border:1px solid $rim_chat; border-radius:$radius_card; padding:$padding_chat; selection-background-color:$accent_primary_bottom; }
 QComboBox QAbstractItemView { background:$surface_combo_view; selection-background-color:$accent_primary_bottom; }
+QListWidget, QTableWidget { selection-background-color:$accent_primary_bottom; }
 QProgressBar { background:$surface_input; border:1px solid $rim_soft; border-radius:$radius_progress; height:10px; text-align:center; font-size:9px; color:$text_progress; }
 QProgressBar::chunk { background:$progress_chunk; border-radius:$radius_chunk; }
 QProgressBar#hot::chunk { background:$progress_hot; }
@@ -1559,6 +1590,192 @@ class ApprovalDialog(QDialog):
         self.accept()
 
 
+class SecretScanDialog(QDialog):
+    """Pre-send secret scan (2026-11-12): a cloud send was blocked
+    because the outbound text looks like it contains a secret. The
+    dialog shows the provider + model, the redacted matches
+    (pattern + evidence + where + the redacted line), and a
+    redacted preview of what was about to send — never a secret
+    value anywhere. Four buttons, no default: "Send anyway",
+    "Redact + send", "Allow + send", "Cancel". "Allow + send"
+    asks for a reason and records one allow-list entry per
+    match (Item 5) before sending. Window close / Esc is
+    Cancel."""
+
+    def __init__(self, parent, payload, context=""):
+        super().__init__(parent)
+        self.setWindowTitle("Cloud send blocked — PAUSED")
+        self.setMinimumWidth(560)
+        self.choice = "cancel"
+        self.allow_reason = ""
+        provider = str(payload.get("provider") or "")
+        model = str(payload.get("model") or "")
+        findings = payload.get("findings") or []
+        count = payload.get("message_count") or 0
+        preview = str(payload.get("preview") or "")
+        lay = QVBoxLayout(self)
+        state = QLabel("⏸  PAUSED — waiting on you. No clock is running on your decision.")
+        state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
+        lay.addWidget(state)
+        who = QLabel(f"{provider} · {model} was about to send "
+                     f"{count} message(s).")
+        who.setObjectName("big")
+        who.setWordWrap(True)
+        # Sweep R68: provider/model are data — plain text, always.
+        who.setTextFormat(Qt.PlainText)
+        lay.addWidget(who)
+        if context:
+            ctx = QLabel(context)
+            ctx.setTextFormat(Qt.PlainText)
+            ctx.setWordWrap(True)
+            lay.addWidget(ctx)
+        intro = QLabel("The scan found something that looks like a "
+                       "secret. Nothing has been sent — the matches "
+                       "below are redacted, never shown in full.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        matches = QPlainTextEdit()
+        matches.setReadOnly(True)
+        lines = []
+        for found in findings:
+            lines.append(f"• {found.get('pattern')} — "
+                         f"{found.get('evidence')} "
+                         f"({found.get('where')})")
+            line = found.get("line") or ""
+            if line:
+                lines.append(f"    {line}")
+        matches.setPlainText("\n".join(lines))
+        matches.setMinimumHeight(120)
+        lay.addWidget(matches)
+        if preview:
+            head = QLabel("What was about to send (secrets redacted):")
+            lay.addWidget(head)
+            body = QPlainTextEdit()
+            body.setReadOnly(True)
+            body.setPlainText(preview)
+            body.setMinimumHeight(120)
+            lay.addWidget(body)
+        row = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        redact = QPushButton("Redact + send")
+        redact.clicked.connect(lambda: self._choose("redact"))
+        allow = QPushButton("Allow + send")
+        allow.setToolTip("Send this time, and stop the scan "
+                         "blocking these matches in this project "
+                         "again (manage them in Settings → "
+                         "Secret allow-list…).")
+        allow.clicked.connect(self._choose_allow)
+        send = QPushButton("Send anyway")
+        send.clicked.connect(lambda: self._choose("send"))
+        # No default button: the owner must choose deliberately —
+        # Enter must never send a secret by accident.
+        for btn in (cancel, redact, allow, send):
+            btn.setDefault(False)
+            btn.setAutoDefault(False)
+        row.addStretch()
+        row.addWidget(cancel)
+        row.addWidget(redact)
+        row.addWidget(allow)
+        row.addWidget(send)
+        lay.addLayout(row)
+        self.cancel_button = cancel
+        self.redact_button = redact
+        self.allow_button = allow
+        self.send_button = send
+
+    def _choose(self, choice):
+        self.choice = choice
+        self.accept()
+
+    def _choose_allow(self):
+        """Allow + send: ask why this match is safe to send. The
+        reason is saved with the entry (the window records it);
+        cancelling the prompt leaves the decision open."""
+        reason, ok = QInputDialog.getText(
+            self, "Allow this match",
+            "Why is this safe to send? (saved with the entry)")
+        if not ok:
+            return
+        self.allow_reason = reason.strip()
+        self.choice = "allow"
+        self.accept()
+
+
+class AllowListDialog(QDialog):
+    """Pre-send secret scan (2026-11-12): the current project's
+    allow-list — every match the owner accepted, with its reason.
+    Entries never expire; removing one re-blocks that match on
+    the very next send. Opened from Settings → Behavior."""
+
+    def __init__(self, parent, workspace):
+        super().__init__(parent)
+        self.setWindowTitle("Secret allow-list")
+        self.setMinimumWidth(560)
+        self.workspace = workspace
+        lay = QVBoxLayout(self)
+        head = QLabel("Allowed matches in this project — the scan "
+                      "will not stop these again.")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        note = QLabel("Entries never expire. Remove one to block "
+                      "that match again on the next send.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self._rows = QVBoxLayout()
+        lay.addLayout(self._rows)
+        self._refresh()
+        row = QHBoxLayout()
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addStretch()
+        row.addWidget(close)
+        lay.addLayout(row)
+        self.close_button = close
+
+    def _refresh(self):
+        while self._rows.count():
+            item = self._rows.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                # Detached at once (hide + unparent) so a stale
+                # row leaves the dialog's object tree immediately
+                # — deleteLater alone only marks it for the next
+                # event-loop pass, and a re-query before then
+                # would still see it.
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        entries = secrets_mod.load_allowlist(self.workspace)
+        if not entries:
+            empty = QLabel("No allowed matches in this project.")
+            empty.setWordWrap(True)
+            self._rows.addWidget(empty)
+            return
+        for entry in entries:
+            row_widget = QWidget()
+            row = QHBoxLayout(row_widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            text = f"{entry['pattern']} — {entry['anchor']}"
+            if entry.get("reason"):
+                text += f"\nReason: {entry['reason']}"
+            label = QLabel(text)
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            remove = QPushButton("Remove")
+            remove.clicked.connect(
+                lambda _checked=False, p=entry["pattern"],
+                a=entry["anchor"]: self._remove(p, a))
+            row.addWidget(label, 1)
+            row.addWidget(remove)
+            self._rows.addWidget(row_widget)
+
+    def _remove(self, pattern, anchor):
+        secrets_mod.remove_allowlist_entry(
+            self.workspace, pattern, anchor)
+        self._refresh()
+
+
 class CustomizeDialog(QDialog):
     """One home for skills, plugins and connectors (the pattern every modern
     agent tool converged on): each item listed with its tools and an on/off
@@ -2752,6 +2969,26 @@ class SettingsDialog(QDialog):
         self.light_machine.setChecked(
             bool(settings.get("light_machine", False)))
         form.addRow("Light machine", self.light_machine)
+        # Pre-send secret scan (2026-11-12): before any cloud
+        # send (Groq/Gemini), the outbound text is scanned for
+        # secret shapes; a hit stops the send and asks the owner.
+        # Default ON. Off means sends go out un-scanned — and
+        # every un-scanned send is logged, so "off" is visible.
+        self.scan_before_cloud_send = QCheckBox(
+            "Scan before cloud sends: stop a Groq/Gemini send "
+            "that looks like it contains a secret")
+        self.scan_before_cloud_send.setChecked(
+            bool(settings.get("scan_before_cloud_send", True)))
+        form.addRow("Cloud sends", self.scan_before_cloud_send)
+        # Pre-send secret scan (item 5): the current project's
+        # allow-list — matches the owner accepted, with reasons.
+        self.allowlist_button = QPushButton("Secret allow-list…")
+        self.allowlist_button.setToolTip(
+            "Matches you allowed in this project — remove one "
+            "to block it again.")
+        self.allowlist_button.clicked.connect(
+            self._open_allowlist)
+        form.addRow("", self.allowlist_button)
         # File watcher (Fix F7, M11 remainder): the owner
         # enables a QFileSystemWatcher on the project tree; a
         # changed file raises a proposal through the existing
@@ -2848,6 +3085,45 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    def _open_allowlist(self):
+        """Pre-send secret scan (item 5): the current project's
+        allow-list. The workspace comes from the parent window
+        (open_settings passes it); without one there is no
+        project to list, so the button quietly does nothing.
+        Item 6: removals made in the dialog are on the record —
+        the list is diffed across the dialog's run and each
+        removed entry earns a presend_allowlist_remove event on
+        the parent window's log (the dialog itself stays dumb)."""
+        parent = self.parent()
+        workspace = getattr(parent, "workspace", None)
+        if not workspace:
+            return
+        before = secrets_mod.load_allowlist(workspace)
+        dialog = AllowListDialog(self, workspace)
+        dialog.exec()
+        after = secrets_mod.load_allowlist(workspace)
+        removed = [entry for entry in before
+                   if not any(other.get("pattern")
+                              == entry.get("pattern")
+                              and other.get("anchor")
+                              == entry.get("anchor")
+                              for other in after)]
+        if not removed:
+            return
+        node = parent
+        while node is not None:
+            log = getattr(node, "eventlog", None)
+            if log is not None:
+                project = Path(workspace).name or workspace
+                for entry in removed:
+                    log.record("presend_allowlist_remove",
+                               pattern=entry["pattern"],
+                               anchor=entry["anchor"],
+                               reason=entry.get("reason", ""),
+                               project=project)
+                return
+            node = node.parent()
+
     def values(self):
         # Sweep R84: an emptied URL field saves the default, not ""
         # — an empty base URL made every later request fail with a
@@ -2883,6 +3159,8 @@ class SettingsDialog(QDialog):
                 "forge_browser_engine": str(
                     self.forge_browser_engine.currentData() or "auto"),
                 "light_machine": self.light_machine.isChecked(),
+                "scan_before_cloud_send":
+                    self.scan_before_cloud_send.isChecked(),
                 "watch_project_files":
                     self.watch_project_files.isChecked(),
                 "review_profile": str(
@@ -5096,9 +5374,10 @@ class RunBlock(QWidget):
     # internally — a 2000-line spew must not make one block
     # taller than the whole window.
     MAX_BODY_VISIBLE_LINES = 14
-    # The app's established literal error red (the connection
-    # dot's disconnected color) — failure states, no new hue.
-    ERROR_RED = "#e5534b"
+    # The app's established error red (TOKENS state_error; also
+    # the connection dot's disconnected color) — failure states,
+    # no new hue.
+    ERROR_RED = TOKENS["state_error"]
 
     def __init__(self, command, cwd, parent=None):
         super().__init__(parent)
@@ -7960,6 +8239,31 @@ class ReviewWindow(ModeWindow):
             self.run_finishing_btn.clicked.connect(
                 self._run_finishing_touches)
             col_lay.addWidget(self.run_finishing_btn)
+            # Tier 2 #4 (Autofix, bounded loop): fix-until-clean
+            # a few findings at a time — one Code turn per round,
+            # a re-review after each round, capped at 3 rounds
+            # per review chain and 5 findings per round. The
+            # owner clicks every round; every write the fix turn
+            # makes is approved at the existing tool gate. Never
+            # autonomous: no round runs on its own.
+            self.autofix_btn = QPushButton("Autofix")
+            self.autofix_btn.setToolTip(
+                "Fix the next findings in this review as one "
+                "Code turn — up to 5, worst first. Each write "
+                "still waits for your approval at the gate. "
+                "Capped at 3 rounds per review chain.")
+            self.autofix_btn.clicked.connect(
+                self._run_autofix_round)
+            col_lay.addWidget(self.autofix_btn)
+            self.autofix_rereview_btn = QPushButton(
+                "Re-review after autofix")
+            self.autofix_rereview_btn.setToolTip(
+                "Re-review only the files the last autofix round "
+                "touched, as a new review in the chain — the "
+                "next round fixes what is left.")
+            self.autofix_rereview_btn.clicked.connect(
+                self._run_autofix_rereview)
+            col_lay.addWidget(self.autofix_rereview_btn)
             self.review_state_status = QLabel("")
             self.review_state_status.setObjectName("muted")
             self.review_state_status.setWordWrap(True)
@@ -8094,6 +8398,15 @@ class ReviewWindow(ModeWindow):
             if requested:
                 display += " ↻ fix requested"
                 tip_parts.append(f"Fix requested {requested}")
+            # T2-4: a finding an autofix round sent shows its
+            # round, so the owner sees what the loop already
+            # covered and what is still open.
+            sent_round = modes_mod.autofix_round_for(
+                full_text, parsed["text"])
+            if sent_round:
+                display += f" ↻ autofix round {sent_round}"
+                tip_parts.append(
+                    f"Autofix round {sent_round}")
             item = QListWidgetItem(display)
             item.setToolTip("\n".join(tip_parts))
             self.findings_list.addItem(item)
@@ -8109,6 +8422,244 @@ class ReviewWindow(ModeWindow):
         # review — unchecked, with a "requested" mark on any kind
         # already recorded in it.
         self._refresh_finishing_touches(full_text)
+        # T2-4: the Autofix button names the next round for the
+        # shown review — or the cap, when the chain is spent.
+        self._refresh_autofix(full_text)
+
+    def _refresh_autofix(self, review_text):
+        """T2-4: label the Autofix button for the shown review —
+        "Autofix" for round 1, "Autofix round N" after, and
+        "Autofix — capped" when the chain's 3 rounds are spent.
+        The button stays clickable in every state: a capped loop
+        refuses in words on the status line, never silently."""
+        if getattr(self, "autofix_btn", None) is None:
+            return
+        name = getattr(self, "_current_review_name", "")
+        nxt = modes_mod.autofix_next_round(review_text or "", name)
+        if nxt > modes_mod.AUTOFIX_MAX_ROUNDS:
+            self.autofix_btn.setText("Autofix — capped")
+        elif nxt == 1:
+            self.autofix_btn.setText("Autofix")
+        else:
+            self.autofix_btn.setText(f"Autofix round {nxt}")
+
+    def _autofix_review_text(self):
+        """T2-4: the shown review's current text, read fresh from
+        its file — the viewer may hold a stale copy after a
+        record write. Returns "" when no review is shown."""
+        review_path = getattr(self, "_current_review_path", "")
+        if not review_path:
+            return ""
+        try:
+            return Path(review_path).read_text(
+                encoding="utf-8", errors="replace")
+        except Exception:
+            return ""
+
+    def _run_autofix_round(self):
+        """T2-4: run one autofix round on the shown review — one
+        Code turn fixing the next findings (up to 5, worst
+        first, each by its Driver prompt where one is given),
+        recorded in the review under ## Autofix rounds. The
+        owner approves every write at the existing tool gate;
+        the loop never runs a round on its own. Capped at 3
+        rounds per review chain — a spent chain refuses in
+        words, and a review with nothing open says so."""
+        if getattr(self, "autofix_btn", None) is None:
+            return
+        review_path = getattr(self, "_current_review_path", "")
+        review_name = getattr(self, "_current_review_name", "")
+        current = self._autofix_review_text()
+        if not review_path or not current:
+            self.composer_status.setText(
+                "Open a review first — there's nothing to fix.")
+            return
+        nxt = modes_mod.autofix_next_round(current, review_name)
+        if nxt > modes_mod.AUTOFIX_MAX_ROUNDS:
+            self.composer_status.setText(
+                "Autofix is capped at 3 rounds for this review "
+                "chain — file a fresh review to start a new loop.")
+            return
+        body = modes_mod.section_body(current, "Findings")
+        parsed = modes_mod.parse_findings_body(body) if body else []
+        # Only findings naming a file are fixable — a Findings
+        # section that just says "Nothing to report." is one
+        # listed line with no file, and must never become a
+        # round. (autofix_next_findings skips file-less lines
+        # too; this check words the refusal for the owner.)
+        fixable = [found for found in parsed
+                   if modes_mod.finding_file(found.get("text", ""))]
+        if not fixable:
+            self.composer_status.setText(
+                "This review has no findings naming a file — "
+                "nothing to fix.")
+            return
+        sent_lines = []
+        for entry in modes_mod.autofix_rounds(current):
+            sent_lines.extend(entry.get("findings", []))
+        requested_lines = [req.get("finding", "")
+                           for req in modes_mod.fix_requests(current)]
+        # The full eligible list first (severity order, already
+        # covered findings skipped), then the round takes its
+        # first five — the rest stay open for the next round,
+        # they are not "skipped".
+        eligible = modes_mod.autofix_next_findings(
+            fixable, sent_lines, requested_lines, cap=len(fixable))
+        chosen = eligible[:modes_mod.AUTOFIX_MAX_FINDINGS_PER_ROUND]
+        already_covered = len(fixable) - len(eligible)
+        if not chosen:
+            self.composer_status.setText(
+                "Every finding in this review is already covered "
+                "— sent in an autofix round or fixed individually.")
+            return
+        # The prompt carries each finding with its Driver line
+        # (CR7) where one is given, so the fix turn works from
+        # the review's own instructions.
+        parts = []
+        for found in chosen:
+            parts.append(f"- {found['text']}")
+            if found.get("driver"):
+                parts.append(f"  Driver: {found['driver']}")
+        findings_block = "\n".join(parts)
+        prompt = (
+            f"Autofix round {nxt} for review {review_name}: fix "
+            f"these {len(chosen)} findings, one by one. For each "
+            f"finding, follow its Driver instruction where one is "
+            f"given; otherwise make the smallest change that "
+            f"resolves it. Read each finding's file first, and "
+            f"verify each fix as its Driver says — or by running "
+            f"the project's own checks when no Driver says how.\n"
+            f"{findings_block}")
+        ok, _why = self._bench_turn("Code", prompt)
+        if not ok:
+            self.composer_status.setText(
+                "The bench is not available to run the round.")
+            return
+        owner = self._owner
+        refusal = getattr(owner, "_send_refusal", None)
+        if refusal:
+            self.composer_status.setText(
+                f"Round {nxt} did not go out — {refusal}")
+            return
+        queued = bool(getattr(owner, "_send_queued", False))
+        recorded = False
+        updated = None
+        try:
+            from datetime import datetime
+            fresh = self._autofix_review_text()
+            updated = modes_mod.record_autofix_round(
+                fresh,
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                nxt, [found["text"] for found in chosen], prompt)
+            Path(review_path).write_text(updated, encoding="utf-8")
+            recorded = True
+        except Exception:
+            recorded = False
+        # Tier 2 #6: every finding the round sent counts as
+        # accepted — the turn went out, so the rate counts it
+        # the same way it counts a Fix with Driver. Best-effort:
+        # record_finding_decision never raises.
+        for finding_line in [found["text"] for found in chosen]:
+            timeline_mod.record_finding_decision(
+                getattr(self._owner, "eventlog", None), "accepted",
+                getattr(self, "_workspace", ""),
+                self._current_review_name, finding_line)
+        if updated is not None:
+            viewer = self._doc_tabs["Reviews"][1]
+            viewer.setPlainText(updated)
+            self._on_doc_shown("Reviews", Path(review_path))
+        status = (f"Autofix round {nxt} sent as a Code turn "
+                  f"({len(chosen)} findings)"
+                  if not queued else
+                  f"Autofix round {nxt} queued — it runs when "
+                  f"the current turn ends "
+                  f"({len(chosen)} findings)")
+        if already_covered > 0:
+            status += (f"; {already_covered} finding(s) already "
+                       f"covered")
+        status += (". Approve each write at the gate, then "
+                   "Re-review after autofix.")
+        if not recorded:
+            status += (" The round could not be recorded in the "
+                       "review file.")
+        self.composer_status.setText(status)
+
+    def _run_autofix_rereview(self):
+        """T2-4: re-review the files the last autofix round
+        touched — one Review turn, incremental discipline (only
+        those files), filed as the next review in the chain.
+        Refuses in words when no round is outstanding."""
+        if getattr(self, "autofix_rereview_btn", None) is None:
+            return
+        review_path = getattr(self, "_current_review_path", "")
+        review_name = getattr(self, "_current_review_name", "")
+        current = self._autofix_review_text()
+        if not review_path or not current:
+            self.composer_status.setText(
+                "Open a review first — there's nothing to "
+                "re-review.")
+            return
+        rounds = modes_mod.autofix_rounds(current)
+        outstanding = [entry for entry in rounds
+                       if not entry.get("rereview")]
+        if not outstanding:
+            self.composer_status.setText(
+                "Run an autofix round first — there's no round "
+                "waiting on a re-review.")
+            return
+        entry = outstanding[-1]
+        number = entry.get("round", 1)
+        files = modes_mod.review_files(entry.get("findings", []))
+        if not files:
+            self.composer_status.setText(
+                "The last round named no files — nothing to "
+                "re-review.")
+            return
+        stem = modes_mod.autofix_chain_stem(review_name)
+        rereview_name = f"autofix-{stem}-r{number}.md"
+        file_list = ", ".join(files)
+        prompt = (
+            f"Autofix re-review, round {number} of {review_name}: "
+            f"review ONLY these files, changed by the autofix "
+            f"round: {file_list}. Do not re-read or re-raise "
+            f"findings on unchanged files. File the report as "
+            f".forge/reviews/{rereview_name}.")
+        ok, _why = self._bench_turn("Review", prompt)
+        if not ok:
+            self.composer_status.setText(
+                "The bench is not available to run the re-review.")
+            return
+        owner = self._owner
+        refusal = getattr(owner, "_send_refusal", None)
+        if refusal:
+            self.composer_status.setText(
+                f"The re-review did not go out — {refusal}")
+            return
+        queued = bool(getattr(owner, "_send_queued", False))
+        recorded = False
+        updated = None
+        try:
+            fresh = self._autofix_review_text()
+            updated = modes_mod.record_autofix_rereview(
+                fresh, number, rereview_name)
+            Path(review_path).write_text(updated, encoding="utf-8")
+            recorded = True
+        except Exception:
+            recorded = False
+        if updated is not None:
+            viewer = self._doc_tabs["Reviews"][1]
+            viewer.setPlainText(updated)
+            self._on_doc_shown("Reviews", Path(review_path))
+        status = (f"Re-review sent as a Review turn "
+                  f"(round {number}, {len(files)} files)"
+                  if not queued else
+                  f"Re-review queued — it runs when the current "
+                  f"turn ends (round {number}, {len(files)} files)")
+        status += f". It files as {rereview_name}."
+        if not recorded:
+            status += (" The re-review could not be recorded in "
+                       "the review file.")
+        self.composer_status.setText(status)
 
     def _refresh_finishing_touches(self, review_text):
         """T2-3: reset the Finishing Touches checkboxes for the
@@ -8268,6 +8819,14 @@ class ReviewWindow(ModeWindow):
             self.composer_status.setText(
                 "The bench is not available to run the fix.")
             return
+        # Tier 2 #6: sending a finding for fixing IS accepting
+        # it — one event in the log the Turn timeline views, so
+        # the acceptance rate counts it. Best-effort: a logging
+        # failure never blocks the fix that already went out.
+        timeline_mod.record_finding_decision(
+            getattr(self._owner, "eventlog", None), "accepted",
+            getattr(self, "_workspace", ""),
+            self._current_review_name, line)
         # CR9: the fix request is recorded in the review itself,
         # under ## Fix requests — the review carries its own fix
         # history. The turn still went out even if the record
@@ -8338,6 +8897,14 @@ class ReviewWindow(ModeWindow):
             self.composer_status.setText(
                 f"Learning not saved: {exc}")
             return
+        # Tier 2 #6: teaching from a finding IS dismissing it —
+        # one event in the log the Turn timeline views, so the
+        # acceptance rate counts it. Best-effort: the learning
+        # is already saved; a logging failure changes nothing.
+        timeline_mod.record_finding_decision(
+            getattr(self._owner, "eventlog", None), "dismissed",
+            getattr(self, "_workspace", ""),
+            self._current_review_name, line)
         self.composer_status.setText(
             "Learning saved — future reviews will apply it.")
 
@@ -10382,6 +10949,18 @@ _PRIVACY_BADGE_CLOUD = (
     "padding:2px 8px;font-size:11px;font-weight:700;")
 
 
+# T5 (GUIFX task list, 2026-11-12): the Light Machine indicator
+# chip in the header gauge stack — the same amber badge idiom as
+# _PRIVACY_BADGE_LOCAL above (nav-active surface + amber text),
+# so the two header badges read as one family. TOKENS only.
+_LIGHT_MACHINE_CHIP_STYLE = (
+    f"background:{TOKENS['surface_nav_active']};"
+    f"color:{TOKENS['accent_amber']};"
+    f"border:1px solid {TOKENS['rim']};"
+    f"border-radius:{TOKENS['radius_control']};"
+    "padding:2px 8px;font-size:11px;font-weight:700;")
+
+
 class PrivacyWindow(QWidget):
     """H1 (GUIFX Research Brief #2, 2026-11-09): the privacy
     room — the pitch, proven in plain language. What never leaves
@@ -10869,12 +11448,13 @@ class ModelsWindow(QWidget):
 
     # Badge colors: Fits is quiet (muted), Tight is the amber the
     # palette already speaks in, Too large is the app's
-    # established error red — the literal RunBlock.ERROR_RED and
-    # the disconnect lamp already use. No green, per the law.
+    # established error red (TOKENS state_error — the same red
+    # RunBlock.ERROR_RED and the disconnect lamp use). No green,
+    # per the law.
     _BADGE_COLORS = {
         modelfit_mod.FITS: TOKENS["text_muted"],
         modelfit_mod.TIGHT: TOKENS["accent_amber"],
-        modelfit_mod.TOO_LARGE: "#e5534b",
+        modelfit_mod.TOO_LARGE: TOKENS["state_error"],
     }
 
     def __init__(self, owner):
@@ -13506,13 +14086,30 @@ class TimelineWindow(QWidget):
     def refresh(self):
         data = self._owner.timeline_data(self._owner.conversation_id)
         totals = data["rollups"]
+        # Tier 2 #6: the finding acceptance rate for the current
+        # project, one line in the head — decisions are
+        # historical, so it shows even when this conversation
+        # has no turns this session. No decisions reads as "",
+        # and the head stays exactly as it was.
+        acceptance = timeline_mod.acceptance_line(
+            data.get("acceptance"))
+        # Pre-send secret scan (item 6): the scan counts ride the
+        # head in BOTH branches — decisions are historical, and a
+        # conversation with no turns can still have blocked sends.
+        presend = timeline_mod.presend_line(
+            data.get("presend") or {})
         self.rows_list.clear()
         if not data["entries"]:
-            self.head.setText(
+            head = (
                 f"{data['title']} — no turns recorded for this "
                 "conversation in this session yet. Turns appear "
                 "here as they finish; the timeline is built from "
                 "the event log's own turn records.")
+            if acceptance:
+                head += f"\n{acceptance}"
+            if presend:
+                head += "\n" + presend
+            self.head.setText(head)
             self.rows_list.addItem(QListWidgetItem(
                 "Nothing recorded yet — send a message and its "
                 "turn lands here with its time and estimated "
@@ -13531,6 +14128,10 @@ class TimelineWindow(QWidget):
         if data["over"]:
             budget_line += " — OVER the soft budget (a flag only; nothing is blocked)"
         lines.append(budget_line)
+        if acceptance:
+            lines.append(acceptance)
+        if presend:
+            lines.append(presend)
         self.head.setText("\n".join(lines))
         for entry in data["entries"]:
             item = QListWidgetItem(_timeline_entry_line(entry))
@@ -14480,6 +15081,7 @@ class ForgeWindow(QMainWindow):
         self.eventlog = EventLog(APP_DIR / "logs")
         self.workspace = self.settings.get("workspace", str(Path.home() / "Projects"))
         Path(self.workspace).mkdir(parents=True, exist_ok=True)
+        self._sync_presend_scan()
         self.projects = self.settings.get("projects", [])
         self.messages = []
         self.worker = None
@@ -14685,6 +15287,13 @@ class ForgeWindow(QMainWindow):
         self._gate_queue = []
         self._gate_presenting = False
         self._gate_owner_worker = None
+        # Pre-send secret scan (2026-11-12): the decision queue —
+        # one secret dialog at a time, the mirror of the gate
+        # queue above. A second ask waits here in arrival order,
+        # and its worker stays parked on its own decision event
+        # (F8: no timeout) until it is presented.
+        self._secret_queue = []
+        self._secret_presenting = False
         # Inbox mode (VS Code 1.146, adapted — owner order
         # 2026-11-11): the triage store is app-level (the Inbox
         # spans all projects) and survives a restart; _inbox_undo
@@ -14889,10 +15498,30 @@ class ForgeWindow(QMainWindow):
         self.client = ProviderClient(
             self.settings.get("ollama_url", "http://127.0.0.1:11434"),
             config)
+        self._sync_presend_scan()
         if getattr(self, "plugin_ctx", None) is not None:
             self.plugin_ctx.config = config
             self.plugin_ctx.base_url = self.client.base_url
         return self.client
+
+    def _sync_presend_scan(self, client=None):
+        """Mirror the pre-send scan settings into a provider
+        client: the toggle (settings `scan_before_cloud_send`,
+        default ON) and the current workspace (for the
+        per-project allow-list). The facade holds the connector
+        config, not settings, so the values ride as attributes.
+        Called whenever the client is (re)built and whenever the
+        workspace changes. A client passed in is synced (the
+        Decisions client); otherwise the window's own facade.
+        The worker wrapper passes its own workspace per call,
+        which wins over this mirrored value for worker turns."""
+        if client is None:
+            client = getattr(self, "client", None)
+        if client is None:
+            return
+        client.presend_scan = bool(
+            self.settings.get("scan_before_cloud_send", True))
+        client.presend_workspace = getattr(self, "workspace", None)
 
     # ---------- Item #69: self-maintenance session ----------
 
@@ -15355,7 +15984,9 @@ class ForgeWindow(QMainWindow):
             self._provider_config(), "gemini")
         if not key:
             return None
-        return decisions_mod.DecisionsClient(key)
+        client = decisions_mod.DecisionsClient(key)
+        self._sync_presend_scan(client)
+        return client
 
     def _gofish_toggle(self):
         """GoFish rename (2026-11-12): the toggle's settings key
@@ -15607,6 +16238,13 @@ class ForgeWindow(QMainWindow):
             # the owner's switch, and the send path reads it per
             # turn, so a change takes effect on the next turn.
             settings.setdefault("shadow_checkpoints", "off")
+            # Pre-send secret scan (2026-11-12): default ON — the
+            # key lives with the settings so it is visible in
+            # settings.json; Settings → Behavior is the owner's
+            # switch, and _sync_presend_scan mirrors it into the
+            # provider facade (and the Decisions client) whenever
+            # settings save or the client is rebuilt.
+            settings.setdefault("scan_before_cloud_send", True)
             # Light Machine profile (2026-11-11): default OFF,
             # seeded so the key is visible in settings.json; every
             # consumer reads it at use time, so a hand edit or the
@@ -15711,7 +16349,7 @@ class ForgeWindow(QMainWindow):
         brand_lay.setContentsMargins(0, 0, 0, 0); brand_lay.setSpacing(8)
         brand_lay.addWidget(brand); brand_lay.addWidget(spark); brand_lay.addStretch(1)
         sl.addWidget(brand_row)
-        sub = QLabel("v2.5 · LOCAL AGENT ENVIRONMENT"); sub.setObjectName("muted"); sl.addWidget(sub)
+        sub = QLabel("v2.5 · LOCAL AGENT"); sub.setObjectName("muted"); sl.addWidget(sub)
         stamp = QLabel("B/N/B STUDIO · EST. 2026"); stamp.setObjectName("stamp"); sl.addWidget(stamp)
         sl.addSpacing(16)
         # Note 24: Projects folds as an accordion section.
@@ -15775,20 +16413,47 @@ class ForgeWindow(QMainWindow):
         self.accordions = {"projects": proj_sec, "conversations": conv_sec}
         # --- center ---
         center = QWidget(); center.setMinimumWidth(320); cl = QVBoxLayout(center); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(0)
+        self._center_pane = center
         header = QFrame(); header.setObjectName("header"); header.setFixedHeight(74)
-        hl = QHBoxLayout(header); hl.setContentsMargins(20, 8, 20, 8)
-        title = QLabel("AGENT WORKSPACE"); title.setObjectName("section"); hl.addWidget(title)
-        hl.addSpacing(18)
+        self._header_frame = header
+        # HeaderFit (GUIFX T5 follow-up, 2026-11-12): the header is
+        # RESPONSIVE. Its one-row minimum (~840 px with real gauge
+        # text) exceeds the center pane at window widths below
+        # ~1360, and Qt's over-constrained box layout then squeezes
+        # labels below their text width and overlaps the fixed-width
+        # items (Joshua's photos: "IGHT MACHINE", "d 1.00 / 4
+        # threa", "IN RAM (LO"). So the frame holds an outer layout
+        # whose single child is either the one-row layout or a
+        # two-row layout, and _sync_header_mode flips between them
+        # on the header's own resize (see the eventFilter hook).
+        # Nothing is removed in either mode — the same widgets,
+        # restacked. The title elides (never clips) when its row is
+        # starved, and the center pane's minimum is the two-row
+        # header's minimum, so the splitter never starves the
+        # center below what the header needs.
+        outer = QVBoxLayout(header); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        self._header_outer = outer
+        hl = QHBoxLayout(); hl.setContentsMargins(10, 8, 10, 8); hl.setSpacing(5)
+        self._header_single = hl
+        outer.addLayout(hl)
+        title = QLabel("AGENT WORKSPACE"); title.setObjectName("section")
+        title.setMinimumWidth(60)
+        self._header_title = title
+        self._header_title_full = "AGENT WORKSPACE"
+        hl.addWidget(title)
+        hl.addSpacing(8)
         gauge_box = QVBoxLayout(); gauge_box.setSpacing(3)
         ram_row = QHBoxLayout()
         ram_lab = QLabel("RAM"); ram_lab.setObjectName("stamp"); ram_row.addWidget(ram_lab)
-        self.ram_bar = QProgressBar(); self.ram_bar.setFixedWidth(120); self.ram_bar.setRange(0, 100)
+        # HeaderFit: the bars flex (60–120) instead of fixed 120, so
+        # the gauge stack gives back width before any label clips.
+        self.ram_bar = QProgressBar(); self.ram_bar.setMinimumWidth(60); self.ram_bar.setMaximumWidth(120); self.ram_bar.setRange(0, 100)
         ram_row.addWidget(self.ram_bar)
         self.ram_text = QLabel("—"); self.ram_text.setObjectName("muted"); ram_row.addWidget(self.ram_text)
         gauge_box.addLayout(ram_row)
         cpu_row = QHBoxLayout()
         cpu_lab = QLabel("CPU"); cpu_lab.setObjectName("stamp"); cpu_row.addWidget(cpu_lab)
-        self.cpu_bar = QProgressBar(); self.cpu_bar.setFixedWidth(120); self.cpu_bar.setRange(0, 100)
+        self.cpu_bar = QProgressBar(); self.cpu_bar.setMinimumWidth(60); self.cpu_bar.setMaximumWidth(120); self.cpu_bar.setRange(0, 100)
         cpu_row.addWidget(self.cpu_bar)
         self.cpu_text = QLabel("—"); self.cpu_text.setObjectName("muted"); cpu_row.addWidget(self.cpu_text)
         gauge_box.addLayout(cpu_row)
@@ -15804,7 +16469,26 @@ class ForgeWindow(QMainWindow):
         # Ollama's /api/ps, and cloud models don't live in this
         # PC's RAM at all.
         self.models_text = QLabel("—"); self.models_text.setObjectName("muted"); models_row.addWidget(self.models_text)
+        # T5 (GUIFX task list, 2026-11-12): the Light Machine
+        # indicator chip. The profile is otherwise invisible (a
+        # Settings checkbox only), so the gauge stack carries a
+        # chip while it is on. It sits in the MODELS row because
+        # Light Machine IS a models fact — one model in memory at
+        # a time — and when it is on, the readout beside it is
+        # short (one model at most), so the chip never crowds
+        # anything. Visible only while the flag is on; the
+        # initial state comes from settings here, and
+        # _apply_gauges owns it on the 3 s gauge pass after that.
+        self.light_machine_chip = QLabel("LIGHT MACHINE")
+        self.light_machine_chip.setStyleSheet(_LIGHT_MACHINE_CHIP_STYLE)
+        self.light_machine_chip.setToolTip(
+            "Light Machine profile is on: one model in memory at "
+            "a time. Turn it off in Agent settings.")
+        self.light_machine_chip.setVisible(
+            bool(self.settings.get("light_machine", False)))
+        models_row.addWidget(self.light_machine_chip)
         gauge_box.addLayout(models_row)
+        self._gauge_box = gauge_box
         hl.addLayout(gauge_box)
         hl.addStretch()
         loaded_box = QVBoxLayout()
@@ -15820,11 +16504,12 @@ class ForgeWindow(QMainWindow):
             "The model running your turn is the one in the dropdown.")
         self.loaded_stamp = loaded_lab
         loaded_box.addWidget(loaded_lab)
-        self.loaded_label = QLabel("none"); self.loaded_label.setStyleSheet(f"color:{TOKENS['text_base']};font-weight:700;font-size:12px;"); loaded_box.addWidget(self.loaded_label)
+        self.loaded_label = QLabel("none"); self.loaded_label.setStyleSheet(f"color:{TOKENS['text_base']};font-weight:700;font-size:12px;"); self.loaded_label.setMaximumWidth(150); loaded_box.addWidget(self.loaded_label)
         self.loaded_label.setToolTip(loaded_lab.toolTip())
         hl.addLayout(loaded_box)
-        hl.addSpacing(16)
-        self.model_combo = QComboBox(); self.model_combo.setMinimumWidth(200)
+        self._loaded_box = loaded_box
+        hl.addSpacing(8)
+        self.model_combo = QComboBox(); self.model_combo.setMinimumWidth(115)
         self.model_combo.setToolTip("Select an installed Ollama model")
         hl.addWidget(self.model_combo)
         # H1: the privacy badge — where THIS conversation's
@@ -15841,7 +16526,7 @@ class ForgeWindow(QMainWindow):
         self.model_combo.currentTextChanged.connect(
             lambda _text: self._update_privacy_badge())
         self._update_privacy_badge()
-        self.mode_combo = QComboBox(); self.mode_combo.setMinimumWidth(104)
+        self.mode_combo = QComboBox(); self.mode_combo.setMinimumWidth(80)
         self.mode_combo.addItems(["Code", "Plan", "Design", "Architect", "Review", "Ask", "Write", "Research"])
         self.mode_combo.setToolTip("Permission mode — Code: full tools · Plan: read + write the plan, no building · "
                                    "Design: mockups/prototypes (HTML/CSS/SVG/MD), no program logic · "
@@ -15867,7 +16552,20 @@ class ForgeWindow(QMainWindow):
         self.connection.setStyleSheet(f"color:{TOKENS['text_muted']};font-size:17px;")
         self.connection.setToolTip("Checking Ollama…")
         hl.addWidget(self.connection)
+        # HeaderFit: the two-row layout, built once and empty until
+        # the first narrow flip (row 1: title + gauges + loaded;
+        # row 2: the controls). _set_header_mode moves the widgets.
+        double = QVBoxLayout(); double.setContentsMargins(10, 8, 10, 8); double.setSpacing(6)
+        row1 = QHBoxLayout(); row1.setContentsMargins(0, 0, 0, 0); row1.setSpacing(5)
+        row2 = QHBoxLayout(); row2.setContentsMargins(0, 0, 0, 0); row2.setSpacing(5)
+        double.addLayout(row1); double.addLayout(row2)
+        self._header_double = double
+        self._header_row1 = row1
+        self._header_row2 = row2
+        self._header_mode = "single"
+        header.installEventFilter(self)
         cl.addWidget(header)
+        self._sync_header_mode()
         # Chat tabs (owner directive, 2026-11-08 — Antigravity-style
         # tabs): open conversations live as tabs above the chat.
         # Click switches conversation, + opens a new chat tab, ×
@@ -16516,6 +17214,203 @@ class ForgeWindow(QMainWindow):
             return
         layout_mod.write_layout(self.settings, self._layout_state())
         self.save_settings()
+
+    # ---------- HeaderFit: the responsive header ----------
+    def _header_single_min_width(self):
+        """The one-row header's TRUE minimum width, summed from the
+        live parts. Layout minimumSize()s are stale-cached (frozen
+        from construction, when the gauge readouts still said "—"),
+        so this invalidates the sub-layouts and sums the pieces
+        instead of trusting header.minimumSizeHint(). The sum counts
+        inter-item spacing the way the layout does, to within a few
+        px; the HeaderFitTests verify the outcome geometrically."""
+        self._gauge_box.invalidate()
+        self._loaded_box.invalidate()
+        gauge = self._gauge_box.totalMinimumSize().width()
+        loaded = self._loaded_box.totalMinimumSize().width()
+        badge = self.privacy_badge.minimumSizeHint().width()
+        council = self.council_check.minimumSizeHint().width()
+        conn = self.connection.minimumSizeHint().width()
+        # Margins 10+10; title at its elided minimum 60; 8 px
+        # spacers x2; model combo 115; mode combo 80; 10 gaps x 5.
+        return (20 + 60 + 8 + gauge + loaded + 8 + 115 + badge + 80
+                + council + conn + 50)
+
+    def _header_single_hint_width(self):
+        """The one-row header's SIZEHINT total: every section at its
+        preferred width (title in full, bars at 120, combos at their
+        longest item). This — not the minimum total — is the flip
+        threshold: below it Qt's box layout spreads the deficit
+        across ALL sections instead of shrinking only the flexible
+        ones, so the title gets squeezed below its text width even
+        though a minimum-total solution exists (measured 2026-11-12:
+        at a 976 px center the title was squeezed to 106 px against
+        121 px of text, while the minimum total said 841 px was
+        enough). Same stale-cache caveat as the minimum helper, so
+        the sub-layouts are invalidated first and the parts summed
+        live. ~1050 px with the snapshot gauge text."""
+        self._gauge_box.invalidate()
+        self._loaded_box.invalidate()
+        gauge = self._gauge_box.totalSizeHint().width()
+        loaded = self._loaded_box.totalSizeHint().width()
+        title = self._header_title.sizeHint().width()
+        model = self.model_combo.sizeHint().width()
+        badge = self.privacy_badge.sizeHint().width()
+        mode = self.mode_combo.sizeHint().width()
+        council = self.council_check.sizeHint().width()
+        conn = self.connection.sizeHint().width()
+        # Margins 10+10; 8 px spacers x2; 10 gaps x 5.
+        return (20 + title + 8 + gauge + loaded + 8 + model + badge
+                + mode + council + conn + 50)
+
+    def _header_double_min_width(self):
+        """The two-row header's minimum width: the wider row. Row 1
+        is title + gauges + loaded; row 2 is the controls. The
+        center pane never goes below this (see _sync_header_mode),
+        so the two-row header always fits once the flip happens."""
+        self._gauge_box.invalidate()
+        self._loaded_box.invalidate()
+        gauge = self._gauge_box.totalMinimumSize().width()
+        loaded = self._loaded_box.totalMinimumSize().width()
+        badge = self.privacy_badge.minimumSizeHint().width()
+        council = self.council_check.minimumSizeHint().width()
+        conn = self.connection.minimumSizeHint().width()
+        row1 = 20 + 60 + 8 + gauge + loaded + 20
+        row2 = 20 + 115 + badge + 80 + council + conn + 25
+        return max(row1, row2)
+
+    def _set_header_mode(self, mode):
+        """Restack the header's widgets into one row or two. The
+        widgets are the same in both modes — only their layout
+        changes. Spacers are stateless, so they are discarded and
+        recreated in order; widgets and sub-layouts move."""
+        if mode == self._header_mode:
+            return
+        for lay in (self._header_single, self._header_row1,
+                    self._header_row2):
+            while lay.count():
+                lay.takeAt(0)
+        if mode == "single":
+            s = self._header_single
+            s.addWidget(self._header_title)
+            s.addSpacing(8)
+            s.addLayout(self._gauge_box)
+            s.addStretch()
+            s.addLayout(self._loaded_box)
+            s.addSpacing(8)
+            s.addWidget(self.model_combo)
+            s.addWidget(self.privacy_badge)
+            s.addWidget(self.mode_combo)
+            s.addWidget(self.council_check)
+            s.addWidget(self.connection)
+            active = s
+            height = 74
+        else:
+            r1 = self._header_row1
+            r1.addWidget(self._header_title)
+            r1.addSpacing(8)
+            r1.addLayout(self._gauge_box)
+            r1.addStretch()
+            r1.addLayout(self._loaded_box)
+            r2 = self._header_row2
+            r2.addWidget(self.model_combo)
+            r2.addWidget(self.privacy_badge)
+            r2.addWidget(self.mode_combo)
+            r2.addWidget(self.council_check)
+            r2.addWidget(self.connection)
+            r2.addStretch()
+            active = self._header_double
+            # Height from the two-row layout's own size hint — the
+            # established 74 px stays for the one-row mode, and the
+            # two-row height is whatever the rows actually need.
+            self._header_double.invalidate()
+            height = self._header_double.totalSizeHint().height()
+        while self._header_outer.count():
+            self._header_outer.takeAt(0)
+        self._header_outer.addLayout(active)
+        self._header_frame.setFixedHeight(height)
+        self._header_mode = mode
+        self._header_outer.activate()
+
+    def _sync_header_title(self):
+        """Elide the title to the width its row can actually give it
+        (or restore the full text when it fits). The available width
+        is computed from the header width minus the OTHER sections'
+        minimums — never from the title's own width, which would
+        feed back: an elided title shrinks its sizeHint, the layout
+        then gives it only the elided width, and it could never grow
+        back. A 4 px margin covers the few px the layout may shave
+        after setText re-activates it, and when the text changes the
+        layout is activated SYNCHRONOUSLY right here: relying on the
+        posted LayoutRequest left a window (a gauge-thread refresh
+        landing just before a measurement) where the title's slot was
+        still the old width while its text was already the new one."""
+        title = self._header_title
+        full = self._header_title_full
+        width = self._header_frame.width()
+        if width <= 0:
+            if title.text() != full:
+                title.setText(full)
+            return
+        if self._header_mode == "single":
+            # The single-row minimum counts the title at 60; the
+            # title's share is everything above the other sections.
+            avail = width - self._header_single_min_width() + 60
+        else:
+            # Row 1: title + gauges + loaded, margins + gaps.
+            self._gauge_box.invalidate()
+            self._loaded_box.invalidate()
+            gauge = self._gauge_box.totalMinimumSize().width()
+            loaded = self._loaded_box.totalMinimumSize().width()
+            avail = width - (20 + 8 + gauge + loaded + 20)
+        avail = max(0, avail - 4)
+        fm = title.fontMetrics()
+        if fm.horizontalAdvance(full) > avail:
+            new_text = fm.elidedText(full, Qt.ElideRight, avail)
+        else:
+            new_text = full
+        if title.text() != new_text:
+            title.setText(new_text)
+            self._header_outer.activate()
+
+    def _sync_header_mode(self):
+        """Keep the header fitting: the center pane's floor is the
+        two-row header's minimum, and the header flips between one
+        row and two on its own width, with 15 px of hysteresis on
+        the flip back to single so gauge-text wobble (which moves
+        the threshold by ~7 px as load digits change) cannot
+        flicker the mode. 15, not 40: the flip-back threshold must
+        stay below the 1076 px center of a 1600 px window, or the
+        header could never return to one row at full width. The
+        floor is set even before the first show, but the flip waits
+        until the window is visible — during _build_ui the frame
+        carries a transient bogus width that must never trigger a
+        flip."""
+        if not hasattr(self, "_header_frame"):
+            return
+        self._center_pane.setMinimumWidth(
+            self._header_double_min_width())
+        if not self.isVisible():
+            return
+        width = self._header_frame.width()
+        if width <= 0:
+            return
+        # Single-row mode only when EVERY section gets its
+        # preferred width — the sizeHint total, not the minimum
+        # total. Below the sizeHint total Qt spreads the deficit
+        # across all sections (the title included), so the minimum
+        # total is not a safe threshold: at a 976 px center the
+        # title was squeezed to 106 px against 121 px of text.
+        # Below the threshold the header stacks and the title reads
+        # in full on row 1.
+        single_threshold = self._header_single_hint_width()
+        if self._header_mode == "single" and width < single_threshold:
+            self._set_header_mode("double")
+        elif self._header_mode == "double" and \
+                width > single_threshold + 15:
+            self._set_header_mode("single")
+        self._header_outer.activate()
+        self._sync_header_title()
 
     def _apply_layout(self):
         state = layout_mod.read_layout(self.settings)
@@ -18399,10 +19294,24 @@ class ForgeWindow(QMainWindow):
         self.cpu_bar.style().unpolish(self.cpu_bar); self.cpu_bar.style().polish(self.cpu_bar)
         self.cpu_text.setText(f"load {snap['load_1min']:.2f} / {snap['threads']} threads")
         loaded = ", ".join(short_model(m) for m in snap["ollama_loaded"]) if snap["ollama_loaded"] else "none"
-        self.loaded_label.setText(loaded)
+        # HeaderFit: the loaded label is capped at 150 px and elided
+        # (the full list stays in the MODELS readout's tooltip), so
+        # a long model list cannot push the header's minimum up.
+        self.loaded_label.setText(
+            self.loaded_label.fontMetrics().elidedText(
+                loaded, Qt.ElideRight, 150))
         mtext, mtip = models_readout(snap)
         self.models_text.setText(mtext)
         self.models_text.setToolTip(mtip)
+        # T5: the Light Machine chip rides this same 3 s gauge
+        # pass — no timer of its own. A failed snapshot (no
+        # gauge_ready emit) simply leaves the chip as it was
+        # until the next successful pass, like the other gauges.
+        self.light_machine_chip.setVisible(
+            bool(self.settings.get("light_machine", False)))
+        # HeaderFit: gauge content changed the header's minimums —
+        # re-check the responsive mode and the center floor.
+        self._sync_header_mode()
 
     # ---------- projects ----------
     def refresh_projects(self):
@@ -18478,6 +19387,7 @@ class ForgeWindow(QMainWindow):
         Path(self.workspace).mkdir(parents=True, exist_ok=True)
         proj.ensure_project(self.workspace)
         self.plugin_ctx.workspace = self.workspace
+        self._sync_presend_scan()
         # Item #50: the run surface follows the active project —
         # it rescans and retitles for the new folder (list + title
         # only; a live run is never disturbed by a refresh).
@@ -19302,6 +20212,7 @@ class ForgeWindow(QMainWindow):
             self.workspace = project
             proj.ensure_project(project)
             self.plugin_ctx.workspace = project
+            self._sync_presend_scan()
             # set_project's remaining bookkeeping, mirrored (minus
             # new_chat — loading a conversation must not wipe it): the
             # run surface follows the restored project (item #50:
@@ -19915,6 +20826,7 @@ class ForgeWindow(QMainWindow):
             if self.workspace != prev_workspace:
                 self.workspace = prev_workspace
                 self.plugin_ctx.workspace = prev_workspace
+                self._sync_presend_scan()
                 self.refresh_projects()
             if prev_cid is not None and prev_cid != self.conversation_id:
                 self.load_conversation(prev_cid)
@@ -19928,6 +20840,7 @@ class ForgeWindow(QMainWindow):
                 self.workspace = workspace
                 proj.ensure_project(workspace)
                 self.plugin_ctx.workspace = workspace
+                self._sync_presend_scan()
                 self.refresh_projects()
             self.log(f"⏰ Scheduled job firing: {job.get('name')} — if it needs approval, it will park and wait for you.")
             self.eventlog.record("scheduled_job", name=name[:60])
@@ -21083,7 +21996,7 @@ class ForgeWindow(QMainWindow):
                 self.model_combo.setCurrentIndex(idx)
             elif names:
                 self.model_combo.setCurrentIndex(0)
-        self.connection.setStyleSheet("color:#ff8c3a;font-size:17px;")
+        self.connection.setStyleSheet(f"color:{TOKENS['state_warn']};font-size:17px;")
         self.connection.setToolTip("Ollama connected")
         self.log(f"Ollama connected · {len(names)} model(s) available.")
         if not names:
@@ -21126,7 +22039,7 @@ class ForgeWindow(QMainWindow):
     def _apply_models_error(self, message):
         """refresh_models' disconnected half: red lamp, the error in
         the log, and the driver offered as the combo's lone entry."""
-        self.connection.setStyleSheet("color:#e5534b;font-size:17px;")
+        self.connection.setStyleSheet(f"color:{TOKENS['state_error']};font-size:17px;")
         self.connection.setToolTip("Ollama disconnected")
         self.log(message)
         # H4: a failed fetch empties the kept list too — the models
@@ -21432,7 +22345,20 @@ class ForgeWindow(QMainWindow):
 
     # ---------- sending / worker ----------
     def eventFilter(self, obj, event):
-        if obj is self.input and event.type() == QEvent.Type.KeyPress:
+        # HeaderFit: the header's own resize is the responsive
+        # flip's trigger — by the time it fires, the frame already
+        # has its new width, so the mode decision reads live
+        # geometry. The flip changes the header's HEIGHT, which
+        # fires this again, but the mode is already correct then,
+        # so the second pass is a no-op (no loop).
+        if obj is getattr(self, "_header_frame", None) and \
+                event.type() == QEvent.Type.Resize:
+            self._sync_header_mode()
+        # The input check is getattr-guarded: the header filter is
+        # installed during _build_ui, before self.input exists, so
+        # a header resize mid-build must not touch it.
+        if obj is getattr(self, "input", None) and \
+                event.type() == QEvent.Type.KeyPress:
             completer = getattr(self, "_mention_completer", None)
             if completer is not None and completer.popup().isVisible() and \
                     event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape,
@@ -21809,7 +22735,7 @@ class ForgeWindow(QMainWindow):
         self._refresh_attach_strip(); self._push_deck_attachments()
         self.persist_conversation()
         self.log(f"Request sent to {model}.")
-        self.agent_state.setText("●  THINKING"); self.agent_state.setStyleSheet("color:#e6c16c;font-weight:700;")
+        self.agent_state.setText("●  THINKING"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_thinking']};font-weight:700;")
         self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
         # The button sync moved to the end of the send (below):
         # the worker / fold thread only exists after _maybe_fold /
@@ -22145,6 +23071,13 @@ class ForgeWindow(QMainWindow):
         worker.status.connect(lambda st, s=stream: self._ws_status(s, st))
         worker.approval_needed.connect(
             lambda n, a, d, df, s=stream: self._ws_gate(s, n, a, d, df))
+        # Pre-send secret scan (2026-11-12): guarded like
+        # research_progress below — a worker double without the
+        # signal (test stand-ins) simply has no secret ask to
+        # route; the real AgentWorker always carries it.
+        _sd = getattr(worker, "secret_decision_needed", None)
+        if _sd is not None:
+            _sd.connect(lambda p, s=stream: self._ws_secret(s, p))
         worker.receipt.connect(lambda r, s=stream: self._ws_receipt(s, r))
         worker.turn_changes.connect(
             lambda c, s=stream: self._ws_changes(s, c))
@@ -22595,7 +23528,7 @@ class ForgeWindow(QMainWindow):
         self.render()
         self._sync_send_button()
         self.agent_state.setText("●  THINKING")
-        self.agent_state.setStyleSheet("color:#e6c16c;font-weight:700;")
+        self.agent_state.setStyleSheet(f"color:{TOKENS['state_thinking']};font-weight:700;")
         self.ember.set_mode("thinking"); self.ember_label.setText("WORKING")
         self.log(f"Resumed the running turn in '{stream['title']}'.")
         self._sync_deck_turn()
@@ -23031,6 +23964,103 @@ class ForgeWindow(QMainWindow):
                 continue
             self._present_gate(entry)
 
+    # ---------- Pre-send secret scan: the decision queue ----------
+    def _ws_secret(self, stream, payload):
+        """A worker's secret ask, routed — the mirror of _ws_gate:
+        one secret dialog at a time, a second ask waits here in
+        arrival order, and its worker stays parked on its own
+        decision event (F8: no timeout) until it is presented.
+        This is the re-entrancy guard: the dialog can never
+        stack, however many turns hit the scan at once."""
+        entry = (stream, payload)
+        if self._secret_presenting:
+            self._secret_queue.append(entry)
+            if stream is not None:
+                stream["secret"] = {"queued": True}
+                self.log(f"Secret scan in '{stream['title']}' — "
+                         "queued behind the decision on screen.")
+            self._push_deck_streams()
+            self._refresh_mission()
+            return
+        self._present_secret(entry)
+
+    def _present_secret(self, entry):
+        stream, payload = entry
+        self._secret_presenting = True
+        worker = stream["worker"] if stream else None
+        if stream is not None:
+            stream["secret"] = {"queued": False}
+        choice = "cancel"
+        reason = ""
+        try:
+            context = ""
+            if stream is not None and not self._is_stage(stream):
+                # A background decision names its conversation —
+                # the owner always knows whose send this is.
+                context = f"[Background · {stream['title']}]"
+            choice, reason = self.request_secret_decision(
+                payload, context)
+        finally:
+            self._secret_presenting = False
+            if stream is not None:
+                stream["secret"] = None
+        if choice == "allow":
+            # Item 5: one entry per match, recorded BEFORE the
+            # worker is resolved — the entries exist by the time
+            # its retry sends. The turn's workspace owns the
+            # list; the window's is the fallback. Item 6: each
+            # addition is on the record (pattern + redacted
+            # anchor + reason — never a secret value).
+            workspace = getattr(worker, "workspace", None) \
+                or self.workspace
+            project = Path(workspace).name or workspace
+            for found in payload.get("findings") or []:
+                secrets_mod.add_allowlist_entry(
+                    workspace, found.get("pattern"),
+                    found.get("line"), reason)
+                self.eventlog.record(
+                    "presend_allowlist_add",
+                    pattern=str(found.get("pattern") or ""),
+                    anchor=str(found.get("line") or ""),
+                    reason=reason, project=project)
+        if worker is not None:
+            worker.resolve_secret_decision(choice)
+        self._pump_secret_queue()
+
+    def _pump_secret_queue(self):
+        while self._secret_queue and not self._secret_presenting:
+            entry = self._secret_queue.pop(0)
+            stream, payload = entry
+            worker = stream["worker"] if stream else None
+            # An ask whose wait already ended is dropped, never
+            # presented: the owner stopped that turn (cancel()
+            # released the wait as a cancellation) and the turn
+            # moved on. A live ask's worker is still running with
+            # its decision event created and unset — the exact
+            # shape the worker leaves behind at
+            # secret_decision_needed.emit.
+            event = getattr(worker, "_secret_decision_event", None)
+            if worker is None or not worker.isRunning() \
+                    or event is None or event.is_set():
+                if stream is not None:
+                    stream["secret"] = None
+                    self.log(f"Queued secret decision in "
+                             f"'{stream['title']}' dropped — that "
+                             "turn already moved on.")
+                continue
+            self._present_secret(entry)
+
+    def request_secret_decision(self, payload, context=""):
+        """Show the secret decision dialog (modal, GUI thread) and
+        return (choice, reason): the choice is "send", "redact",
+        "allow", or "cancel", and the reason is the owner's answer
+        to the Allow prompt ("" otherwise). Window close / Esc is
+        Cancel. Desktop only in v1 — no deck card (the turn waits
+        on the human clock like any approval); see DESIGN.md."""
+        dialog = SecretScanDialog(self, payload, context=context)
+        dialog.exec()
+        return dialog.choice, getattr(dialog, "allow_reason", "")
+
     # ---------- Item #64: deck truth + mission control ----------
     def _sync_deck_turn(self):
         """The deck's turn card tells the truth about ALL streams:
@@ -23058,6 +24088,11 @@ class ForgeWindow(QMainWindow):
             if gate["queued"]:
                 return f"Gate queued — {gate['tool']}"
             return f"Parked at gate — {gate['tool']}"
+        secret = stream.get("secret")
+        if secret:
+            if secret["queued"]:
+                return "Secret decision queued"
+            return "Paused — secret scan"
         status = (stream["status_text"] or "").strip()
         return f"Running — {status}" if status else "Running"
 
@@ -23578,16 +24613,31 @@ class ForgeWindow(QMainWindow):
         event log's turn records paired with this session's marks
         (forge/timeline.py does the pairing — numbers come from
         the records alone), the rollups over exactly those
-        entries, and the soft-budget state."""
+        entries, and the soft-budget state. Plus the finding
+        acceptance stats for the current project (Tier 2 #6):
+        the same log's finding-decision records, all time —
+        decisions are historical, not session-scoped."""
         marks = self._turn_marks.get(conversation_id, [])
         records = timeline_mod.read_records(self.eventlog.directory)
         entries = timeline_mod.conversation_entries(records, marks)
         totals = timeline_mod.rollups(entries)
         budget = self._soft_token_budget()
+        acceptance = timeline_mod.acceptance_stats(
+            records, project=getattr(self, "workspace", None))
+        # Pre-send secret scan (item 6): the current project's
+        # scan counts. The log carries no conversation id on
+        # presend records, so the line counts the project on the
+        # bench — which is the conversation's project in the
+        # normal flow (loading a conversation switches the
+        # workspace to its project).
+        project = Path(self.workspace).name or self.workspace
+        presend = timeline_mod.presend_stats(records, project)
         return {"title": self._conversation_title(conversation_id),
                 "entries": entries, "rollups": totals,
                 "budget": budget,
-                "over": totals["total_tokens"] >= budget}
+                "acceptance": acceptance,
+                "over": totals["total_tokens"] >= budget,
+                "presend": presend}
 
     def _check_soft_budget(self, conversation_id):
         """The soft budget alert: when the conversation on the
@@ -24462,7 +25512,7 @@ class ForgeWindow(QMainWindow):
             self.worker = None
         QMessageBox.critical(self, "Agent error", error)
         self._sync_send_button()
-        self.agent_state.setText("●  ERROR"); self.agent_state.setStyleSheet("color:#e28b83;font-weight:700;")
+        self.agent_state.setText("●  ERROR"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_error']};font-weight:700;")
         self.ember.set_mode("cooling"); self.ember_label.setText("ERROR")
         # Item #69: a failed maintenance turn still lands in the
         # room (the note above) and its partial changes re-read.
@@ -24492,8 +25542,22 @@ class ForgeWindow(QMainWindow):
         dialog = SettingsDialog(self, self.settings)
         if dialog.exec() == QDialog.Accepted:
             new_values = dialog.values()
+            # Pre-send secret scan (item 6): the toggle flipping
+            # is on the record — a send going out un-scanned is
+            # only explainable if the flip that allowed it is
+            # logged. The value is read before the update.
+            was_scan = bool(self.settings.get(
+                "scan_before_cloud_send", True))
             self.settings.update(new_values)
             self.save_settings()
+            now_scan = bool(self.settings.get(
+                "scan_before_cloud_send", True))
+            if now_scan != was_scan:
+                self.eventlog.record(
+                    "presend_scan_enabled" if now_scan
+                    else "presend_scan_disabled",
+                    project=Path(self.workspace).name
+                    or self.workspace)
             # S5 (audit S1-21): an Ollama URL that points off this
             # PC earns ONE warning — shown after the save, never
             # blocking it: every prompt and file content goes to

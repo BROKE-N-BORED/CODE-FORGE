@@ -154,3 +154,204 @@ def rollups(entries):
             "total_tokens": prompt + evaled,
             "seconds": round(total("seconds"), 2),
             "generations": total("generations")}
+
+
+# ---------- Finding acceptance rate (Tier 2 #6) ----------
+#
+# Acceptance-rate tracking, Forge-scale: every time
+# the owner acts on a Review finding — sends it for fixing
+# (accepted) or teaches from it (dismissed) — one event lands in
+# the SAME event log the Turn timeline already views, and the
+# timeline's head shows the rate for the current project. Local
+# only, no dashboard product: one line in an existing window.
+#
+# The events are not turns, so they never enter turn_entries —
+# they are their own kinds, read by acceptance_stats. A decision
+# with no parsed severity or type still counts in the totals
+# (under "unparsed"); the rate is accepted / (accepted +
+# dismissed) and reads as None when no decision is recorded —
+# absent, never zero-filled, the timeline's standing rule.
+
+FINDING_ACCEPTED = "finding_accepted"
+FINDING_DISMISSED = "finding_dismissed"
+
+
+def record_finding_decision(eventlog, decision, project, review,
+                            finding_text):
+    """Record one finding decision in the event log — the ONE
+    place that does it, so the Fix button, the Teach button and
+    (when T2-4 lands) the autofix rounds all log the same shape.
+    `decision` is "accepted" or "dismissed"; the finding line is
+    parsed for severity/type/source/file (modes.py — the same
+    parser the room uses). A missing or broken event log is a
+    silent no-op: logging never blocks the fix or the lesson.
+    Never raises."""
+    try:
+        if eventlog is None:
+            return
+        kind = (FINDING_ACCEPTED if decision == "accepted"
+                else FINDING_DISMISSED)
+        from . import modes as modes_mod
+        parsed = modes_mod.parse_finding(finding_text or "")
+        eventlog.record(
+            kind,
+            project=str(project or ""),
+            review=str(review or ""),
+            file=modes_mod.finding_file(finding_text or ""),
+            severity=(parsed or {}).get("severity") or "",
+            type=(parsed or {}).get("type") or "",
+            source=(parsed or {}).get("source") or "",
+            finding=str(finding_text or ""))
+    except Exception:
+        return
+
+
+def acceptance_stats(records, project=None):
+    """The acceptance rate over finding-decision records:
+    {accepted, dismissed, rate, by_severity, by_type}. `project`
+    filters to one workspace (the current project); None counts
+    every decision in the log. by_severity covers the four
+    severities plus "unparsed"; by_type covers the finding types
+    seen, plus "unparsed". Each bucket is {accepted, dismissed,
+    rate} with rate None when the bucket has no decisions.
+    Never raises."""
+    stats = {"accepted": 0, "dismissed": 0, "rate": None,
+             "by_severity": {}, "by_type": {}}
+    try:
+        from . import modes as modes_mod
+        severities = list(modes_mod.FINDING_SEVERITIES)
+        types = list(modes_mod.FINDING_TYPES)
+    except Exception:
+        severities = ["Critical", "Major", "Minor", "Trivial"]
+        types = ["Bug", "Security", "Performance", "Refactor",
+                 "Nitpick"]
+    for severity in severities + ["unparsed"]:
+        stats["by_severity"][severity] = {"accepted": 0,
+                                          "dismissed": 0,
+                                          "rate": None}
+    for ftype in types + ["unparsed"]:
+        stats["by_type"][ftype] = {"accepted": 0, "dismissed": 0,
+                                   "rate": None}
+    try:
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("kind")
+            if kind not in (FINDING_ACCEPTED, FINDING_DISMISSED):
+                continue
+            if project is not None and \
+                    str(record.get("project") or "") != str(project):
+                continue
+            accepted = kind == FINDING_ACCEPTED
+            if accepted:
+                stats["accepted"] += 1
+            else:
+                stats["dismissed"] += 1
+            severity = record.get("severity") or "unparsed"
+            bucket = stats["by_severity"].get(severity)
+            if bucket is None:
+                bucket = stats["by_severity"]["unparsed"]
+            bucket["accepted" if accepted else "dismissed"] += 1
+            ftype = record.get("type") or "unparsed"
+            bucket = stats["by_type"].get(ftype)
+            if bucket is None:
+                bucket = stats["by_type"]["unparsed"]
+            bucket["accepted" if accepted else "dismissed"] += 1
+    except Exception:
+        return stats
+
+    def _rate(bucket):
+        total = bucket["accepted"] + bucket["dismissed"]
+        return bucket["accepted"] / total if total else None
+
+    stats["rate"] = _rate(stats)
+    for bucket in list(stats["by_severity"].values()) + \
+            list(stats["by_type"].values()):
+        bucket["rate"] = _rate(bucket)
+    return stats
+
+
+def acceptance_line(stats) -> str:
+    """The acceptance rate as one line for the Turn timeline's
+    head — "Findings: 12 accepted · 5 dismissed — 71% accepted
+    (Critical 3/3 · Major 5/7 · Minor 3/4 · Trivial 1/3)" — or
+    "" when no decision is recorded (nothing to show, never a
+    fake zero). Only severities with decisions appear in the
+    breakdown. Never raises."""
+    try:
+        stats = stats or {}
+        accepted = int(stats.get("accepted") or 0)
+        dismissed = int(stats.get("dismissed") or 0)
+        total = accepted + dismissed
+        if not total:
+            return ""
+        rate = stats.get("rate")
+        percent = round(rate * 100) if rate is not None else 0
+        line = (f"Findings: {accepted} accepted · {dismissed} "
+                f"dismissed — {percent}% accepted")
+        parts = []
+        for severity, bucket in (
+                stats.get("by_severity") or {}).items():
+            decided = (bucket.get("accepted") or 0) + \
+                (bucket.get("dismissed") or 0)
+            if decided:
+                parts.append(f"{severity} {bucket['accepted']}/"
+                             f"{decided}")
+        if parts:
+            line += " (" + " · ".join(parts) + ")"
+        return line
+    except Exception:
+        return ""
+
+
+def presend_stats(records, project=None):
+    """Pre-send scan counts over the log's own records: blocks,
+    and the owner's decisions after them, plus sends that went
+    out un-scanned (the toggle off). A project filter keeps the
+    counts to one project's sends — the records carry the
+    project folder name. Unknown decision values are ignored,
+    never counted."""
+    stats = {"blocked": 0, "send": 0, "redact": 0, "allow": 0,
+             "cancel": 0, "scan_off": 0, "exempted": 0}
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        if project is not None \
+                and record.get("project") != project:
+            continue
+        kind = record.get("kind")
+        if kind == "presend_blocked":
+            stats["blocked"] += 1
+        elif kind == "presend_decision":
+            decision = record.get("decision")
+            if decision in stats:
+                stats[decision] += 1
+        elif kind == "presend_scan_off":
+            stats["scan_off"] += 1
+        elif kind == "presend_allowed":
+            # "Exempted" is distinct from "allowed": allowed is
+            # the owner's Allow + send choice in the dialog, this
+            # is a finding an existing allow-list entry covered.
+            stats["exempted"] += 1
+    return stats
+
+
+def presend_line(stats):
+    """The timeline head's pre-send line, or "" when the scan has
+    nothing to say (no block, no decision, no un-scanned send).
+    Decisions are historical — the line counts the whole log,
+    like the rollups above it."""
+    if not stats:
+        return ""
+    if not (stats.get("blocked") or stats.get("send")
+            or stats.get("redact") or stats.get("allow")
+            or stats.get("cancel") or stats.get("scan_off")
+            or stats.get("exempted")):
+        return ""
+    return (f"Pre-send scan: {stats['blocked']} blocked · "
+            f"{stats['send']} sent anyway · "
+            f"{stats['redact']} redacted · "
+            f"{stats['allow']} allowed · "
+            f"{stats['exempted']} exempted · "
+            f"{stats['cancel']} cancelled · "
+            f"{stats['scan_off']} sent un-scanned")
