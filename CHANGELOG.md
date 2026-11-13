@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-13 — Security gates, plain-language errors, and interface polish
+
+- Error dialogs now say what happened in plain words, with the technical detail underneath — 19 error sites across the app, no behavior changed.
+- Browser and connector security fixes: verifying in the browser and the cloud storage binary now go through the trust gate, verification results are framed, and redirects are re-checked on every hop.
+- Focus is visible: inputs, buttons, lists, and checkboxes show a clear focus ring, and Tab moves through the Settings and Customize dialogs in order.
+- The command palette now sorts by recent and frequent use, shows match highlights, and its rows are no longer clipped.
+- Chat renders a small markdown subset (bold, inline code, fenced blocks) without disturbing streaming.
+- The ember animation timer stops when the ember is at rest and wakes on the next token, mode change, or flare.
+- Repository hygiene: .gitignore and SECURITY.md added. The leftover first-test demo folder is removed.
+
 ## 2026-11-13 — Review workflow, pre-send secret scan, and bench polish
 
 - Review window gains Autofix: findings are fixed a few at a time, one Code turn per round, with a re-review after each round — capped at 3 rounds and 5 findings per round, and the owner clicks every round. Rounds are recorded in the review file.

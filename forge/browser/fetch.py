@@ -50,11 +50,15 @@ class Page:
         }
 
 
-def fetch(url, max_chars=DEFAULT_MAX_CHARS, offset=0, timeout=20):
+def fetch(url, max_chars=DEFAULT_MAX_CHARS, offset=0, timeout=20,
+          check=None):
     """Fetch ``url`` and return a Page of clean Markdown.
 
     Only http(s) URLs are fetched; anything else is refused in plain
-    words, matching Forge's existing Browse posture.
+    words, matching Forge's existing Browse posture. ``check`` is
+    passed through to http_get: when given, every redirect hop's
+    destination is re-fenced before it is followed (S5-fix, audit
+    W3); without it, redirects follow as they always have.
     """
     scheme = urlparse(url).scheme.lower()
     if scheme not in ("http", "https"):
@@ -67,7 +71,7 @@ def fetch(url, max_chars=DEFAULT_MAX_CHARS, offset=0, timeout=20):
     if max_chars <= 0:
         raise BrowserError("max_chars must be at least 1")
 
-    final_url, headers, body = http_get(url, timeout=timeout)
+    final_url, headers, body = http_get(url, timeout=timeout, check=check)
     content_type = ""
     if headers is not None:
         content_type = (headers.get_content_type() or "").lower()

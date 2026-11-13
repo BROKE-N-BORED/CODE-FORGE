@@ -43,6 +43,26 @@ ties inside a tier:
 No tier matches -> the entry is not returned. Disabled entries are
 returned like any other (greying is the dialog's job); the query
 never hides an action the owner might be looking for.
+
+Q3 (GUIFX task list, 2026-11-12): frecency — a pick that actually
+runs is counted (record_use, persisted by the window under the
+settings key "palette_use_counts"), and filter_entries orders
+inside a tier by use-count first: most-used, then most-recent,
+then catalog order. A tier is still match quality — a count never
+promotes a worse match above a better one. With no counts and no
+recents the ranking is exactly the pre-Q3 one. The empty-query
+Recent section keeps recency membership (the same RECENT_CAP most
+recent picks) but orders by the same frecency key, so a pick the
+owner runs ten times surfaces above one run once an hour ago.
+
+Q5 (GUIFX task list, 2026-11-12): highlight_spans finds every
+query term's first occurrence in a title and returns the merged
+(start, end) spans, so the dialog can render the matched
+characters in amber bold (plain-text segment labels — rich-text
+HTML in a QListWidget row clips: QLabel's rich-text layout needs
+~3 px more than its sizeHint, and the list's item padding already
+squeezes the row; see the Q5 note on PaletteDialog._row_widget).
+Terms that appear only in keywords earn no span.
 """
 from __future__ import annotations
 
@@ -251,21 +271,88 @@ def _tier(entry, q, terms):
     return None
 
 
-def filter_entries(entries, query) -> list:
+def _use_count(counts, entry_id) -> int:
+    """How many times `entry_id` has run, per the counts dict.
+    Missing, blank, or non-numeric entries count as zero — the
+    dict is owner settings and may be hand-edited."""
+    if not isinstance(counts, dict):
+        return 0
+    try:
+        return max(0, int(counts.get(entry_id, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_use(counts, entry_id) -> dict:
+    """The use-counts dict after `entry_id` runs: its count
+    incremented by one. Pure — the window persists the returned
+    dict (settings key "palette_use_counts"), like push_recent.
+    A blank id changes nothing (beyond the copy); a non-dict
+    input starts a fresh dict."""
+    out = dict(counts) if isinstance(counts, dict) else {}
+    if entry_id:
+        out[entry_id] = _use_count(out, entry_id) + 1
+    return out
+
+
+def filter_entries(entries, query, counts=None, recents=None) -> list:
     """The entries matching `query`, best match first. An empty (or
     whitespace) query returns the full catalog in its defined
-    order."""
+    order.
+
+    Q3 frecency: inside a match tier, entries order by use-count
+    (most-used first), then by recency (earliest in `recents`
+    first; entries absent from `recents` all tie), then by
+    catalog order — so the ranking is deterministic and, with no
+    counts and no recents, exactly the pre-Q3 tier + catalog
+    order. A count never crosses a tier boundary: match quality
+    outranks frequency."""
     q = (query or "").strip().lower()
     if not q:
         return list(entries)
     terms = q.split()
+    recent_pos = {}
+    for pos, rid in enumerate(recents or []):
+        recent_pos.setdefault(rid, pos)
+    no_recent = len(recents or [])
     ranked = []
     for index, entry in enumerate(entries):
         tier = _tier(entry, q, terms)
         if tier is not None:
-            ranked.append((tier, index, entry))
-    ranked.sort(key=lambda r: (r[0], r[1]))
-    return [entry for _, _, entry in ranked]
+            ranked.append((tier, -_use_count(counts, entry.get("id")),
+                           recent_pos.get(entry.get("id"), no_recent),
+                           index, entry))
+    ranked.sort(key=lambda r: (r[0], r[1], r[2], r[3]))
+    return [entry for *_, entry in ranked]
+
+
+def highlight_spans(title, query) -> list:
+    """[(start, end)] of every query term's first occurrence in
+    `title`, merged where terms overlap and sorted by start.
+    Matching is case-insensitive; the spans index the original
+    title, so the dialog can slice it into plain-text labels.
+    Terms that appear only in keywords (not in the title) earn
+    no span, and an empty query or no title match returns []."""
+    text = str(title or "")
+    terms = (query or "").strip().lower().split()
+    if not terms:
+        return []
+    lowered = text.lower()
+    spans = []
+    for term in terms:
+        start = lowered.find(term)
+        if start >= 0:
+            spans.append((start, start + len(term)))
+    if not spans:
+        return []
+    spans.sort()
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        if start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 # ---------- G1: groups, shortcut badges, recents ----------
@@ -318,29 +405,39 @@ def push_recent(recents, entry_id, cap=RECENT_CAP) -> list:
     return out[:cap]
 
 
-def display_groups(entries, recents=None, query="") -> list:
+def display_groups(entries, recents=None, query="", counts=None) -> list:
     """What the dialog renders: [(group, [entries])] for `query`.
 
     A typed query ranks through filter_entries exactly as before
     and groups the ranked result — recents get no special
-    placement. An empty query shows the full catalog grouped,
-    except that entries named in `recents` (most recent first,
-    ids that no longer exist skipped) move up into a leading
-    "Recent" pseudo-group and are NOT repeated in their own
-    group."""
+    placement, but the frecency key (counts, then recency)
+    orders inside each tier. An empty query shows the full
+    catalog grouped, except that entries named in `recents`
+    (most recent first, ids that no longer exist skipped) move
+    up into a leading "Recent" pseudo-group and are NOT repeated
+    in their own group — and Q3 orders that section by use-count
+    first, MRU position breaking count ties, so the owner's
+    most-run recent pick sits at the top."""
     q = (query or "").strip()
-    filtered = filter_entries(entries, q)
+    filtered = filter_entries(entries, q, counts=counts, recents=recents)
     if q:
         return group_entries(filtered)
     by_id = {}
     for entry in filtered:
         by_id.setdefault(entry.get("id"), entry)
     recent_entries = []
+    recent_pos = {}
     seen = set()
-    for rid in recents or []:
+    for pos, rid in enumerate(recents or []):
         if rid in by_id and rid not in seen:
             seen.add(rid)
+            recent_pos[rid] = pos
             recent_entries.append(by_id[rid])
+    # Q3: membership is recency (the RECENT_CAP most recent
+    # picks), order is frecency — most-used first, MRU position
+    # breaking count ties.
+    recent_entries.sort(key=lambda e: (-_use_count(counts, e.get("id")),
+                                      recent_pos[e.get("id")]))
     rest = [e for e in filtered if e.get("id") not in seen]
     groups = group_entries(rest)
     if recent_entries:

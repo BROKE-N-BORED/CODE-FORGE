@@ -287,6 +287,19 @@ TOKENS = {
 # Note for the T3 port: T3's QListWidget::item:selected background
 # takes visual precedence over this selection-background-color on
 # list items; this rule is the fallback and covers the table.
+# T9+Q4 (GUIFX task list, 2026-11-12): keyboard focus was invisible
+# on every family but the inputs — the template had exactly one
+# :focus rule (inputs, border-color only), so buttons, lists, the
+# chat and the checkboxes showed nothing when Tab landed on them.
+# The :focus rules below give every focusable family a 2 px amber
+# ring in the established rim_focus token (no new token — rim_focus
+# IS the focus-ring token; a second one would be a duplicate).
+# Mechanism is border, not outline: Qt's stylesheet engine ignores
+# outline, while a 2 px border is drawn inside the widget rect, so
+# the ring costs no layout shift. The variant line exists because
+# the #id base rules beat a plain QPushButton:focus on border-color
+# (same specificity lesson as T1); #topbarBtn:checked:focus is
+# pinned separately so a checked toggle still rings amber.
 _STYLE_TEMPLATE = Template("""
 QWidget { background:$surface_base; color:$text_base; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }
 QMainWindow { background:$surface_base; }
@@ -315,7 +328,12 @@ QPushButton#navActive { text-align:left; background:$surface_nav_active; border:
 QPushButton#navActive:pressed { background:$surface_glass_bottom; }
 QPushButton#navActive:disabled { background:$surface_input; border-color:$border_input; color:$text_muted; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:$surface_input; border:1px solid $border_input; border-radius:$radius_control; padding:$padding_input; selection-background-color:$accent_primary_bottom; }
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color:$rim_focus; }
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border:2px solid $rim_focus; }
+QPushButton:focus { border:2px solid $rim_focus; }
+QPushButton#primary:focus, QPushButton#nav:focus, QPushButton#navActive:focus, QPushButton#accordion:focus, QPushButton#topbarBtn:focus, QPushButton#topbarBtn:checked:focus { border:2px solid $rim_focus; }
+QTextBrowser:focus { border:2px solid $rim_focus; }
+QListWidget:focus, QTableWidget:focus { border:2px solid $rim_focus; }
+QCheckBox:focus, QRadioButton:focus { border:2px solid $rim_focus; border-radius:$radius_control; }
 QTextBrowser { background:$surface_chat; border:1px solid $rim_chat; border-radius:$radius_card; padding:$padding_chat; selection-background-color:$accent_primary_bottom; }
 QComboBox QAbstractItemView { background:$surface_combo_view; selection-background-color:$accent_primary_bottom; }
 QListWidget, QTableWidget { selection-background-color:$accent_primary_bottom; }
@@ -620,6 +638,16 @@ class EmberWidget(QWidget):
         self._rng = (self._rng * 1103515245 + 12345) % (2 ** 31)
         return self._rng / (2 ** 31)
 
+    def _wake(self):
+        """T12: a wake path exits the at-rest state — restart the
+        50 ms timer if it stopped at rest, and repaint at once so
+        the new state shows immediately (the Audit B15 repaint).
+        Restarting when already at rest costs one tick that stops
+        again at once; never restarting would strand a live ember."""
+        if not self.timer.isActive():
+            self.timer.start(50)
+        self.update()
+
     def token_tick(self):
         now = time.time()
         self._token_times.append(now)
@@ -636,7 +664,8 @@ class EmberWidget(QWidget):
             del self._token_times[:cut]
         # Audit B15 wake path: repaint at once instead of up to a tick
         # later (the duty-cycle skip below may be holding the brush).
-        self.update()
+        # T12: restart the timer too, if it stopped at rest.
+        self._wake()
 
     def set_mode(self, mode: str):
         self.mode = mode
@@ -648,12 +677,14 @@ class EmberWidget(QWidget):
             self._smoke_ticks = 0
         # Audit B15 wake path: a mode change exits the at-rest state;
         # repaint now so the new state shows immediately.
-        self.update()
+        # T12: restart the timer too, if it stopped at rest.
+        self._wake()
 
     def flare(self):
         self.heat = 1.0
         # Audit B15 wake path: heat exits the at-rest state.
-        self.update()
+        # T12: restart the timer too, if it stopped at rest.
+        self._wake()
 
     def _at_rest(self) -> bool:
         """Audit B15 (duty cycle): True when nothing on the bench can
@@ -682,7 +713,10 @@ class EmberWidget(QWidget):
         # Audit B15: a cold idle bench is a still picture. Skip the
         # 20 fps sim/repaint until a wake path (set_mode, flare,
         # token_tick) changes the state out from under the skip.
+        # T12: the timer itself stops at rest too — no more 20 fps
+        # no-op ticks. A wake path restarts it (see _wake).
         if self._at_rest():
+            self.timer.stop()
             return
         now = time.time()
         self._token_times = [t for t in self._token_times if now - t < 2.5]
@@ -1815,6 +1849,9 @@ class CustomizeDialog(QDialog):
         # Secrets vault (GUIFX V1): per-field stored-state labels and
         # the set of secret keys marked for clearing on Save.
         self._secret_status = {}
+        # T9: the Clear buttons, kept so the tab-order chain at the
+        # end of __init__ can place each one after its field.
+        self._secret_clear_btns = {}
         self._clear_secrets = set()
         # S2: secret fields whose vault write/delete FAILED on Save —
         # reported to the owner, never swallowed (was a bare
@@ -2154,6 +2191,63 @@ class CustomizeDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         lay_root.addWidget(buttons)
+        # T9 (GUIFX task list, 2026-11-12): Tab order follows the
+        # VISUAL order — the tab bar, then each tab's controls
+        # top-to-bottom in tab order (Skills, Plugins, Connectors,
+        # Tools, Providers, Permissions), then the House button,
+        # then Save, Cancel. The construction order happens to
+        # match the visual order here, so this chain PINS it
+        # against future construction-order drift rather than
+        # fixing a jump (the Settings dialog is the one that
+        # jumps). Qt skips the hidden pages' widgets while
+        # tabbing, so one linear chain serves every page. The
+        # first element is the tab bar itself — it is the
+        # focusable widget, not the QTabWidget.
+        _chain = [tabs.tabBar()]
+        for _s in skills:
+            _chain.append(self._skill_boxes[_s.name])
+            _chain.append(self._skill_edit_btns[_s.name])
+        _chain += [self._new_skill_btn, self._skribe_box,
+                   self._decisions_box, self._gofish_box,
+                   self._save_skill_box]
+        for _p in plugins:
+            if _p.kind != "plugin":
+                continue
+            _chain.append(self._plugin_boxes[_p.pid])
+            _chain.append(self._plugin_edit_btns[_p.pid])
+        _chain.append(self._new_plugin_btn)
+        for _p in plugins:
+            if _p.kind != "connector":
+                continue
+            _chain.append(self._plugin_boxes[_p.pid])
+            if _p.pid in self.TOKEN_KEYS:
+                _key = self.TOKEN_KEYS[_p.pid]
+                _chain.append(self._token_edits[_key])
+                _chain.append(self._secret_clear_btns[_key])
+        for _name, _group in self._tool_rows:
+            _chain.append(self._tool_boxes[_name])
+        _chain += [self.provider_groq_enabled_box,
+                   self.provider_groq_key_edit,
+                   self._secret_clear_btns["groq_api_key"],
+                   self.maintenance_groq_model_edit,
+                   self.provider_gemini_enabled_box,
+                   self.provider_gemini_key_edit,
+                   self._secret_clear_btns["gemini_api_key"],
+                   self.maintenance_gemini_model_edit,
+                   self.provider_exaone_enabled_box,
+                   self.provider_exaone_key_edit,
+                   self._secret_clear_btns["exaone_api_key"],
+                   self.maintenance_exaone_model_edit,
+                   self.sudo_password_edit,
+                   self._secret_clear_btns["sudo_password"],
+                   self.provider_registry_table,
+                   self.provider_registry_add_btn,
+                   self.provider_registry_remove_btn,
+                   self._rules_list, remove_btn, self._house_btn,
+                   buttons.button(QDialogButtonBox.Save),
+                   buttons.button(QDialogButtonBox.Cancel)]
+        for _first, _second in zip(_chain, _chain[1:]):
+            QWidget.setTabOrder(_first, _second)
 
     def _house_label_text(self):
         if not self._local_items:
@@ -2178,7 +2272,9 @@ class CustomizeDialog(QDialog):
         try:
             report = self._on_house()
         except Exception as exc:
-            QMessageBox.critical(self, "Housing failed", str(exc))
+            show_error_dialog(
+                self, "Housing failed", exc,
+                "Moving the extensions to the shared folders")
             return
         self._local_items = []
         self._house_btn.setEnabled(False)
@@ -2323,6 +2419,7 @@ class CustomizeDialog(QDialog):
         status.setObjectName("muted")
         self._secret_status[key] = status
         clear_btn = QPushButton("Clear")
+        self._secret_clear_btns[key] = clear_btn
         clear_btn.setToolTip("Remove this stored secret from the "
                              "vault when you save")
         clear_btn.clicked.connect(
@@ -3084,6 +3181,38 @@ class SettingsDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        # T9 (GUIFX task list, 2026-11-12): Tab order follows the
+        # VISUAL order — the tab bar, then each tab's fields
+        # top-to-bottom in tab order (Model, Prompt, Seats &
+        # limits, Behavior, Voice), then Save, Cancel. The
+        # construction order interleaves tabs (the prompt field is
+        # built second, the mic before the seat models), so the
+        # default chain jumps between tabs: Tab from the Ollama
+        # URL used to land on the Prompt tab's editor instead of
+        # Temperature. Qt skips the hidden pages' widgets while
+        # tabbing, so one linear chain serves every page. The
+        # first element is the tab bar itself — it is the
+        # focusable widget, not the QTabWidget.
+        _chain = [self.tabs.tabBar(), self.url, self.temperature,
+                  self.max_tokens, self.context, self.num_thread,
+                  self.min_p, self.prompt, self.bench_max_cycles,
+                  self.tester_max_cycles, self.test_cadence_files,
+                  self.test_cadence_lines,
+                  self.tool_result_digest_chars,
+                  self.max_parallel_turns, self.soft_token_budget,
+                  self.tester, self.reviewer, self.watch,
+                  self.roster, self.council, self.auto_summarize,
+                  self.fold_style, self.auto_snapshot,
+                  self.contained_run, self.contained_docker,
+                  self.contained_docker_image,
+                  self.research_web_engine, self.light_machine,
+                  self.watch_project_files, self.review_profile,
+                  self.design_shell_path, self.forge_browser_engine,
+                  self.density, self.mic,
+                  buttons.button(QDialogButtonBox.Save),
+                  buttons.button(QDialogButtonBox.Cancel)]
+        for _first, _second in zip(_chain, _chain[1:]):
+            QWidget.setTabOrder(_first, _second)
 
     def _open_allowlist(self):
         """Pre-send secret scan (item 5): the current project's
@@ -4550,7 +4679,8 @@ class SnapshotsDialog(QDialog):
         try:
             self.engine.init_repo(self.workspace, self.git_path)
         except Exception as exc:
-            QMessageBox.critical(self, "Snapshots", str(exc))
+            show_error_dialog(self, "Snapshots", exc,
+                              "Starting snapshot tracking")
             return
         self._note = "Tracking is on. Take the first snapshot whenever you're ready."
         self.refresh()
@@ -4562,7 +4692,9 @@ class SnapshotsDialog(QDialog):
         try:
             warnings = self.engine.preflight(self.workspace, self.git_path)
         except Exception as exc:
-            QMessageBox.critical(self, "Snapshot error", str(exc))
+            show_error_dialog(
+                self, "Snapshot error", exc,
+                "Checking the project before the first snapshot")
             return
         if warnings:
             answer = QMessageBox.question(
@@ -4578,7 +4710,8 @@ class SnapshotsDialog(QDialog):
             result = self.engine.take_snapshot(
                 self.workspace, self.label_edit.text(), self.git_path)
         except Exception as exc:
-            QMessageBox.critical(self, "Snapshot error", str(exc))
+            show_error_dialog(self, "Snapshot error", exc,
+                              "Taking the snapshot")
             return
         self.label_edit.clear()
         if result.get("created"):
@@ -4607,7 +4740,8 @@ class SnapshotsDialog(QDialog):
             result = self.engine.restore_snapshot(
                 self.workspace, snap["id"], self.git_path)
         except Exception as exc:
-            QMessageBox.critical(self, "Restore error", str(exc))
+            show_error_dialog(self, "Restore error", exc,
+                              "Restoring the snapshot")
             return
         if result.get("restored"):
             self._note = (f"Restored “{snap['label']}”. The safety snapshot "
@@ -4751,7 +4885,8 @@ class CheckpointsDialog(QDialog):
             self.engine.restore_checkpoint(
                 self.app_dir, self.workspace, entry["id"], self.git_path)
         except Exception as exc:
-            QMessageBox.critical(self, "Restore error", str(exc))
+            show_error_dialog(self, "Restore error", exc,
+                              "Restoring the checkpoint")
             return
         self._note = (f"Restored “{entry['label']}”. The safety checkpoint "
                       "at the top of the list is how things were just before.")
@@ -5127,15 +5262,25 @@ class PaletteDialog(QDialog):
     showing the entry's hint ONLY when the hint is a real
     shortcut (palette_mod.is_shortcut_hint); category-word hints
     earn no badge. The dialog is 640 wide and sits top-anchored
-    against the parent window (~15% down from its top)."""
+    against the parent window (~15% down from its top).
+
+    Q3 + Q5 + Q6 (GUIFX task list, 2026-11-12): the dialog also
+    takes the owner's use-counts (settings key
+    "palette_use_counts") and ranks by frecency inside each
+    match tier; a typed query highlights its matched characters
+    in each row's title (amber bold, TOKENS["accent_amber"]); and
+    a footer line under the list states the two keys that matter
+    ("Enter to run · Esc to close")."""
 
     WIDTH = 640
 
-    def __init__(self, parent, entries, on_run, recents=None):
+    def __init__(self, parent, entries, on_run, recents=None,
+                 counts=None):
         super().__init__(parent)
         self._entries = list(entries)
         self._on_run = on_run
         self._recents = list(recents or [])
+        self._counts = dict(counts) if isinstance(counts, dict) else {}
         self._shown = []
         self._row_entries = []
         self.chosen_id = None
@@ -5149,9 +5294,29 @@ class PaletteDialog(QDialog):
         self.filter_edit.textChanged.connect(self._refilter)
         lay.addWidget(self.filter_edit)
         self.list = QListWidget()
+        # Q5 fix-in-place (2026-11-12): T3's global rule
+        # QListWidget::item { padding:4px 8px; } insets every
+        # item widget 4 px top and bottom, so the palette's rows
+        # rendered with their 18 px labels squeezed to 10 px —
+        # every row's text clipped since the T3 port (probed
+        # offscreen: 10-11 px of visible glyphs on plain rows).
+        # The palette's rows are custom widgets with their own
+        # margins, so the item padding buys nothing here — zero
+        # it on this list only; selection/hover still come from
+        # the global rules.
+        self.list.setStyleSheet("QListWidget::item { padding:0px; }")
         self.list.itemClicked.connect(lambda item: self._run_current())
         self.list.itemActivated.connect(lambda item: self._run_current())
         lay.addWidget(self.list, 1)
+        # Q6: footer hints — the two keys that matter, in muted
+        # text under the list, so a first-time owner never has to
+        # guess. Plain text, existing palette styling.
+        footer = QLabel("Enter to run · Esc to close")
+        footer.setObjectName("palette_footer")
+        footer.setStyleSheet(
+            f"color:{TOKENS['text_muted']}; font-size:11px; "
+            "padding:4px 2px 0px;")
+        lay.addWidget(footer)
         self.filter_edit.installEventFilter(self)
         self._refilter()
         self.filter_edit.setFocus()
@@ -5178,7 +5343,7 @@ class PaletteDialog(QDialog):
             "font-weight:700; letter-spacing:1.6px; padding:4px 2px;")
         return label
 
-    def _row_widget(self, entry):
+    def _row_widget(self, entry, query=""):
         # Mouse-transparent throughout: the row widget is paint
         # only, so clicks land on the list item exactly as they
         # did when the row was a plain text item.
@@ -5187,11 +5352,42 @@ class PaletteDialog(QDialog):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(8, 3, 8, 3)
         lay.setSpacing(8)
-        title = QLabel(entry["title"])
-        title.setObjectName("palette_title")
+        # Q5: the title renders as plain-text segment labels in
+        # a zero-spacing strip — matched spans amber bold
+        # (TOKENS["accent_amber"]), the rest plain. Segments,
+        # not rich text: a QLabel carrying HTML needs ~3 px more
+        # height than its sizeHint (probed offscreen 2026-11-12),
+        # and a rich title clipped to its top half inside a list
+        # row. Plain segments paint exactly within font height
+        # on any font, and a title with & or < needs no escaping.
+        # The list item's own text stays the plain title either
+        # way — the highlight is paint only.
+        title = QWidget()
         title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        if not entry.get("enabled", True):
-            title.setStyleSheet(f"color:{TOKENS['text_muted']};")
+        title_lay = QHBoxLayout(title)
+        title_lay.setContentsMargins(0, 0, 0, 0)
+        title_lay.setSpacing(0)
+        text = entry["title"]
+        spans = (palette_mod.highlight_spans(text, query)
+                 if (query or "").strip() else [])
+        muted = not entry.get("enabled", True)
+        pos = 0
+        for start, end in spans + [(len(text), len(text))]:
+            if start > pos:
+                seg = QLabel(text[pos:start])
+                seg.setObjectName("palette_title")
+                seg.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                if muted:
+                    seg.setStyleSheet(f"color:{TOKENS['text_muted']};")
+                title_lay.addWidget(seg)
+            if end > start:
+                seg = QLabel(text[start:end])
+                seg.setObjectName("palette_title_match")
+                seg.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                seg.setStyleSheet(
+                    f"color:{TOKENS['accent_amber']}; font-weight:700;")
+                title_lay.addWidget(seg)
+            pos = end
         lay.addWidget(title)
         lay.addStretch()
         hint = entry.get("hint", "")
@@ -5210,12 +5406,14 @@ class PaletteDialog(QDialog):
 
     def _refilter(self):
         groups = palette_mod.display_groups(
-            self._entries, self._recents, self.filter_edit.text())
+            self._entries, self._recents, self.filter_edit.text(),
+            counts=self._counts)
         self._shown = [entry for _group, gentries in groups
                        for entry in gentries]
         self._row_entries = []
         self.list.clear()
         first_enabled = -1
+        query = self.filter_edit.text()
         for group, gentries in groups:
             header = QListWidgetItem(group)
             header.setData(Qt.UserRole, None)
@@ -5231,7 +5429,7 @@ class PaletteDialog(QDialog):
                 if not entry.get("enabled", True):
                     item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
                 self.list.addItem(item)
-                widget = self._row_widget(entry)
+                widget = self._row_widget(entry, query)
                 item.setSizeHint(widget.sizeHint())
                 self.list.setItemWidget(item, widget)
                 self._row_entries.append(entry)
@@ -10931,6 +11129,111 @@ def app_dir_size(path) -> int:
     return total
 
 
+# T6 (GUIFX task list, 2026-11-12): error dialogs used to show raw
+# exception text — str(exc) straight into the dialog. One helper now
+# writes every error dialog the way START_TIMEOUT_MESSAGE does in
+# forge/ollama_client.py: a plain-language line the owner can act on
+# first, the raw exception kept as the detail underneath — never lost,
+# never leading. Every QMessageBox.critical/warning site that used to
+# show a raw exception routes through show_error_dialog below. The
+# dialogs still go out through the static QMessageBox.critical/warning
+# calls, so existing tests that mock those statics still intercept
+# the dialog.
+_ERROR_DETAIL_LIMIT = 2000
+
+# Plain cause sentences, keyed by what the failure IS — type first
+# for real exceptions, then text markers for the string-carried ones
+# (worker failed(why) signals arrive as bare strings). No jargon, no
+# exception class names, no tracebacks in any of them.
+_ERROR_CAUSES = (
+    (("connection refused", "failed to connect", "connection reset",
+      "connection aborted", "name or service not known",
+      "temporary failure in name resolution", "network is unreachable",
+      "could not connect"),
+     "The Forge couldn't reach the service it needed — check that "
+     "it's running and try again."),
+    (("timed out", "timeout", "timed-out"),
+     "It took too long and timed out — try again."),
+    (("no such file", "not found", "no such directory"),
+     "A file it needed is missing."),
+    (("permission denied", "operation not permitted"),
+     "Permission was denied — the Forge can't read or write that file."),
+    (("no space left", "disk full"),
+     "The disk is full — free some space and try again."),
+    (("is a directory", "not a directory"),
+     "A file and a folder got mixed up — that path isn't what the "
+     "Forge expected."),
+    (("invalid json", "expecting value", "unterminated string",
+      "not a valid json"),
+     "Something came back in a shape the Forge didn't expect."),
+)
+_ERROR_CAUSE_GENERIC = (
+    "Something unexpected went wrong — the technical detail is below.")
+
+
+def _error_cause_text(exc) -> str:
+    """The plain cause sentence for an exception or error string —
+    type first, then text markers, then the generic line."""
+    if isinstance(exc, ConnectionError):
+        return _ERROR_CAUSES[0][1]
+    if isinstance(exc, TimeoutError):
+        return _ERROR_CAUSES[1][1]
+    if isinstance(exc, FileNotFoundError):
+        return _ERROR_CAUSES[2][1]
+    if isinstance(exc, PermissionError):
+        return _ERROR_CAUSES[3][1]
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 28:
+        return _ERROR_CAUSES[4][1]
+    if isinstance(exc, (IsADirectoryError, NotADirectoryError)):
+        return _ERROR_CAUSES[5][1]
+    if isinstance(exc, ValueError):
+        return _ERROR_CAUSES[6][1]
+    low = str(exc or "").lower()
+    for markers, sentence in _ERROR_CAUSES:
+        if any(marker in low for marker in markers):
+            return sentence
+    return _ERROR_CAUSE_GENERIC
+
+
+def humanize_error(exc, context):
+    """Return (plain, detail) for an exception or error string.
+
+    *plain* is one plain-language line: what was being attempted
+    (*context*, a gerund phrase like "Taking the snapshot") plus the
+    cause in plain words. It never contains a traceback, a file path
+    from one, or a raw exception class name. *detail* is the raw
+    exception text (class name + message for real exceptions, the
+    string as-is otherwise), capped so a huge traceback cannot blow
+    the dialog up — the full text stays in the session log, where
+    the call sites already log it.
+    """
+    if isinstance(exc, BaseException):
+        detail = f"{type(exc).__name__}: {exc}"
+    else:
+        detail = str(exc or "")
+    if len(detail) > _ERROR_DETAIL_LIMIT:
+        detail = detail[:_ERROR_DETAIL_LIMIT] + "… (detail truncated)"
+    plain = f"{context} didn't work. {_error_cause_text(exc)}"
+    return plain, detail
+
+
+def show_error_dialog(parent, title, exc, context, note=None,
+                      warning=False):
+    """Show the humanized error dialog for *exc*: the plain line
+    first, the raw detail underneath. *note* is an optional extra
+    plain sentence appended to the plain line (e.g. "Nothing was
+    promoted."). Severity follows the site it replaces — critical
+    by default, warning when the old dialog was a warning."""
+    plain, detail = humanize_error(exc, context)
+    if note:
+        plain = f"{plain} {note}"
+    text = plain if not detail else f"{plain}\n\nDetails: {detail}"
+    if warning:
+        QMessageBox.warning(parent, title, text)
+    else:
+        QMessageBox.critical(parent, title, text)
+
+
 # The per-conversation badge in the main window's header (H1):
 # amber-tinted for a local model, a neutral panel pill for a cloud
 # one. TOKENS only — the amber tint is the nav-active surface the
@@ -12522,7 +12825,8 @@ class MaintenanceWindow(QWidget):
                 {"models_used": [model] if model else [],
                  "tests_passed": True, "base_version": APP_VERSION})
         except Exception as exc:
-            QMessageBox.critical(self, "Build candidate update", str(exc))
+            show_error_dialog(self, "Build candidate update", exc,
+                              "Building the update candidate")
             return None
         self.candidate_path = str(zip_path)
         self.candidate_manifest = manifest
@@ -13445,7 +13749,9 @@ class MissionControlWindow(QWidget):
             payloads, dlg.project_combo.currentText(),
             dlg.model_combo.currentText())
         if error:
-            QMessageBox.warning(self, "Parallel job", error)
+            show_error_dialog(self, "Parallel job", error,
+                              "Starting those parallel jobs",
+                              warning=True)
         if started:
             self.refresh()
 
@@ -15020,6 +15326,35 @@ class ConverterWindow(QWidget):
         self._owner.log(receipt)
 
 
+# T10 (finding A6): the chat markdown subset — fenced code blocks,
+# **bold**, `inline code`. The mono family is the one QLabel#stamp
+# already uses in the stylesheet; the code backgrounds reuse TOKENS
+# (surface_input for fenced blocks, surface_nav_active for inline
+# code) — no new token.
+_CHAT_MONO_FONT = "'DejaVu Sans Mono',monospace"
+_CHAT_FENCE_RE = re.compile(r"^\s*```")
+_CHAT_CODE_RE = re.compile(r"`([^`]+)`")
+_CHAT_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+
+
+def _chat_inline_html(line):
+    """Bold + inline code on one already-escaped line. Inline code
+    is matched first so ** inside backticks stays literal; bold
+    never spans a code span (a subset limit — a ** pair split by a
+    backtick span simply doesn't bold)."""
+    parts = _CHAT_CODE_RE.split(line)
+    out = []
+    for k, part in enumerate(parts):
+        if k % 2 == 1:
+            out.append(
+                f'<span style="font-family:{_CHAT_MONO_FONT};'
+                f'background-color:{TOKENS["surface_nav_active"]}">'
+                f"{part}</span>")
+        else:
+            out.append(_CHAT_BOLD_RE.sub(r"<b>\1</b>", part))
+    return "".join(out)
+
+
 class ForgeWindow(QMainWindow):
     gauge_ready = Signal(dict)
     resident_ready = Signal(object)
@@ -15632,8 +15967,8 @@ class ForgeWindow(QMainWindow):
             worktree = self_maint_mod.prepare_work_copy(ROOT_DIR, APP_DIR)
         except Exception as exc:
             self.log(f"Maintenance work copy failed: {exc}")
-            QMessageBox.critical(self, "Forge maintenance",
-                                 f"Could not prepare the work copy:\n{exc}")
+            show_error_dialog(self, "Forge maintenance", exc,
+                              "Preparing the maintenance work copy")
             return False
         self._self_maintenance_prior = prior
         self._self_maintenance_active = True
@@ -15915,7 +16250,8 @@ class ForgeWindow(QMainWindow):
                     APP_DIR / "connectors.json",
                     json.dumps(file_config, indent=2), encoding="utf-8")
             except Exception as exc:
-                QMessageBox.critical(self, "Connector config", str(exc))
+                show_error_dialog(self, "Connector config", exc,
+                                  "Saving the connector settings")
             # S2 no-plaintext-left assertion (audit S1-01/13): check
             # the file that actually landed on disk, plus any vault
             # failures the dialog collected on Save.
@@ -19200,10 +19536,16 @@ class ForgeWindow(QMainWindow):
         first) for its Recent section, and a pick that actually
         runs is pushed onto that list and saved through the same
         settings path every other preference uses — no separate
-        store."""
+        store. Q3 (2026-11-12): the dialog also gets the owner's
+        use-counts (settings key "palette_use_counts", id ->
+        times run) for frecency ranking, and a pick that runs
+        increments its count through the same path."""
         entries, bindings = self.palette_actions()
         recents = [r for r in self.settings.get("palette_recents", [])
                    if isinstance(r, str)]
+        counts = self.settings.get("palette_use_counts", {})
+        if not isinstance(counts, dict):
+            counts = {}
 
         def dispatch(entry_id):
             fn = bindings.get(entry_id)
@@ -19212,9 +19554,12 @@ class ForgeWindow(QMainWindow):
             fn()
             self.settings["palette_recents"] = palette_mod.push_recent(
                 self.settings.get("palette_recents", []), entry_id)
+            self.settings["palette_use_counts"] = palette_mod.record_use(
+                self.settings.get("palette_use_counts", {}), entry_id)
             self.save_settings()
 
-        PaletteDialog(self, entries, dispatch, recents=recents).exec()
+        PaletteDialog(self, entries, dispatch, recents=recents,
+                      counts=counts).exec()
 
     # ---------- panels / log ----------
     def _refresh_panels(self):
@@ -19251,7 +19596,8 @@ class ForgeWindow(QMainWindow):
             self.log(f"Session summary exported → {out}")
             self.receipt_bar.setText(f"🧾  SHELL RECEIPT · export → {out.name} · {datetime.now().strftime('%H:%M:%S')}")
         except Exception as exc:
-            QMessageBox.critical(self, "Export error", str(exc))
+            show_error_dialog(self, "Export error", exc,
+                              "Exporting the session summary")
 
     def refresh_gauges(self):
         self._deck_sync()
@@ -19451,7 +19797,8 @@ class ForgeWindow(QMainWindow):
 
         def _failed(why):
             self._copy_thread = None
-            QMessageBox.critical(self, "Clone error", why)
+            show_error_dialog(self, "Clone error", why,
+                              "Copying the project into the dev clone")
 
         thread.done.connect(_done)
         thread.failed.connect(_failed)
@@ -19477,7 +19824,8 @@ class ForgeWindow(QMainWindow):
 
         def _failed(why):
             self._copy_thread = None
-            QMessageBox.critical(self, "Promote error", why)
+            show_error_dialog(self, "Promote error", why,
+                              "Copying the dev clone over the live project")
 
         thread.done.connect(_done)
         thread.failed.connect(_failed)
@@ -19514,8 +19862,10 @@ class ForgeWindow(QMainWindow):
             # diff can overwrite the live project wrongly; abort
             # and say so instead.
             self.log(f"Promote: the dev/live comparison failed ({exc}) — nothing was promoted.")
-            QMessageBox.critical(self, "Promote",
-                                 f"The comparison between the dev clone and the live project failed:\n{exc}\n\nNothing was promoted.")
+            show_error_dialog(
+                self, "Promote", exc,
+                "Comparing the dev clone with the live project",
+                note="Nothing was promoted.")
             return
         listing = "\n".join(changed[:30]) or "(no differing files found)"
         box = QMessageBox(self)
@@ -19728,7 +20078,7 @@ class ForgeWindow(QMainWindow):
                 raw = m.get("content") or ""
                 if raw.startswith(context_mod.SUMMARY_PREFIX):
                     raw = raw[len(context_mod.SUMMARY_PREFIX):]
-                body = raw.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+                body = self._chat_body_html(raw)
                 if not body:
                     continue
                 visible += 1
@@ -19743,7 +20093,7 @@ class ForgeWindow(QMainWindow):
             role = m.get("role")
             if role not in ("user", "assistant"):
                 continue
-            body = (m.get("content") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+            body = self._chat_body_html(m.get("content"))
             if not body:
                 continue
             visible += 1
@@ -19793,6 +20143,64 @@ class ForgeWindow(QMainWindow):
             bar.setValue(min(place, bar.maximum()))
 
     @staticmethod
+    def _chat_body_html(text):
+        """One message body's HTML: escape, then the markdown subset.
+
+        T10 (finding A6): the chat rendered escaped text + <br>
+        only. The subset is fenced code blocks (```), **bold**, and
+        `inline code` — nothing else: no headings, lists, links,
+        images, tables. Escape runs FIRST and the transforms run on
+        the escaped text, so no raw HTML can ever reach the chat
+        surface; the only tags the transforms insert are our own
+        <b> and <span>.
+
+        Anchor discipline (ChatGlitchRegressionTests pins the
+        three-block tail): a fenced block renders as an INLINE span,
+        not a <pre> — a <pre> would add document blocks and move the
+        tail header off the third-to-last block, so the streaming
+        anchor would never establish and every tick would fall back
+        to a full render. A span keeps the body one block; newlines
+        inside it are <br>, exactly as before.
+
+        Mid-stream safety: a fence with no closing line yet renders
+        as plain escaped text (the ``` line stays visible,
+        literally), and unclosed ** or ` never match, so a partial
+        fence or bold mid-stream is plain text — never an exception,
+        never a broken anchor. Inline transforms run per line, so
+        bold never spans a line break.
+        """
+        escaped = (text or "").replace("&", "&amp;").replace(
+            "<", "&lt;").replace(">", "&gt;")
+        lines = escaped.split("\n")
+        out = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if _CHAT_FENCE_RE.match(line):
+                # Closing fence? Only a closed fence renders as
+                # code; an unclosed one (mid-stream) falls through
+                # to the plain-text path below.
+                close = None
+                for j in range(i + 1, len(lines)):
+                    if _CHAT_FENCE_RE.match(lines[j]):
+                        close = j
+                        break
+                if close is None:
+                    out.append(_chat_inline_html(line))
+                    i += 1
+                    continue
+                code = "<br>".join(lines[i + 1:close])
+                out.append(
+                    f'<span style="font-family:{_CHAT_MONO_FONT};'
+                    f'background-color:{TOKENS["surface_input"]}">'
+                    f"{code}</span>")
+                i = close + 1
+                continue
+            out.append(_chat_inline_html(line))
+            i += 1
+        return "<br>".join(out)
+
+    @staticmethod
     def _assistant_bubble_html(content, index=None):
         """The plain assistant bubble's HTML — the one fragment the
         full render and the incremental streaming repaint share, so
@@ -19801,7 +20209,7 @@ class ForgeWindow(QMainWindow):
         Reply anchor; the streaming repaint passes none — an
         in-flight bubble carries no actions, they arrive with the
         settled render."""
-        body = (content or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+        body = ForgeWindow._chat_body_html(content)
         links = ""
         if index is not None:
             links = (f'<div style="margin-top:8px;">'
@@ -20961,7 +21369,9 @@ class ForgeWindow(QMainWindow):
             try:
                 candidate = self_maint_mod.verify_candidate_package(zip_path)
             except self_maint_mod.MaintenanceError as exc:
-                QMessageBox.warning(self, "Update", str(exc))
+                show_error_dialog(self, "Update", exc,
+                                  "Checking the update package",
+                                  warning=True)
                 return
             self.log("Candidate checksum verified — sha256 "
                      f"{str(candidate.get('sha256', ''))[:12]}…")
@@ -22087,7 +22497,8 @@ class ForgeWindow(QMainWindow):
             self._recorder.start(str(self.settings.get("mic_device", "") or ""))
         except Exception as exc:
             self._recorder = None
-            QMessageBox.critical(self, "Microphone", str(exc))
+            show_error_dialog(self, "Microphone", exc,
+                              "Starting the microphone")
             return
         self.mic_btn.setText("⏹ Stop & transcribe")
         self.log("🎙 Recording… press Stop when you're done talking.")
@@ -22244,12 +22655,15 @@ class ForgeWindow(QMainWindow):
                 self._append_pending_image(src.name, data)
                 self.log("Image attached: " + str(src))
             except Exception as exc:
-                QMessageBox.critical(self, "Image error", str(exc))
+                show_error_dialog(self, "Image error", exc,
+                                  "Reading that image")
             return
         try:
             dest = proj.add_upload(self.workspace, src)
         except Exception as exc:
-            QMessageBox.critical(self, "Upload error", str(exc)); return
+            show_error_dialog(self, "Upload error", exc,
+                              "Uploading that file")
+            return
         rel = f".forge/uploads/{dest.name}"
         self._append_pending_upload(
             dest.name,
@@ -25510,7 +25924,8 @@ class ForgeWindow(QMainWindow):
         # cleared; anything newer survives.
         if self.worker is failed_worker:
             self.worker = None
-        QMessageBox.critical(self, "Agent error", error)
+        show_error_dialog(self, "Agent error", error,
+                          "Running that turn")
         self._sync_send_button()
         self.agent_state.setText("●  ERROR"); self.agent_state.setStyleSheet(f"color:{TOKENS['state_error']};font-weight:700;")
         self.ember.set_mode("cooling"); self.ember_label.setText("ERROR")

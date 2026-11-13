@@ -1,0 +1,15 @@
+# Code Forge — files that never belong in the repo.
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Forge project data (scaffolded inside a project folder at runtime)
+.forge/
+
+# Release zips (built from the tree; the repo carries the source, not the zip)
+*.zip

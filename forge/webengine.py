@@ -77,8 +77,8 @@ def cdp_engine_for(ctx) -> str:
 
 # ---------- transports (the seams the tests drive) ----------
 
-def _fetch_page(url):
-    return _pkg_fetch(url, max_chars=_READ_CHARS)
+def _fetch_page(url, check=None):
+    return _pkg_fetch(url, max_chars=_READ_CHARS, check=check)
 
 
 def _session_screenshot(url, path, engine):
@@ -96,15 +96,24 @@ _pages: dict[str, dict] = {}
 
 def open_page(workspace, url, ctx) -> str:
     """browse_open, served by the package. The plugin has already
-    run the allowlist fence; this fetches, remembers the page for
-    browse_read / browse_screenshot, scans it for walls (a human
-    wall sets the seam's hold, exactly as a server-reported wall
-    does), and returns the page's first slice as text."""
+    run the allowlist fence on the URL itself; this fetches,
+    re-running the SAME fence (allowlist + private-IP + https-only,
+    from the same .forge/browse.json the plugin read) on every
+    redirect hop before it is followed — a redirect to a private
+    address or an unlisted host is refused, never fetched (S5-fix,
+    audit W3) — remembers the page for browse_read /
+    browse_screenshot, scans it for walls (a human wall sets the
+    seam's hold, exactly as a server-reported wall does), and
+    returns the page's first slice as text."""
     hold = browse_mod.get_hold(workspace)
     if hold is not None:
         return browse_mod.hold_refusal("browse_open", hold)
+    allowlist = browse_mod.load_allowlist(workspace)
     try:
-        page = _fetch_page(url)
+        page = _fetch_page(
+            url,
+            check=lambda target: browse_mod.check_open(
+                target, allowlist))
     except BrowserError as exc:
         return f"Tool error: the page could not be read: {exc}"
     except Exception as exc:  # a transport surprise names itself
