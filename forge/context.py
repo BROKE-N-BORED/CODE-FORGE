@@ -40,6 +40,8 @@ them).
 from __future__ import annotations
 import json
 import math
+import re
+import time
 from pathlib import Path
 
 from .ollama_client import normalize_history
@@ -144,6 +146,116 @@ def archive_pointer(archive_rel: str) -> str:
     persists, renders, and re-folds like any other summary text."""
     return (f"[Full earlier conversation archived at {archive_rel} — "
             "use read_file on it if exact details are needed.]")
+
+
+# --- Remainder R6: archive cleanup policy ---------------------------
+# Fold archives grow by one per fold and nothing ever removed them.
+# These are the pure rules; the window owns the Settings UI and the
+# auto-prune trigger. The hard rule: an archive the CURRENT
+# trajectory.json points at (its record_pointer list) is NEVER
+# deleted, however old — it is the live record's full text.
+# Anything else in the folder that is not a fold-<n>.json is never
+# touched either (trajectory.json lives here too).
+
+ARCHIVE_NAME_RE = re.compile(r"^fold-\d+\.json$")
+ARCHIVE_PRUNE_DEFAULT_DAYS = 30
+
+
+def _archive_folder(workspace):
+    return Path(workspace) / ".forge" / "context"
+
+
+def _archive_files(workspace):
+    """The fold archives in this project, oldest first by name
+    (fold-<n> numbers grow with time). Missing folder: none."""
+    folder = _archive_folder(workspace)
+    if not folder.is_dir():
+        return []
+    return sorted((p for p in folder.iterdir()
+                   if p.is_file()
+                   and ARCHIVE_NAME_RE.match(p.name)),
+                  key=lambda p: int(p.name[5:-5]))
+
+
+def archive_stats(workspace) -> dict:
+    """{"count", "bytes"} for this project's fold archives.
+    Missing folder or workspace: 0 / 0, never an error."""
+    files = _archive_files(workspace)
+    total = 0
+    for path in files:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return {"count": len(files), "bytes": total}
+
+
+def referenced_archives(workspace) -> set[str]:
+    """Filenames the current trajectory.json points at (its
+    record_pointer list), as basenames. No trajectory file: no
+    references. A trajectory file that cannot be read or parsed
+    RAISES ValueError — pruning must abort rather than delete
+    blind when the record itself is unreadable."""
+    path = _archive_folder(workspace) / "trajectory.json"
+    if not path.is_file():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(
+            f"trajectory.json cannot be read ({exc}); pruning "
+            "refused rather than deleting blind.")
+    rels = data.get("record_pointer") if isinstance(data, dict) \
+        else None
+    if not isinstance(rels, list):
+        return set()
+    return {Path(str(rel)).name for rel in rels
+            if ARCHIVE_NAME_RE.match(Path(str(rel)).name)}
+
+
+def prune_archives(workspace, older_than_days, *, now=None) -> dict:
+    """Delete fold archives older than `older_than_days` (by file
+    mtime), NEVER ones referenced_archives() protects. Returns
+    {"deleted", "kept_referenced", "kept_new", "errors",
+    "freed_bytes"} — names sorted, bytes exact. A file that
+    cannot be deleted lands in "errors" and stays; an unreadable
+    trajectory.json raises ValueError before anything is
+    deleted."""
+    try:
+        days = int(older_than_days)
+    except (TypeError, ValueError):
+        days = ARCHIVE_PRUNE_DEFAULT_DAYS
+    days = max(1, days)
+    referenced = referenced_archives(workspace)
+    cutoff = (now if now is not None else time.time()) \
+        - days * 86400
+    deleted, kept_ref, kept_new, errors = [], [], [], []
+    freed = 0
+    for path in _archive_files(workspace):
+        if path.name in referenced:
+            kept_ref.append(path.name)
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            errors.append(path.name)
+            continue
+        if mtime >= cutoff:
+            kept_new.append(path.name)
+            continue
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except OSError:
+            errors.append(path.name)
+            continue
+        deleted.append(path.name)
+        freed += size
+    return {"deleted": sorted(deleted),
+            "kept_referenced": sorted(kept_ref),
+            "kept_new": sorted(kept_new),
+            "errors": sorted(errors),
+            "freed_bytes": freed}
 
 
 def _payload_chars(value) -> int:
@@ -531,7 +643,11 @@ def compression_note(report: dict) -> str:
 # fields only — goal, plan status, files changed, decisions,
 # errors, open items, record pointer — never freeform prose, never
 # a model call. A field with nothing on record renders as
-# "(not recorded)": the summary never invents a value. The summary
+# "(not recorded)": the summary never invents a value. The four
+# capped lists (files 20, errors 10, open items 20, decisions 10)
+# record their dropped counts in *_truncated fields (Remainder
+# R7's convention, extended to decisions by R8), so the truncation
+# is on the record, not silent. The summary
 # is both a message (marker {"trajectory": True} — deliberately NOT
 # "summary", so a refused fold's tests and the fold machinery never
 # mistake it for a fold summary) carrying the structured data on a
@@ -550,12 +666,16 @@ TRAJECTORY_PREFIX = ("Trajectory summary — the run so far, in fixed "
 TRAJECTORY_REL = ".forge/context/trajectory.json"
 NOT_RECORDED = "(not recorded)"
 TRAJECTORY_FIELDS = ("goal", "plan_status", "files_changed",
-                     "decisions", "errors", "open_items",
+                     "files_changed_truncated",
+                     "decisions", "decisions_truncated",
+                     "errors", "errors_truncated",
+                     "open_items", "open_items_truncated",
                      "record_pointer")
 _WRITE_TOOLS = frozenset({"write_file", "append_file", "edit_file"})
 _TRAJ_FILES_CAP = 20
 _TRAJ_ERRORS_CAP = 10
 _TRAJ_OPEN_CAP = 20
+_TRAJ_DECISIONS_CAP = 10
 _TRAJ_STEP_CLIP = 120
 _TRAJ_GOAL_CLIP = 200
 
@@ -586,7 +706,9 @@ def _traj_files_changed(messages) -> list[str]:
     paired tool result did NOT come back a tool error. Pairing is
     positional — the tool messages directly after the assistant
     message, in call order — the same pairing the transcript
-    itself carries. Order of first write, deduplicated, capped."""
+    itself carries. Order of first write, deduplicated. The FULL
+    list — Remainder R7 caps it in build_trajectory, where the
+    dropped count is recorded (files_changed_truncated)."""
     files: list[str] = []
     msgs = list(messages or [])
     i = 0
@@ -615,13 +737,15 @@ def _traj_files_changed(messages) -> list[str]:
             if path and str(path) not in files:
                 files.append(str(path))
         i = j
-    return files[:_TRAJ_FILES_CAP]
+    return files
 
 
 def _traj_errors(messages) -> list[str]:
-    """Distinct failed tool results, first line each, capped.
-    The M4 failure_detail rides on the message copy, not the
-    result, so the result's own first line is the stable shape."""
+    """Distinct failed tool results, first line each. The M4
+    failure_detail rides on the message copy, not the result, so
+    the result's own first line is the stable shape. The FULL
+    list — Remainder R7 caps it in build_trajectory, where the
+    dropped count is recorded (errors_truncated)."""
     out: list[str] = []
     for m in messages or []:
         if m.get("role") != "tool":
@@ -632,7 +756,22 @@ def _traj_errors(messages) -> list[str]:
         first = _traj_clip(content.splitlines()[0], _TRAJ_STEP_CLIP)
         if first and first not in out:
             out.append(first)
-    return out[:_TRAJ_ERRORS_CAP]
+    return out
+
+
+def _traj_more(count, singular: str, plural: str | None = None) -> str:
+    """Remainder R7: a capped list's truncation marker — "(+12
+    more files, see fold archives)" — or "" when nothing was
+    dropped. A legacy record with no count key renders with no
+    marker, byte-identical to before."""
+    try:
+        dropped = int(count or 0)
+    except (TypeError, ValueError):
+        dropped = 0
+    if dropped <= 0:
+        return ""
+    noun = singular if dropped == 1 else (plural or singular + "s")
+    return f" (+{dropped} more {noun}, see fold archives)"
 
 
 def _traj_archives(messages) -> list[str]:
@@ -652,15 +791,19 @@ def build_trajectory(messages, plan_steps=None, plan_done=None,
     """The fixed-field trajectory of a run, built only from what
     is on record. plan_steps/plan_done are the worker's live
     checklist (None = no plan on record); handoffs are M7 entries
-    ({"parsed": {"open": [...]}}); decisions is a caller-supplied
-    list (the plan document has no Decisions section on record —
-    see the audit — so the worker path passes none and the field
-    honestly says so); archive_rels overrides the scan of
-    fold_archive markers when the caller already collected them.
-    Keys are the fixed TRAJECTORY_FIELDS, in that order; any field
-    with nothing on record is None (plan_status) or [] and renders
-    as "(not recorded)" / "(none recorded)". Pure — no model, no
-    disk, no mutation of the input."""
+    ({"parsed": {"open": [...], "decisions": [...]}}); decisions
+    is a caller-supplied list (the window's fallback reads the
+    plan document's Decisions section). Remainder R8: handoff
+    DECISIONS items join the caller-supplied decisions — the
+    owner's plan-document decisions first, then the seats' —
+    capped at _TRAJ_DECISIONS_CAP with the dropped count in
+    decisions_truncated (the R7 convention). archive_rels
+    overrides the scan of fold_archive markers when the caller
+    already collected them. Keys are the fixed TRAJECTORY_FIELDS,
+    in that order; any field with nothing on record is None
+    (plan_status) or [] and renders as "(not recorded)" /
+    "(none recorded)". Pure — no model, no disk, no mutation of
+    the input."""
     steps = list(plan_steps) if plan_steps is not None else None
     done = set(plan_done or set()) if steps is not None else set()
     goal = _traj_clip(title, _TRAJ_GOAL_CLIP)
@@ -683,10 +826,11 @@ def build_trajectory(messages, plan_steps=None, plan_done=None,
         # are written only by an explicit owner act, never inferred:
         # "superseded" when the owner approves a newer plan (the
         # window marks it — see supersede_trajectory), "abandoned"
-        # for a future explicit-abandon path. The worker's restore
-        # never re-arms a superseded or abandoned plan; a record
-        # written before F4 has no "status" key and reads as
-        # active, so old trajectories resume exactly as before.
+        # when the owner abandons the plan (Remainder R2 — see
+        # abandon_trajectory). The worker's restore never re-arms
+        # a superseded or abandoned plan; a record written before
+        # F4 has no "status" key and reads as active, so old
+        # trajectories resume exactly as before.
         plan_status = {
             "title": _traj_clip(title, _TRAJ_GOAL_CLIP),
             "total": len(steps),
@@ -705,16 +849,41 @@ def build_trajectory(messages, plan_steps=None, plan_done=None,
             text = _traj_clip(item, _TRAJ_STEP_CLIP)
             if text and text not in open_items:
                 open_items.append(text)
-    open_items = open_items[:_TRAJ_OPEN_CAP]
+    # Remainder R7: the caps truncate SILENTLY no more. Each
+    # capped list records exactly how many items were dropped in
+    # its *_truncated count (0 when nothing was) — the counts are
+    # fixed TRAJECTORY_FIELDS, in order, and render_trajectory
+    # turns them into a marker on the line.
+    files_all = _traj_files_changed(messages)
+    errors_all = _traj_errors(messages)
+    open_dropped = max(0, len(open_items) - _TRAJ_OPEN_CAP)
+    # Remainder R8: the decisions merge — the caller's list
+    # (plan-document Decisions) first, then the handoffs'
+    # DECISIONS items, clipped and deduplicated, capped like the
+    # rest. A run with no decisions anywhere still says so.
+    all_decisions: list[str] = []
+    for source in [list(decisions or [])] + [
+            (entry or {}).get("parsed", {}).get("decisions") or []
+            for entry in handoffs or []]:
+        for item in source:
+            text = _traj_clip(item, _TRAJ_STEP_CLIP)
+            if text and text not in all_decisions:
+                all_decisions.append(text)
     rels = list(archive_rels) if archive_rels is not None \
         else _traj_archives(messages)
     return {"goal": goal,
             "plan_status": plan_status,
-            "files_changed": _traj_files_changed(messages),
-            "decisions": [_traj_clip(d, _TRAJ_STEP_CLIP)
-                          for d in (decisions or [])],
-            "errors": _traj_errors(messages),
-            "open_items": open_items,
+            "files_changed": files_all[:_TRAJ_FILES_CAP],
+            "files_changed_truncated":
+                max(0, len(files_all) - _TRAJ_FILES_CAP),
+            "decisions": all_decisions[:_TRAJ_DECISIONS_CAP],
+            "decisions_truncated":
+                max(0, len(all_decisions) - _TRAJ_DECISIONS_CAP),
+            "errors": errors_all[:_TRAJ_ERRORS_CAP],
+            "errors_truncated":
+                max(0, len(errors_all) - _TRAJ_ERRORS_CAP),
+            "open_items": open_items[:_TRAJ_OPEN_CAP],
+            "open_items_truncated": open_dropped,
             "record_pointer": rels}
 
 
@@ -751,16 +920,23 @@ def render_trajectory(data: dict) -> str:
         lines.append(f"Plan: {NOT_RECORDED}")
     files = data.get("files_changed") or []
     lines.append("Files changed: " + ("; ".join(files)
-                                      if files else "(none recorded)"))
+                                      if files else "(none recorded)")
+                 + _traj_more(data.get("files_changed_truncated"),
+                              "file"))
     decisions = data.get("decisions") or []
     lines.append("Decisions: " + ("; ".join(decisions) if decisions
-                                  else NOT_RECORDED))
+                                  else NOT_RECORDED)
+                 + _traj_more(data.get("decisions_truncated"),
+                              "decision"))
     errors = data.get("errors") or []
     lines.append("Errors: " + ("; ".join(errors) if errors
-                               else "(none recorded)"))
+                               else "(none recorded)")
+                 + _traj_more(data.get("errors_truncated"), "error"))
     open_items = data.get("open_items") or []
     lines.append("Open items: " + ("; ".join(open_items) if open_items
-                                   else "(none recorded)"))
+                                   else "(none recorded)")
+                 + _traj_more(data.get("open_items_truncated"),
+                              "open item"))
     rels = data.get("record_pointer") or []
     lines.append("Full record: " + (", ".join(rels) if rels
                                     else "(no fold archive on record)"))
@@ -792,17 +968,17 @@ def latest_trajectory(messages):
     return None
 
 
-def supersede_trajectory(messages):
-    """Fix F4: mark the newest trajectory's plan SUPERSEDED —
-    the owner approved a newer plan, so the old one is dead and a
-    later resume must never re-arm it. Only a LIVE plan is marked:
-    no trajectory, no plan on record, an already-finished plan
+def _mark_trajectory_dead(messages, standing):
+    """Shared by supersede_trajectory and abandon_trajectory
+    (Remainder R2): mark the newest trajectory's plan dead with
+    the given standing. Only a LIVE plan is marked: no
+    trajectory, no plan on record, an already-finished plan
     (re-arm is already a no-op for it), or an already-dead plan
     all return None. The message is mutated in place (the window
     owns its messages list) and its content re-rendered, so the
-    stored text says superseded too; the caller persists the
-    conversation and the trajectory.json copy. Returns the updated
-    data dict, or None when nothing was marked."""
+    stored text says dead too; the caller persists the
+    conversation and the trajectory.json copy. Returns the
+    updated data dict, or None when nothing was marked."""
     latest = latest_trajectory(messages)
     if latest is None:
         return None
@@ -817,9 +993,26 @@ def supersede_trajectory(messages):
     total = status.get("total") or len(status.get("steps") or [])
     if total and len(done) >= total:
         return None
-    status["status"] = "superseded"
+    status["status"] = standing
     latest["content"] = TRAJECTORY_PREFIX + render_trajectory(data)
     return data
+
+
+def supersede_trajectory(messages):
+    """Fix F4: mark the newest trajectory's plan SUPERSEDED —
+    the owner approved a newer plan, so the old one is dead and a
+    later resume must never re-arm it. See _mark_trajectory_dead
+    for the shared live-plan rules."""
+    return _mark_trajectory_dead(messages, "superseded")
+
+
+def abandon_trajectory(messages):
+    """Remainder R2: mark the newest trajectory's plan ABANDONED —
+    the owner ended the plan outright, so a later resume must
+    never re-arm it. Only the owner's explicit abandon calls this;
+    nothing infers abandonment. See _mark_trajectory_dead for the
+    shared live-plan rules."""
+    return _mark_trajectory_dead(messages, "abandoned")
 
 
 def store_trajectory(workspace, data: dict) -> str:

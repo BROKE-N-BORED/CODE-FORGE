@@ -47,12 +47,13 @@ If the work is sound, say so plainly and name the strongest point and the one
 residual risk. Never claim you ran tools or checked anything yourself — you
 only read the turn you were handed.
 
-Close your review with these five lines, one per line, after your prose:
+Close your review with these lines, one per line, after your prose:
 ASKED: <the request as you understood it>
 DONE: <what the turn did>
 FILES: <files the turn touched, one per line, or (none)>
 EVIDENCE: <what the receipts and answer actually show>
-OPEN: <anything unfinished, risks found, or (none)>"""
+OPEN: <anything unfinished, risks found, or (none)>
+DECISIONS: <what was decided, what was rejected and why, or (none)> — optional; include it only when the turn made a real decision"""
 
 # Caps that keep one review inside the shared 8K context alongside the
 # request: the critique is about the finished answer and the receipts,

@@ -40,9 +40,14 @@ _TOOL_RESULT_CAP = 800
 _TOOL_CALL_CAP = 300
 
 # The trajectory summary's fixed fields, in the order
-# context.build_trajectory defines them (M8).
+# context.build_trajectory defines them (M8). Kept in sync with
+# context.TRAJECTORY_FIELDS — Remainder R7 added the *_truncated
+# counts, in place after their lists (R8 added decisions').
 _TRAJECTORY_FIELDS = ("goal", "plan_status", "files_changed",
-                      "decisions", "errors", "open_items",
+                      "files_changed_truncated",
+                      "decisions", "decisions_truncated",
+                      "errors", "errors_truncated",
+                      "open_items", "open_items_truncated",
                       "record_pointer")
 
 _ROLE_LABELS = {"user": "You", "assistant": "Forge",

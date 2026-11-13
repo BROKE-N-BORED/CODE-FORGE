@@ -73,8 +73,12 @@ COMMAND_OUTPUT_CAP = 32 * 1024 * 1024  # 32 MB of combined stdout+stderr
 _SPOOL_HEAD_BYTES = 48_004
 # Credential stores the file tools must never touch, even when a broad
 # workspace (e.g. the home folder) would otherwise contain them.
+# Re-audit C1 (S2 W1): item #70's cloudstore adopted rclone, whose
+# own config (~/.config/rclone/rclone.conf) holds OAuth refresh
+# tokens — the segment covers the whole config dir, the name below
+# covers the file wherever it sits.
 PROTECTED_SEGMENTS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker",
-                      "linux-forge-agent-shell"}
+                      "linux-forge-agent-shell", "rclone"}
 # Sweep R134 (residual): id_ecdsa / id_dsa are the same never-read
 # private-key class as the listed id_rsa / id_ed25519 — neither the
 # H2 approval carve-out nor S2's app-file names cover them, so the
@@ -82,7 +86,7 @@ PROTECTED_SEGMENTS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker",
 # (connector config, the vault, settings, the conversation store)
 # are protected by name as well.
 PROTECTED_NAMES = {".netrc", ".git-credentials", "id_rsa", "id_ed25519",
-                   "id_ecdsa", "id_dsa",
+                   "id_ecdsa", "id_dsa", "rclone.conf",
                    "connectors.json", "vault.json", "vault.key",
                    "settings.json", "conversations.sqlite3"}
 DANGEROUS_WORKSPACE_ROOTS = {Path("/"), Path("/etc"), Path("/usr"),
@@ -99,6 +103,14 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "move_file", "description": "Rename or move a file inside the active workspace. Refused if the destination already exists — a move never overwrites. Requires user approval.", "parameters": {"type": "object", "properties": {"source": {"type": "string"}, "destination": {"type": "string"}}, "required": ["source", "destination"]}}},
     {"type": "function", "function": {"name": "delete_file", "description": "Delete a file inside the active workspace. The shell takes a safety checkpoint of the project before the delete lands, so the file stays recoverable from Checkpoints. Files only — directories are refused. Requires user approval.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
     {"type": "function", "function": {"name": "run_command", "description": "Run a shell command in the active workspace. Requires user approval. Return stdout and stderr.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+    # Remainder R4: the agent-callable replay tool — the M9 export
+    # seam as a tool. No arguments: it always exports THIS
+    # conversation to the same deterministic file the menu export
+    # writes. Transcript-only from the agent (the turn timeline
+    # lives in the window's session marks, which the worker cannot
+    # see); the render says so honestly. Write class, approval
+    # gated, offered in Code mode only (see permissions).
+    {"type": "function", "function": {"name": "export_replay", "description": "Export this conversation as a session replay — one self-contained HTML file at .forge/replays/conversation-<id>-replay.html, with the transcript as it happened. Transcript-only from the agent: the turn timeline is added by the menu export. Requires user approval.", "parameters": {"type": "object", "properties": {}}}},
 ]
 
 BUILTIN_NAMES = {s["function"]["name"] for s in TOOL_SCHEMAS}
@@ -837,6 +849,13 @@ def describe_tool(name: str, args: dict, workspace: str) -> str:
     if name == "code_graph":
         return (f"Ask the code graph: {args.get('action')} "
                 f"'{args.get('target')}' in {workspace}?")
+    if name == "export_replay":
+        # Remainder R4: the approval dialog names the file the
+        # tool writes — a fixed destination, no path argument.
+        return (f"Export this conversation as a session replay — "
+                f"one HTML file at .forge/replays/ inside "
+                f"{workspace}? (transcript-only; the turn timeline "
+                f"is added by the menu export)")
     return f"Unknown tool request: {name}"
 
 
@@ -848,6 +867,10 @@ def describe_tool_short(name: str, args: dict) -> str:
         return f"{args.get('source', '')} -> {args.get('destination', '')}"[:90]
     if name == "code_graph":
         return f"{args.get('action', '')} {args.get('target', '')}"[:90]
+    if name == "export_replay":
+        # Remainder R4: no path argument — the receipt names the
+        # fixed destination.
+        return ".forge/replays/"
     return str(args.get("path", args.get("name", "")))[:90]
 
 

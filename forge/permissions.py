@@ -66,7 +66,13 @@ BUILTIN_CLASSES = {"list_directory": "read", "read_file": "read",
                    "write_file": "write", "append_file": "write",
                    "copy_file": "write", "edit_file": "write",
                    "move_file": "write", "delete_file": "write",
-                   "run_command": "write"}
+                   "run_command": "write",
+                   # Remainder R4: the replay tool writes one file
+                   # inside the project (.forge/replays/), so it is
+                   # write class — approval gated, and (with no
+                   # name in any mode's allowlist) offered in Code
+                   # mode only.
+                   "export_replay": "write"}
 MODES = ("code", "plan", "design", "architect", "review", "ask",
          "write", "research")
 
@@ -560,9 +566,13 @@ def fnmatch_escape(text: str) -> str:
     return "".join(out)
 
 
-_SENSITIVE_SEGMENTS = {".ssh", ".aws", ".gnupg"}
+# Re-audit C1 (S2 W1): rclone's own config holds OAuth refresh
+# tokens — the segment covers ~/.config/rclone/, the name covers
+# the file wherever it sits. (The matching tools.py lists learn
+# them too; the two lists are the two layers of the same guard.)
+_SENSITIVE_SEGMENTS = {".ssh", ".aws", ".gnupg", "rclone"}
 _SENSITIVE_NAMES = {"connectors.json", "vault.json", "vault.key",
-                    ".netrc", ".git-credentials"}
+                    ".netrc", ".git-credentials", "rclone.conf"}
 _ENV_TEMPLATE_NAMES = {".env.example", ".env.sample", ".env.template"}
 _SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 
@@ -572,10 +582,11 @@ def is_sensitive_path(path) -> bool:
     .env and .env.* (but NOT the shareable templates .env.example /
     .env.sample / .env.template), key material (*.pem, *.key,
     *.p12, *.pfx, id_rsa*, id_ed25519*), credentials* files, any
-    filename containing 'secret', anything under a .ssh/ .aws/ or
-    .gnupg/ path component, and the Forge's own secret stores
-    (connectors.json — which can hold raw provider keys — and the
-    vault files vault.json / vault.key). Matching is on path
+    filename containing 'secret', anything under a .ssh/ .aws/,
+    .gnupg/ or rclone/ path component, and the Forge's own secret
+    stores (connectors.json — which can hold raw provider keys —
+    the vault files vault.json / vault.key, and rclone.conf,
+    which holds OAuth refresh tokens). Matching is on path
     segments and the basename, case-insensitively: erring toward
     asking is the safe direction."""
     text = str(path or "").strip().strip("\"'").replace("\\", "/")
@@ -696,6 +707,16 @@ def _command_allow_ok(rule: dict, project: str) -> bool:
             and rule.get("scope", "global") == project)
 
 
+# Re-audit C13 (S7 W1): the content-carrying update tools. A
+# remembered rule keys on the tool + slug alone, never on the
+# code/body — so a rule minted for one version would auto-allow
+# every later version and the diff gate would never open. Both
+# halves of the fix consult this one set: evaluate_rules never
+# lets a stored allow cover these tools, and the window's gate
+# never offers Remember for them.
+UPDATE_TOOLS = frozenset({"update_skill", "update_plugin"})
+
+
 def evaluate_rules(rules: list[dict], tool: str, target: str, project: str = "") -> str:
     """Return 'allow' | 'ask' | 'deny' for one call."""
     matched = []
@@ -733,6 +754,13 @@ def evaluate_rules(rules: list[dict], tool: str, target: str, project: str = "")
     # call asks, whatever any remembered allow says. (Deny above
     # still wins: an owner's deny is not an approval path.)
     if is_sensitive_call(tool, target or ""):
+        return "ask"
+    # Re-audit C13 (S7 W1): a remembered allow never covers an
+    # update — the rule keys on the slug alone while the code is
+    # the substance, so auto-allowing would approve unseen code
+    # with no diff and no dialog. The call always asks, whatever
+    # any stored rule says. (Deny above still wins.)
+    if tool in UPDATE_TOOLS:
         return "ask"
     for scope in (project, "global"):
         for rule in matched:

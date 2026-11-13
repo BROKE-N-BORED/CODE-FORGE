@@ -28,10 +28,7 @@ THE REFUSALS (plain, nothing runs):
     partially fanned: partial fanning would silently change
     what the owner asked to run, and the refusal names the
     dependent items so the owner can re-seed them as a
-    separate sequential run;
-  - the cap is 1 (parallel turns off) — fan-out is refused and
-    the window behaves exactly as it does today: no turn
-    starts, nothing is queued, byte-identical.
+    separate sequential run.
 
 THE CAP: waves of at most `cap` live turns, in batch order;
 excess items QUEUE in order and start as slots free — never
@@ -41,6 +38,15 @@ repair can never push the live count past the cap. On this
 machine a fanned turn is a fresh context plus a model seat,
 so the cap is also the memory guard: cap 4 is four resident
 contexts, and the owner sets it knowing that.
+
+SEQUENTIAL (Remainder R5): the cap-1 / low-RAM fallback. Cap
+1 is no longer a refusal — the batch runs SEQUENTIALLY, one
+item at a time, each in its own fresh conversation, with the
+same handoff collection and keeper feed as a parallel run.
+The owner may also choose sequential at cap > 1 (the dialog's
+checkbox): the run then uses an effective cap of 1. Either
+way the independence rules are unchanged — a dependent item
+still refuses the whole batch.
 
 THE RETURNS: each fanned turn's prompt ends with the handoff
 close-out instruction (fanout_instruction), so the turn's final
@@ -106,21 +112,6 @@ def validate_batch(items) -> str | None:
     return None
 
 
-def cap_refusal(cap: int) -> str | None:
-    """The cap's refusal, or None when fan-out may run. Cap 1 is
-    the classic one-turn Forge: fan-out is off, and refusing
-    keeps behaviour byte-identical to today."""
-    try:
-        value = int(cap)
-    except (TypeError, ValueError):
-        value = 1
-    if value < 2:
-        return ("Fan-out refused — parallel turns are off (cap 1). "
-                "Raise Parallel turns in Settings → Seats & limits "
-                "to fan items out.")
-    return None
-
-
 def plan_waves(items, cap: int) -> list[list[FanOutItem]]:
     """The batch cut into waves of at most `cap`, in batch order.
     Pure scheduling — validation is the caller's job."""
@@ -150,7 +141,10 @@ def fanout_instruction(item: FanOutItem) -> str:
         "or (none)\n"
         "EVIDENCE: the commands you ran and what they returned, "
         "or what you saw\n"
-        "OPEN: anything unfinished or risky, or (none)")
+        "OPEN: anything unfinished or risky, or (none)\n"
+        "DECISIONS: what was decided, what was rejected and why, "
+        "or (none) — optional; include it only when you made a "
+        "real decision")
 
 
 # ---------- collection (mirrors the M7 council path) ----------
@@ -202,15 +196,22 @@ class FanOutRun:
     window cannot spawn the repair, repair_unavailable finalises
     the entry flagged, per M7."""
 
-    def __init__(self, items, cap, spawn, log=None):
+    def __init__(self, items, cap, spawn, log=None, sequential=False):
         refusal = validate_batch(items)
         if refusal is not None:
             raise ValueError(refusal)
-        refusal = cap_refusal(cap)
-        if refusal is not None:
-            raise ValueError(refusal)
+        # Remainder R5: cap 1 is no longer a refusal — the run
+        # is sequential (one live turn), and the owner may also
+        # choose sequential at cap > 1. The fill/settle
+        # machinery is unchanged: with cap 1 it spawns one item
+        # and fills the next slot only when it settles.
+        try:
+            cap_value = int(cap)
+        except (TypeError, ValueError):
+            cap_value = 1
+        self.sequential = bool(sequential) or cap_value < 2
+        self.cap = 1 if self.sequential else max(2, min(4, cap_value))
         self.items = list(items)
-        self.cap = max(2, min(4, int(cap)))
         self._spawn = spawn
         self._log = log or (lambda *args, **kwargs: None)
         self._queue: list[int] = list(range(len(self.items)))
@@ -230,7 +231,8 @@ class FanOutRun:
         finalises it."""
         self._fill_slots()
         self._check_done()
-        self._log("fanout_started", items=len(self.items), cap=self.cap)
+        self._log("fanout_started", items=len(self.items), cap=self.cap,
+                  sequential=self.sequential)
 
     def _live_count(self) -> int:
         return len(self._live) + len(self._repairs) \

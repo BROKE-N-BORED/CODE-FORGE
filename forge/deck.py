@@ -59,6 +59,13 @@ answers 200 + JSON, and the window answers through the very same
 _plan_gate_action the desktop buttons call. Editing the steps
 stays at the PC — the phone only releases the gate or kills it.
 
+Remainder R2: the PLAN card also carries an Abandon button,
+shown only while the synced plan's status is "running" or
+"interrupted" — POST /plan with {"action": "abandon"} rides
+the same round trip and lands on abandon_plan, which marks the
+trajectory abandoned so no resume ever re-arms it. A draft has
+Kill; Abandon is for a plan that ran.
+
 Item #66: the PLAN card also carries a comment field under the
 gate buttons (same draft-only visibility): POST /plan with
 {"action": "comment", "comment": "..."} rides the same round
@@ -272,13 +279,16 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <button class="ok" onclick="planAction('approve')">✓ Approve plan</button>
 <button class="stop" onclick="planAction('kill')">✗ Kill plan</button>
 </div>
+<div class="row" id="planabandon" style="display:none">
+<button class="stop" onclick="planAction('abandon')">⚑ Abandon plan</button>
+</div>
 <div class="row" id="plancomment" style="display:none">
 <input id="plancommenttext" type="text" placeholder="Comment on the draft — the driver revises it" style="flex:1">
 <button onclick="planComment()">💬 Comment</button>
 </div>
 <div id="planmsg" style="margin-top:8px;font-size:13px"></div>
 <details id="planfish" style="display:none;margin-top:8px"><summary class="dim" style="cursor:pointer">GoFish review — tap to read the findings</summary><pre id="planfishtext"></pre></details>
-<div class="dim">Approve, comment, or kill from here — editing the steps happens at the PC.</div></div>
+<div class="dim">Approve, comment, kill, or abandon from here — editing the steps happens at the PC.</div></div>
 
 <div class="card"><div class="sec">[ 12 ] PROPOSALS</div><div id="proposals"><span class="dim">No proposals.</span></div>
 <div id="proposalmsg" style="margin-top:8px;font-size:13px"></div>
@@ -462,7 +472,8 @@ function renderPlan(s){
   const btns = document.getElementById('planbtns');
   const crow = document.getElementById('plancomment');
   const fish = document.getElementById('planfish');
-  if(!p || !p.steps || !p.steps.length){ el.textContent = 'No plan.'; btns.style.display = 'none'; crow.style.display = 'none'; fish.style.display = 'none'; return; }
+  const aban = document.getElementById('planabandon');
+  if(!p || !p.steps || !p.steps.length){ el.textContent = 'No plan.'; btns.style.display = 'none'; crow.style.display = 'none'; fish.style.display = 'none'; aban.style.display = 'none'; return; }
   const mark = {done:'✓', active:'▸', pending:'·', interrupted:'✗'};
   const lines = ['Status: ' + (p.status || '')];
   p.steps.forEach(function(st, i){ lines.push((mark[st.state] || '·') + ' ' + (i + 1) + '. ' + st.text); });
@@ -475,6 +486,10 @@ function renderPlan(s){
   else { fish.style.display = 'none'; }
   btns.style.display = (p.status === 'draft') ? '' : 'none';
   crow.style.display = (p.status === 'draft') ? '' : 'none';
+  // Remainder R2: Abandon shows for a plan that RAN — running
+  // or interrupted. A draft has Kill; a finished plan has
+  // nothing left to end.
+  aban.style.display = (p.status === 'running' || p.status === 'interrupted') ? '' : 'none';
 }
 async function planAction(action){
   const msg = document.getElementById('planmsg');
@@ -798,6 +813,29 @@ def lan_ip() -> str:
                 pass
 
 
+def content_disposition_for_download(filename: str) -> str:
+    """The Content-Disposition value for a /dl download. Re-audit
+    C7 (S4 W3): the filename came from disk and was interpolated
+    into the header verbatim — a quote or CR/LF in a listed
+    document's name injected response headers, and a non-latin-1
+    name crashed the handler. A plain name (printable ASCII, no
+    quote, no backslash, no control chars) keeps the exact old
+    form, so normal downloads are byte-identical. Anything else
+    gets an ASCII fallback plus the real name as RFC 5987
+    filename*, so the phone still sees the true name."""
+    from urllib.parse import quote
+    plain = bool(filename) and all(
+        0x20 <= ord(ch) < 0x7F and ch not in '"\\' for ch in filename)
+    if plain:
+        return f'attachment; filename="{filename}"'
+    fallback = "".join(
+        ch if 0x20 <= ord(ch) < 0x7F and ch not in '"\\' else "_"
+        for ch in filename).strip(" .") or "download"
+    encoded = quote(filename, safe="!#$&+-.^_`|~")
+    return (f'attachment; filename="{fallback}"; '
+            f"filename*=UTF-8''{encoded}")
+
+
 class DeckError(Exception):
     """The deck could not start (Sweep R107) — a plain-words reason
     the bench logs instead of a raw OSError traceback escaping the
@@ -1098,7 +1136,7 @@ class DeckServer(QObject):
                     self.send_header("Content-Type", "application/octet-stream")
                     self.send_header(
                         "Content-Disposition",
-                        f'attachment; filename="{filename}"')
+                        content_disposition_for_download(filename))
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -1258,7 +1296,11 @@ class DeckServer(QObject):
                                 "empty comment can't revise the plan.")
                         else:
                             ok, message = deck.request_plan_comment(comment)
-                    elif action not in ("approve", "kill"):
+                    elif action not in ("approve", "kill",
+                                        # Remainder R2: abandon a
+                                        # running plan from the
+                                        # phone — same round trip.
+                                        "abandon"):
                         ok, message = False, "Unknown plan action."
                     else:
                         ok, message = deck.request_plan_action(action)

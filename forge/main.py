@@ -2919,6 +2919,37 @@ class SettingsDialog(QDialog):
                                 "estimated tokens across all its turns this session. Crossing it "
                                 "only flags the conversation (bench note + Turn timeline) — "
                                 "nothing is blocked, stopped, or sent anywhere."))
+        # Remainder R6: context-archive housekeeping. The count/size
+        # line reads the CURRENT project (the parent window's
+        # workspace) when the dialog opens; the prune button deletes
+        # archives older than the days below, never ones the current
+        # trajectory.json points at.
+        self.archives_line = QLabel(self._archives_text())
+        self.archives_line.setWordWrap(True)
+        form.addRow("Context archives", self.archives_line)
+        self.archive_prune_days = QSpinBox()
+        self.archive_prune_days.setRange(1, 365)
+        self.archive_prune_days.setValue(_limit_value(
+            "archive_prune_days",
+            context_mod.ARCHIVE_PRUNE_DEFAULT_DAYS, 1, 365))
+        form.addRow("Prune archives older than (days)",
+                    self.archive_prune_days)
+        self.archive_auto_prune = QCheckBox(
+            "Prune old context archives automatically after each fold")
+        self.archive_auto_prune.setChecked(
+            bool(settings.get("archive_auto_prune", False)))
+        form.addRow("", self.archive_auto_prune)
+        form.addRow("", caption("Fold archives (.forge/context/fold-*.json) keep every folded span "
+                                "restorable; they grow by one per fold. Pruning deletes only "
+                                "archives older than the days above that the current trajectory "
+                                "does not point at — referenced archives are never deleted. "
+                                "Automatic pruning is OFF unless you tick the box."))
+        self.prune_archives_btn = QPushButton("Prune context archives")
+        self.prune_archives_btn.clicked.connect(self._prune_archives)
+        form.addRow("", self.prune_archives_btn)
+        self.prune_message = QLabel("")
+        self.prune_message.setWordWrap(True)
+        form.addRow("", self.prune_message)
         # Audit C31: the dictation microphone, picked by description.
         # The list is what this PC reports NOW; a saved mic that is
         # unplugged stays chosen (Dictate falls back to the system
@@ -3200,6 +3231,8 @@ class SettingsDialog(QDialog):
                   self.test_cadence_lines,
                   self.tool_result_digest_chars,
                   self.max_parallel_turns, self.soft_token_budget,
+                  self.archive_prune_days, self.archive_auto_prune,
+                  self.prune_archives_btn,
                   self.tester, self.reviewer, self.watch,
                   self.roster, self.council, self.auto_summarize,
                   self.fold_style, self.auto_snapshot,
@@ -3213,6 +3246,41 @@ class SettingsDialog(QDialog):
                   buttons.button(QDialogButtonBox.Cancel)]
         for _first, _second in zip(_chain, _chain[1:]):
             QWidget.setTabOrder(_first, _second)
+
+    def _archives_text(self):
+        """Remainder R6: the count/size line for the current
+        project's fold archives — "Context archives: N files, X
+        MB" in the dialog's own words."""
+        parent = self.parent()
+        workspace = getattr(parent, "workspace", None)
+        if not workspace:
+            return "No project open."
+        stats = context_mod.archive_stats(workspace)
+        if stats["count"] == 0:
+            return "0 files — nothing archived yet."
+        noun = "file" if stats["count"] == 1 else "files"
+        return (f"{stats['count']} {noun}, "
+                f"{human_size(stats['bytes'])}")
+
+    def _prune_archives(self):
+        """Remainder R6: the dialog's prune button — the window
+        does the deleting (its own method, its own log), the
+        dialog reports the result and refreshes the line."""
+        parent = self.parent()
+        prune = getattr(parent, "prune_context_archives", None)
+        if prune is None:
+            return
+        result = prune(self.archive_prune_days.value())
+        if result.get("error"):
+            self.prune_message.setText(result["error"])
+        else:
+            deleted = len(result["deleted"])
+            kept = len(result["kept_referenced"]) \
+                + len(result["kept_new"])
+            self.prune_message.setText(
+                f"Pruned {deleted} archive(s), freed "
+                f"{human_size(result['freed_bytes'])}; {kept} kept.")
+        self.archives_line.setText(self._archives_text())
 
     def _open_allowlist(self):
         """Pre-send secret scan (item 5): the current project's
@@ -3270,6 +3338,8 @@ class SettingsDialog(QDialog):
                 "tool_result_digest_chars": self.tool_result_digest_chars.value(),
                 "max_parallel_turns": self.max_parallel_turns.value(),
                 "soft_token_budget": self.soft_token_budget.value(),
+                "archive_auto_prune": self.archive_auto_prune.isChecked(),
+                "archive_prune_days": self.archive_prune_days.value(),
                 "mic_device": str(self.mic.currentData() or ""),
                 "tester_model": self.tester.text().strip(),
                 "reviewer_model": self.reviewer.text().strip(),
@@ -5512,8 +5582,10 @@ class FanOutDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             "One item per line — similar jobs, each on its own.\n"
-            "Every item runs as its own fresh-context turn, in "
-            "parallel under the parallel-turns cap."))
+            "Every item runs as its own fresh-context turn — in "
+            "parallel under the parallel-turns cap, or one at a "
+            "time when the cap is 1 or the checkbox below is "
+            "ticked."))
         self.items_edit = QPlainTextEdit()
         self.items_edit.setPlaceholderText(
             "Write the test for login.py\nWrite the test for billing.py\n…")
@@ -5522,6 +5594,15 @@ class FanOutDialog(QDialog):
             "These items are independent — none of them waits on "
             "another")
         layout.addWidget(self.indep_check)
+        # Remainder R5: the sequential choice, off by default.
+        # At cap 1 the run is sequential anyway, so the box is
+        # checked and locked — there is no parallel to choose.
+        self.seq_check = QCheckBox(
+            "Run sequentially (one at a time)")
+        if self._owner._max_parallel_turns() < 2:
+            self.seq_check.setChecked(True)
+            self.seq_check.setEnabled(False)
+        layout.addWidget(self.seq_check)
         self.message = QLabel("")
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
@@ -5539,7 +5620,8 @@ class FanOutDialog(QDialog):
     def _accept(self):
         ok, message = self._owner.submit_fan_out(
             self.items_edit.toPlainText(),
-            self.indep_check.isChecked())
+            self.indep_check.isChecked(),
+            sequential=self.seq_check.isChecked())
         if ok:
             self.accept()
             return
@@ -10273,6 +10355,18 @@ class PlanWindow(QWidget):
         self.plan_kill_btn.setToolTip("Kill the plan — nothing executes, the turn ends")
         self.plan_kill_btn.clicked.connect(lambda: owner._plan_gate_action("kill"))
         self.header.slot_layout.addWidget(self.plan_kill_btn)
+        # Remainder R2: abandon a RUNNING plan — the draft's
+        # Kill ends a plan that never ran; Abandon ends one that
+        # did, and marks its trajectory abandoned so no resume
+        # ever re-arms it. Enabled by _plan_render only while a
+        # plan is running or interrupted.
+        self.plan_abandon_btn = QPushButton("⚑ Abandon")
+        self.plan_abandon_btn.setToolTip(
+            "Abandon the plan — it ends here, the record says "
+            "abandoned, and no resume picks it back up")
+        self.plan_abandon_btn.clicked.connect(
+            lambda: owner.abandon_plan())
+        self.header.slot_layout.addWidget(self.plan_abandon_btn)
         # Mode-room upgrade (2026-11-10): the gate becomes the
         # first tab of this window so filed plans get a room of
         # their own beside it — the gate stays the default view
@@ -16985,6 +17079,7 @@ class ForgeWindow(QMainWindow):
         self.plan_approve_btn = self.plan_win.plan_approve_btn
         self.plan_edit_btn = self.plan_win.plan_edit_btn
         self.plan_kill_btn = self.plan_win.plan_kill_btn
+        self.plan_abandon_btn = self.plan_win.plan_abandon_btn
         self.plan_comment_btn = self.plan_win.plan_comment_btn
         self.plan_comment_edit = self.plan_win.plan_comment_edit
         # The other modes get their own rooms too (same
@@ -19471,6 +19566,7 @@ class ForgeWindow(QMainWindow):
             "dock_receipts": lambda: self.set_dock_open(
                 "receipts", not self._dock_open.get("receipts", True)),
             "plan_window": self.open_plan_window,
+            "abandon_plan": self.abandon_plan,
             "run_window": self.open_run_window,
             "test_now": self.test_now,
             "debug_window": self.open_debug_window,
@@ -19734,6 +19830,10 @@ class ForgeWindow(QMainWindow):
         proj.ensure_project(self.workspace)
         self.plugin_ctx.workspace = self.workspace
         self._sync_presend_scan()
+        # Project-scoped conversations (2026-11-13): the history
+        # panel follows the active project — re-align it now that
+        # the workspace has moved.
+        self.refresh_history()
         # Item #50: the run surface follows the active project —
         # it rescans and retitles for the new folder (list + title
         # only; a live run is never disturbed by a refresh).
@@ -20327,6 +20427,29 @@ class ForgeWindow(QMainWindow):
         self._stream_prefix_len = len(self.messages) - 1
         self._stream_anchor = header.position()
 
+    def _history_visible_rows(self, rows):
+        """Project-scoped conversations (2026-11-13): the [02]
+        CONVERSATIONS panel shows the current project's chats. A
+        row is visible when its recorded project is the current
+        workspace, or when it belongs to no project at all — no
+        recorded project (older rows, NULL/empty), or its recorded
+        project folder no longer exists on disk (renamed/deleted:
+        the chat must stay reachable, so it shows everywhere).
+        Returns (row, unfiled) pairs; unfiled rows carry the
+        marker in the list. Matching is plain string equality,
+        the same rule load_conversation and refresh_projects
+        already use."""
+        visible = []
+        for row in rows:
+            project = row.get("project")
+            if not project:
+                visible.append((row, True))
+            elif project == self.workspace:
+                visible.append((row, False))
+            elif not Path(project).is_dir():
+                visible.append((row, True))
+        return visible
+
     def refresh_history(self):
         # Note 24 amendment: the list is scrollable and must be able to
         # reach EVERY past chat — the old recent(12) cap silently hid
@@ -20337,7 +20460,13 @@ class ForgeWindow(QMainWindow):
         search_box = getattr(self, "history_search", None)
         if search_box is not None:
             query = search_box.text().strip()
-        rows = self.store.search(query) if query else self.store.recent(200)
+        # Project-scoped conversations (2026-11-13): the fetch is
+        # uncapped (the 100000 precedent is the delete-all path's
+        # recent(100000)) so the 200 cap applies AFTER the project
+        # filter — a global recent(200) would hide this project's
+        # older chats behind other projects' newer ones.
+        rows = self.store.search(query, limit=100000) if query else self.store.recent(100000)
+        visible = self._history_visible_rows(rows)[:200]
         # Sweep R45: this rebuild runs on every persist and every
         # search keystroke and used to deleteLater/recreate up to
         # 200 buttons each time. When the rows that would be drawn
@@ -20346,8 +20475,12 @@ class ForgeWindow(QMainWindow):
         # in the signature: it changes on every persist of the
         # active conversation and would defeat the skip; it only
         # feeds a tooltip.
+        # The signature runs over the VISIBLE rows with the unfiled
+        # flag — the same row can be filed under one workspace and
+        # unfiled under another, and the label differs.
         signature = (query, tuple(
-            (r.get("id"), r.get("title"), r.get("model")) for r in rows))
+            (r.get("id"), r.get("title"), r.get("model"), unfiled)
+            for r, unfiled in visible))
         if signature == getattr(self, "_history_signature", None):
             return
         self._history_signature = signature
@@ -20355,10 +20488,12 @@ class ForgeWindow(QMainWindow):
             item = self.history_list.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        for row in rows:
+        for row, unfiled in visible:
             label = "◷  " + (row["title"] or "Conversation")
             if row.get("model"):
                 label += f"  ·  {short_model(row['model'])}"
+            if unfiled:
+                label += "  ·  Unfiled"
             button = QPushButton(label)
             button.setObjectName("nav"); button.setToolTip(row["updated_at"])
             button.clicked.connect(lambda checked=False, cid=row["id"]: self.load_conversation(cid))
@@ -20631,6 +20766,9 @@ class ForgeWindow(QMainWindow):
             self.save_settings()
             self.refresh_projects()
             self.log(f"Conversation's project restored: {project}")
+            # Project-scoped conversations (2026-11-13): the
+            # restored project re-aligns the history panel too.
+            self.refresh_history()
             if self.messages and self.messages[0].get("role") == "system":
                 self.messages[0]["content"] = self.build_system_prompt()
         self.render()
@@ -20678,6 +20816,11 @@ class ForgeWindow(QMainWindow):
                     self.plan_comment_btn):
             btn.setEnabled(gate)
         self.plan_comment_edit.setEnabled(gate)
+        # Remainder R2: Abandon is for a plan that RAN — running
+        # or interrupted. A draft has Kill; a finished, killed, or
+        # already-abandoned plan has nothing left to end.
+        self.plan_abandon_btn.setEnabled(
+            bool(plan) and plan["status"] in ("running", "interrupted"))
         if not plan:
             self.plan_list.addItem("No plan. In Plan mode, the agent's first answer "
                                    "is drafted as a plan and held here for your call.")
@@ -21012,6 +21155,78 @@ class ForgeWindow(QMainWindow):
             self._plan_render()
             self._plan_persist()
 
+    def abandon_plan(self):
+        """Remainder R2: the owner abandons the live plan — an
+        explicit act only, never inferred from inactivity or turn
+        counts. The plan must be running or interrupted (a draft
+        has Kill; a finished/killed/abandoned plan is already
+        over), and no turn may be running — a turn's end-of-turn
+        refresh rebuilds the trajectory as active, so abandoning
+        mid-turn would resurrect the mark. On success the
+        trajectory is marked abandoned in memory, in the stored
+        conversation, and in the trajectory.json copy (the same
+        persist pattern as the F4 supersede, with a failed persist
+        logged, never breaking the abandon); the sidecar's status
+        becomes "abandoned" with any active step marked
+        interrupted; the armed plan is cleared (the worker's
+        restore refuses abandoned plans outright, so nothing
+        re-arms it); the decision goes in the session notes so a
+        fold never eats it. Returns (ok, message) — the phone
+        deck's /plan round trip reports the message; desktop
+        callers ignore it."""
+        plan = self.plan_state
+        if not plan or plan.get("status") not in ("running",
+                                                  "interrupted"):
+            if plan and plan.get("status") == "draft":
+                message = ("That plan is still a draft — Kill ends "
+                           "it; Abandon is for a plan that ran.")
+            elif plan and plan.get("status") in ("done", "killed",
+                                                 "abandoned"):
+                message = "That plan is already over — nothing to abandon."
+            else:
+                message = "No plan to abandon."
+            self.log(message)
+            return False, message
+        worker = self.worker if (self.worker
+                                 and self.worker.isRunning()) else None
+        if worker:
+            message = ("A turn is running — stop it first, then "
+                       "abandon the plan.")
+            self.log(message)
+            return False, message
+        abandoned = context_mod.abandon_trajectory(self.messages)
+        if abandoned is not None:
+            try:
+                context_mod.store_trajectory(self.workspace,
+                                             abandoned)
+            except Exception as exc:
+                self.log("Could not store the abandoned "
+                         f"trajectory: {exc}")
+            try:
+                self.conversation_id = self.store.save(
+                    self.conversation_id, self.messages,
+                    model=self.model_combo.currentText().strip()
+                    or None,
+                    project=self.workspace)
+            except Exception as exc:
+                self.log("Could not save the abandoned "
+                         f"trajectory: {exc}")
+        for step in plan["steps"]:
+            if step.get("state") == "active":
+                step["state"] = "interrupted"
+        plan["status"] = "abandoned"
+        self._plan_render()
+        self._plan_persist()
+        title = (plan.get("request") or "").strip().splitlines()
+        notes_mod.append_entry(
+            APP_DIR, self.conversation_id,
+            f"Plan abandoned: {title[0][:80] if title else 'Plan'} "
+            f"({len(plan['steps'])} step(s))")
+        message = ("Plan abandoned — it ends here, and no resume "
+                   "will pick it back up.")
+        self.log(message)
+        return True, message
+
     def _plan_comment(self, comment=None):
         """Item #66: the gate's fourth action. The owner's comment
         settles the gate as a REVISION — the comment is recorded on
@@ -21180,7 +21395,9 @@ class ForgeWindow(QMainWindow):
         S6 reload so the new name is recorded as known-and-disabled
         immediately (rather than at the next app start), and say so.
         A failed draft never reaches here as a success: ok is False
-        and the reason rides the status line instead."""
+        and the reason rides the status line instead. Remainder R3:
+        the same acceptance may have drafted a recipe too — say
+        where it landed, and that it needs promoting to run."""
         try:
             self.reload_extensions()
         except Exception:
@@ -21192,6 +21409,15 @@ class ForgeWindow(QMainWindow):
         else:
             self.log(f"Could not save draft skill "
                      f"'{info.get('name', '?')}': {info.get('message', '')}")
+        if info.get("recipe"):
+            if info.get("recipe_ok"):
+                self.log(f"Draft recipe '{info['recipe']}' saved in "
+                         f"the recipes drafts folder — move it to "
+                         f"recipes/ to run it.")
+            else:
+                self.log(f"Could not save draft recipe "
+                         f"'{info['recipe']}': "
+                         f"{info.get('recipe_message', '')}")
 
     def _plan_settle_draft(self):
         """A worker that ends while its plan still sits at the gate
@@ -21893,7 +22119,10 @@ class ForgeWindow(QMainWindow):
         _plan_gate_action treats anything that is not edit/kill/
         comment as approve, so the check here is load-bearing, not
         decoration. A comment rides the holder (the deck's HTTP
-        layer put it there), never the desktop's comment box."""
+        layer put it there), never the desktop's comment box.
+        Remainder R2: "abandon" is the exception to the
+        draft-only rule — it lands on abandon_plan, which takes a
+        running/interrupted plan, not a draft."""
         if holder.get("expired"):
             # Sweep R101: stale queued delivery — the phone was
             # already told the bench didn't answer; a plan decision
@@ -21902,6 +22131,10 @@ class ForgeWindow(QMainWindow):
             return
         try:
             action = str(action)
+            if action == "abandon":
+                ok, message = self.abandon_plan()
+                holder["result"] = (ok, message)
+                return
             plan = self.plan_state
             if not plan or plan.get("status") != "draft":
                 holder["result"] = (False,
@@ -23431,6 +23664,11 @@ class ForgeWindow(QMainWindow):
                                   checkpoint_mode=str(self.settings.get(
                                       "shadow_checkpoints", "off") or "off"),
                                   checkpoint_app_dir=APP_DIR,
+                                  # Remainder R4: the turn's
+                                  # conversation, so the
+                                  # export_replay tool writes the
+                                  # same replay file the menu does.
+                                  conversation_id=self.conversation_id,
                                   disabled_tools=list(self.settings.get(
                                       "disabled_tools", [])),
                                   result_digest_chars=self.settings.get(
@@ -23620,7 +23858,7 @@ class ForgeWindow(QMainWindow):
         return self._max_parallel_turns() > 1
 
     # ---------- Study item M12: fan-out ----------
-    def submit_fan_out(self, items, independent):
+    def submit_fan_out(self, items, independent, sequential=False):
         """Fix F5: the ONE core both fan-out doors call —
         the desktop dialog and the phone deck. `items` is text
         (one item per line) or a list of task strings;
@@ -23628,11 +23866,14 @@ class ForgeWindow(QMainWindow):
         items waits on another. Returns (ok, message): the
         refusal is plain words whenever nothing fans — empty
         batch, independence NOT asserted (a dependent batch is
-        refused here, before fan_out_batch ever sees it), the
-        cap at 1, or a run already live. A refusal from
-        fan_out_batch itself (parallel cap full, no turn could
-        start) is already logged plainly there; the message
-        points at the activity log."""
+        refused here, before fan_out_batch ever sees it), or a
+        run already live. Remainder R5: cap 1 is no longer a
+        refusal — the batch runs sequentially, one item at a
+        time, and `sequential` (the dialog's checkbox) chooses
+        that at cap > 1 too. A refusal from fan_out_batch
+        itself (parallel cap full, no turn could start) is
+        already logged plainly there; the message points at the
+        activity log."""
         if isinstance(items, str):
             tasks = [line.strip() for line in items.splitlines()]
         else:
@@ -23645,20 +23886,22 @@ class ForgeWindow(QMainWindow):
                 "Fan-out needs independent items: confirm none of "
                 "these waits on another — dependent steps are "
                 "never fanned out.")
-        cap_refusal = fanout_mod.cap_refusal(
-            self._max_parallel_turns())
-        if cap_refusal is not None:
-            return False, cap_refusal
         if getattr(self, "_fanout_run", None) is not None:
             return False, ("Fan-out refused — a fan-out is already "
                            "running. Wait for it to finish first.")
         started = self.fan_out_batch(
             [{"task": task, "independent": True}
-             for task in tasks])
+             for task in tasks],
+            sequential=sequential)
         if not started:
             return False, ("Fan-out refused — the activity log "
                            "says why.")
         count = len(tasks)
+        run = getattr(self, "_fanout_run", None)
+        if run is not None and run.sequential:
+            return True, (f"Running {count} item"
+                          f"{'s' if count != 1 else ''} one at a "
+                          "time — Mission Control tracks them.")
         return True, (f"Fanned out {count} item"
                       f"{'s' if count != 1 else ''} — Mission "
                       "Control tracks them.")
@@ -23668,7 +23911,7 @@ class ForgeWindow(QMainWindow):
         'Fan out a batch…' entry opens the dialog."""
         FanOutDialog(self).exec()
 
-    def fan_out_batch(self, items):
+    def fan_out_batch(self, items, sequential=False):
         """Fan a batch of similar INDEPENDENT items out as fresh-
         context parallel turns under the #53 cap, each return
         collected through the M7 handoff schema. `items` are
@@ -23676,17 +23919,20 @@ class ForgeWindow(QMainWindow):
         seeding rule is owner-grounded: an item fans only when
         its `independent` flag says so — never inferred here.
         True when the run started; False with the plain refusal
-        logged when nothing runs (bad batch, cap 1, a run already
-        live, or the parallel cap already full). UI entry points
-        (Fix F5): the command palette's 'Fan out a batch…'
-        dialog and the phone deck's fan-out card, both through
-        submit_fan_out. Each fanned turn is a Code turn in its
-        own fresh conversation (no history, no plan slot — Plan
-        turns never detach, so they never fan), under the owner's
-        approved plan and the ordinary per-turn gates; the stage
-        follows the newest fanned turn, exactly as switching
-        conversations does today, and Mission Control tracks
-        every stream."""
+        logged when nothing runs (bad batch, a run already live,
+        or the parallel cap already full). Remainder R5: at cap
+        1 the batch runs SEQUENTIALLY — one fresh-context turn
+        at a time, same handoff collection and keeper feed —
+        and `sequential` chooses that at cap > 1 too. UI entry
+        points (Fix F5): the command palette's 'Fan out a
+        batch…' dialog and the phone deck's fan-out card, both
+        through submit_fan_out. Each fanned turn is a Code turn
+        in its own fresh conversation (no history, no plan slot
+        — Plan turns never detach, so they never fan), under the
+        owner's approved plan and the ordinary per-turn gates;
+        the stage follows the newest fanned turn, exactly as
+        switching conversations does today, and Mission Control
+        tracks every stream."""
         if getattr(self, "_fanout_run", None) is not None:
             message = ("Fan-out refused — a fan-out is already "
                        "running. Wait for it to finish first.")
@@ -23704,7 +23950,8 @@ class ForgeWindow(QMainWindow):
                 batch, self._max_parallel_turns(),
                 self._fanout_spawn,
                 log=lambda event, **fields: self.eventlog.record(
-                    event, **fields))
+                    event, **fields),
+                sequential=sequential)
         except ValueError as exc:
             message = str(exc)
             self.log(message)
@@ -25257,6 +25504,54 @@ class ForgeWindow(QMainWindow):
                           num_ctx=num_ctx)
         return True
 
+    def prune_context_archives(self, older_than_days=None):
+        """Remainder R6: prune this project's fold archives older
+        than the threshold (days; the saved setting when not
+        given). Archives the current trajectory.json points at
+        are never deleted, however old. Returns the prune result
+        dict; logs only when something was actually deleted or
+        went wrong, so a quiet prune stays quiet."""
+        empty = {"deleted": [], "kept_referenced": [],
+                 "kept_new": [], "errors": [], "freed_bytes": 0}
+        if not self.workspace:
+            return dict(empty, error="No project open.")
+        if older_than_days is None:
+            try:
+                older_than_days = int(self.settings.get(
+                    "archive_prune_days",
+                    context_mod.ARCHIVE_PRUNE_DEFAULT_DAYS) or 30)
+            except (TypeError, ValueError):
+                older_than_days = context_mod.ARCHIVE_PRUNE_DEFAULT_DAYS
+        try:
+            result = context_mod.prune_archives(self.workspace,
+                                                older_than_days)
+        except ValueError as exc:
+            self.log(f"Archive prune refused — {exc}")
+            return dict(empty, error=str(exc))
+        if result["deleted"] or result["errors"]:
+            self.eventlog.record(
+                "context_archives_pruned",
+                deleted=len(result["deleted"]),
+                kept_referenced=len(result["kept_referenced"]),
+                errors=len(result["errors"]),
+                freed_bytes=result["freed_bytes"])
+            self.log(f"Pruned {len(result['deleted'])} context "
+                     f"archive(s), freed "
+                     f"{human_size(result['freed_bytes'])}; "
+                     f"{len(result['kept_referenced'])} referenced "
+                     f"archive(s) kept.")
+        return result
+
+    def _auto_prune_archives(self):
+        """Remainder R6: the auto-prune setting (default OFF) —
+        after a fold, old unreferenced archives go. OFF means
+        nothing is ever deleted automatically."""
+        if not bool(self.settings.get("archive_auto_prune", False)):
+            return
+        if not self.workspace:
+            return
+        self.prune_context_archives()
+
     def _launch_fold(self, model, options, plan, then_start: bool, text: str = "",
                      num_ctx=None):
         # The caller's plan was made against a specific budget (the
@@ -25347,6 +25642,10 @@ class ForgeWindow(QMainWindow):
                 self.persist_conversation()
                 self.render()
                 self._update_context_gauge()
+                # Remainder R6: the archive just grew by one —
+                # the auto-prune setting (OFF unless the owner
+                # opted in) gets its run here.
+                self._auto_prune_archives()
             else:
                 self.log("The summary would not have shrunk the conversation — left exactly as it was.")
                 # Study item M8: the between-turn fold could not
@@ -25499,7 +25798,15 @@ class ForgeWindow(QMainWindow):
         # must never mint a rule that auto-allows a later call
         # without the owner judging it. The default (True) keeps
         # every existing caller exactly as it was.
-        show_remember = name != LONG_TURN_TOOL and allow_remember
+        # Re-audit C13 (S7 W1): an update must never grow one
+        # either — a rule keys on the slug alone, never on the
+        # code, so Remember would auto-allow every later version
+        # unseen. The owner still approves each update with its
+        # diff; the dialog just offers no Remember for it.
+        # (evaluate_rules carries the matching carve-out, so a
+        # rule minted before this fix is inert too.)
+        show_remember = (name != LONG_TURN_TOOL and allow_remember
+                         and name not in perm_mod.UPDATE_TOOLS)
         if diff is not None:
             dialog = ApprovalDialog(self, model, name, target,
                                     (description or "").split("\n", 1)[0],

@@ -47,7 +47,12 @@ from pathlib import Path
 from . import gofish as gofish_mod
 
 STEP_STATES = ("pending", "active", "done", "interrupted")
-PLAN_STATUSES = ("draft", "running", "done", "killed", "interrupted")
+# Remainder R2: "abandoned" joins the statuses — the owner
+# ended the plan outright (window.abandon_plan). Like "killed"
+# it is terminal: _plan_restore only converts draft/running to
+# interrupted, so an abandoned sidecar stays abandoned.
+PLAN_STATUSES = ("draft", "running", "done", "killed",
+                 "interrupted", "abandoned")
 
 _NUM_RE = re.compile(r"^\s*(\d+)[.)]\s+(\S.*)$")
 _BOX_RE = re.compile(r"^\s*[-*]\s*\[[ xX]\]\s+(\S.*)$")

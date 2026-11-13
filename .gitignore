@@ -13,3 +13,25 @@ venv/
 
 # Release zips (built from the tree; the repo carries the source, not the zip)
 *.zip
+
+# Secrets and local credentials — NEVER in the repo.
+# Keys and tokens live in the owner's settings/vault, never in code.
+.env
+.env.*
+*.env
+*.key
+*.pem
+*.p12
+*.pfx
+*.keystore
+id_rsa*
+providers.json
+connectors.json
+vault.json
+vault.key
+credentials*
+*credentials*.json
+*secret*.json
+local-config.json
+config.local.*
+.netrc

@@ -29,6 +29,15 @@ them. Rendering is strict in the other direction: a required
 param with no value and no default, or a placeholder naming no
 declared param, raises RecipeError — authoring bugs are loud,
 never silently sent.
+
+Remainder R3 — drafts: a recipe draft lives in
+`recipes/drafts/<slug>.json`, NOT in `recipes/` itself. The
+loader globs the folder root only, so a draft is never loaded
+and never runnable until the owner moves it up to `recipes/`
+(that move is the promotion — the draft's "draft": true key is
+dropped by _normalize_recipe on load, so a promoted draft loads
+exactly like an authored recipe). Forge's save-a-run offer
+writes drafts there; nothing else reads the folder.
 """
 from __future__ import annotations
 

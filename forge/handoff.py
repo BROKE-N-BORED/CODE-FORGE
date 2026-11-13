@@ -16,14 +16,19 @@ VERDICT: / FINDING: lines):
     FILES: <files it read, ran or changed, one per line, or (none)>
     EVIDENCE: <commands run and what they returned / what it saw>
     OPEN: <anything unfinished, risks found, or (none)>
+    DECISIONS: <what was decided, what was rejected and why,
+                or (none)> — OPTIONAL (Remainder R8)
 
 parse_handoff reads those lines wherever they sit in the return
 (the seat's prose above them is untouched) and reports which
-fields are missing. A return with at least one schema line is a
-seat that ATTEMPTED the format; a return with none is the legacy
-verdict-only shape, which the callers leave byte-identical and
-the keeper ignores — it is still usable through its VERDICT line,
-and flagging every old-style report would be noise, not signal.
+fields are missing. DECISIONS is never missing: the validator
+requires only the five fields above, and a return without it
+parses byte-identically to before — its decisions are simply [].
+A return with at least one schema line is a seat that ATTEMPTED
+the format; a return with none is the legacy verdict-only shape,
+which the callers leave byte-identical and the keeper ignores —
+it is still usable through its VERDICT line, and flagging every
+old-style report would be noise, not signal.
 
 REPAIR: a caller that gets an attempted-but-incomplete handoff
 sends ONE repair prompt naming only the missing sections, then
@@ -37,9 +42,14 @@ runs once at task end over the turn's validated handoffs and
 keeps, at most MAX_KEEPER_BULLETS_PER_TASK bullets:
   - every OPEN item (unfinished work is the pointer worth
     persisting), as "Open (<seat>): <item>";
+  - every DECISIONS item (Remainder R8 — what was decided is
+    the record worth keeping), as "Decision (<seat>): <item>";
   - a tester FAIL verdict, as one pointer to the failure;
   - GoFish Blocker/Major findings, as pointers to the plan
     gate's own findings.
+Decisions the cap drops are counted, not silently lost: the
+pass returns decisions_dropped (the R7 truncation convention —
+the count is on the record, in the return and the log).
 A clean task — no open items, no failures, no findings — writes
 nothing and creates no file. Bullets land in
 <project>/.forge/learnings.md in CR1's bullet shape
@@ -63,10 +73,15 @@ from pathlib import Path
 
 FIELDS = ("asked", "done", "files", "evidence", "open")
 
+# Remainder R8: the OPTIONAL sixth section. It is NOT in FIELDS —
+# the validator never requires it, the repair never asks for it,
+# and a handoff without it parses exactly as before.
 _HEADERS = {"ASKED": "asked", "DONE": "done", "FILES": "files",
-            "EVIDENCE": "evidence", "OPEN": "open"}
+            "EVIDENCE": "evidence", "OPEN": "open",
+            "DECISIONS": "decisions"}
 
-_HEADER_RE = re.compile(r"^\s*(ASKED|DONE|FILES|EVIDENCE|OPEN)\s*:\s*(.*)$")
+_HEADER_RE = re.compile(
+    r"^\s*(ASKED|DONE|FILES|EVIDENCE|OPEN|DECISIONS)\s*:\s*(.*)$")
 
 # A field value that means "nothing here", not a value.
 _EMPTY_VALUES = {"", "none", "(none)", "-", "n/a", "nil"}
@@ -87,13 +102,28 @@ def _split_list(value: str) -> list[str]:
     return out
 
 
+def _split_lines(value: str) -> list[str]:
+    """A DECISIONS: value into items — one per line, "- " bullets
+    stripped, "(none)" dropped. Commas do NOT split: a decision
+    is a sentence, and "chose SQLite, rejected Postgres because
+    it needs a server" is ONE decision, not two."""
+    out: list[str] = []
+    for chunk in str(value or "").splitlines():
+        item = chunk.strip().lstrip("-*• ").strip()
+        if item and not _is_empty(item):
+            out.append(item)
+    return out
+
+
 def parse_handoff(text: str) -> tuple[dict, list[str], bool]:
     """Parse a seat return into (handoff, missing, attempted).
 
     handoff: {"asked": str, "done": str, "files": [str],
-    "evidence": str, "open": [str]}. missing: the fields absent
-    or empty, in schema order. attempted: at least one schema
-    header line was present at all."""
+    "evidence": str, "open": [str], "decisions": [str]}.
+    missing: the REQUIRED fields absent or empty, in schema
+    order — DECISIONS is optional and never appears here.
+    attempted: at least one schema header line was present at
+    all."""
     values: dict[str, list[str]] = {}
     current: str | None = None
     for line in str(text or "").splitlines():
@@ -112,6 +142,8 @@ def parse_handoff(text: str) -> tuple[dict, list[str], bool]:
         "files": _split_list("\n".join(values.get("files", []))),
         "evidence": "\n".join(values.get("evidence", [])).strip(),
         "open": _split_list("\n".join(values.get("open", []))),
+        "decisions": _split_lines(
+            "\n".join(values.get("decisions", []))),
     }
     missing = [f for f in FIELDS
                if (not handoff[f] if f in ("files", "open")
@@ -170,32 +202,63 @@ def keeper_add(root: str | Path, text: str,
 
 # ---------- the keeper pass ----------
 
-def _candidates(handoffs: list[dict]) -> list[str]:
-    """The keepable bullets for one task's handoffs, in order.
-    OPEN items first per handoff, then failure pointers — a
-    verdict or finding is evidence worth re-checking, a passing
-    handoff with nothing open keeps nothing."""
-    out: list[str] = []
+def _candidates(handoffs: list[dict]) -> list[tuple[str, str]]:
+    """The keepable bullets for one task's handoffs, in order,
+    as (kind, text) pairs — kind is "open", "decision",
+    "failure" or "finding". OPEN items first per handoff, then
+    decisions (Remainder R8), then failure pointers — a verdict
+    or finding is evidence worth re-checking, a passing handoff
+    with nothing open keeps nothing."""
+    out: list[tuple[str, str]] = []
     for entry in handoffs or []:
         seat = str(entry.get("seat") or "seat")
         if entry.get("unparsed"):
             continue  # raw text lives in the history/log already
         parsed = entry.get("parsed") or {}
         for item in parsed.get("open") or []:
-            out.append(f"Open ({seat}): {_flatten(item)[:200]}")
+            out.append(("open",
+                        f"Open ({seat}): {_flatten(item)[:200]}"))
+        for item in parsed.get("decisions") or []:
+            out.append(("decision",
+                        f"Decision ({seat}): {_flatten(item)[:200]}"))
         evidence = str(parsed.get("evidence") or "")
         if seat == "tester" and "VERDICT: FAIL" in evidence.upper():
             first = next((ln.strip() for ln in evidence.splitlines()
                           if ln.strip()), "")
             asked = _flatten(parsed.get("asked") or "")[:120]
-            out.append(f"Tester reported FAIL on '{asked}': "
-                       f"{first[:160]}")
+            out.append(("failure",
+                        f"Tester reported FAIL on '{asked}': "
+                        f"{first[:160]}"))
         for finding in entry.get("findings") or []:
             if str(finding.get("severity", "")).capitalize() in (
                     "Blocker", "Major"):
-                out.append(f"GoFish {finding['severity']}: "
-                           f"{_flatten(finding.get('text', ''))[:200]}")
+                out.append(("finding",
+                            f"GoFish {finding['severity']}: "
+                            f"{_flatten(finding.get('text', ''))[:200]}"))
     return out
+
+
+def _keeper_log(log, event: str, **fields) -> None:
+    """The keeper's log call in the caller's shape. The worker's
+    _log takes (event, **fields); the window's log takes one
+    plain string — and the fan-out path passes the window's, so
+    the event-style call used to raise TypeError inside the
+    pass, silently resetting `discarded` to 0 (fixed in place,
+    Remainder R8). Try the event shape; a one-arg log earns the
+    plain line instead. A log failure never eats the pass."""
+    if log is None:
+        return
+    try:
+        log(event, **fields)
+    except TypeError:
+        try:
+            detail = ", ".join(f"{k} {v}"
+                               for k, v in fields.items())
+            log(f"{event}: {detail}" if detail else event)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def keeper_pass(root: str | Path, handoffs: list[dict],
@@ -204,15 +267,21 @@ def keeper_pass(root: str | Path, handoffs: list[dict],
     Writes at most MAX_KEEPER_BULLETS_PER_TASK curated bullets
     and logs what it kept and discarded. Never raises — a keeper
     failure must never eat the turn it closes. Returns
-    {"kept": n, "discarded": n, "path": str|None}."""
+    {"kept": n, "discarded": n, "path": str|None,
+    "decisions_dropped": n} — decisions_dropped counts the
+    decision bullets the per-task cap dropped (the R7 truncation
+    convention: the count is on the record, not silent)."""
     kept = 0
     path = None
+    decisions_dropped = 0
     try:
         candidates = _candidates(handoffs)
         discarded = 0
-        for text in candidates:
+        for kind, text in candidates:
             if kept >= MAX_KEEPER_BULLETS_PER_TASK:
                 discarded += 1
+                if kind == "decision":
+                    decisions_dropped += 1
                 continue
             filed = keeper_add(root, text)
             if filed is None:
@@ -221,13 +290,13 @@ def keeper_pass(root: str | Path, handoffs: list[dict],
                 kept += 1
                 path = str(filed)
         if log is not None and (kept or discarded):
-            log("keeper_pass", kept=kept, discarded=discarded,
-                path=path)
-        return {"kept": kept, "discarded": discarded, "path": path}
+            _keeper_log(log, "keeper_pass", kept=kept,
+                        discarded=discarded, path=path,
+                        decisions_dropped=decisions_dropped)
+        return {"kept": kept, "discarded": discarded, "path": path,
+                "decisions_dropped": decisions_dropped}
     except Exception as exc:  # the keeper never eats the turn
         if log is not None:
-            try:
-                log("keeper_failed", error=str(exc)[:160])
-            except Exception:
-                pass
-        return {"kept": kept, "discarded": 0, "path": path}
+            _keeper_log(log, "keeper_failed", error=str(exc)[:160])
+        return {"kept": kept, "discarded": 0, "path": path,
+                "decisions_dropped": decisions_dropped}

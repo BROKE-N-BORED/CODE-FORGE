@@ -99,6 +99,11 @@ def base_catalog() -> list:
                ["receipts", "panel", "dock"], "Windows"),
         _entry("plan_window", "Plan window", "Ctrl+Shift+P",
                ["plan", "checklist", "window", "panel", "dock"], "Windows"),
+        # Remainder R2: abandon a running plan — the owner ends
+        # it outright and no resume ever re-arms it.
+        _entry("abandon_plan", "Abandon plan…", "",
+               ["abandon", "plan", "stop", "end", "cancel",
+                "give up", "quit"], "Actions"),
         _entry("run_window", "Run window", "Ctrl+Shift+B",
                ["run", "output", "window", "program", "panel"], "Run"),
         _entry("test_now", "Test now — tester seat", "test",

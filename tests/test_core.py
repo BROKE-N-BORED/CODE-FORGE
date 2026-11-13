@@ -379,6 +379,133 @@ class ConversationHistoryWindowTests(unittest.TestCase):
         self.assertIn("beta soup recipe", texts[0])
 
 
+class ProjectScopedConversationsTests(unittest.TestCase):
+    """Project-scoped conversations (2026-11-13, Joshua's order):
+    a chat started in a project is saved IN that project, and the
+    [02] CONVERSATIONS panel shows the current project's chats.
+    Chats with no recorded project — and chats whose project
+    folder is gone — stay reachable everywhere, marked Unfiled.
+    The panel chrome is unchanged: same buttons, same layout."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win.conversation_id = None
+        self.win.messages = []
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+        self.win.history_search.setText("")
+        self.proj_a = root / "project-a"
+        self.proj_a.mkdir()
+        self.proj_b = root / "project-b"
+        self.proj_b.mkdir()
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(self.proj_a)
+        # Force the rebuild: the R45 signature is window state and
+        # a previous test may have left an identical one behind.
+        self.win._history_signature = None
+        self.chat_a = self.win.store.save(None, [
+            {"role": "user", "content": "alpha project plans"},
+            {"role": "assistant", "content": "drawn up"}],
+            project=str(self.proj_a))
+        self.chat_b = self.win.store.save(None, [
+            {"role": "user", "content": "beta project plans"},
+            {"role": "assistant", "content": "simmer gently"}],
+            project=str(self.proj_b))
+        self.chat_unfiled = self.win.store.save(None, [
+            {"role": "user", "content": "unfiled old chat"},
+            {"role": "assistant", "content": "noted"}])
+        self.chat_empty = self.win.store.save(None, [
+            {"role": "user", "content": "empty project chat"},
+            {"role": "assistant", "content": "noted"}],
+            project="")
+        self.chat_orphan = self.win.store.save(None, [
+            {"role": "user", "content": "orphaned folder chat"},
+            {"role": "assistant", "content": "noted"}],
+            project=str(root / "gone-project"))
+        self.win.refresh_history()
+
+    def tearDown(self):
+        self.win.history_search.setText("")
+        self.win.deck._server = self._real_server
+        self.win.worker = None
+        self.win.workspace = self._old_workspace
+        self.win._history_signature = None
+        self.temp.cleanup()
+
+    def _history_button_texts(self):
+        texts = []
+        for i in range(self.win.history_list.count()):
+            widget = self.win.history_list.itemAt(i).widget()
+            if widget is not None:
+                texts.append(widget.text())
+        return texts
+
+    def test_persist_records_the_current_project(self):
+        self.win.messages = [
+            {"role": "user", "content": "fresh chat in project a"},
+            {"role": "assistant", "content": "hello"}]
+        self.win.conversation_id = None
+        self.win.persist_conversation()
+        self.assertIsNotNone(self.win.conversation_id)
+        _model, project = self.win.store.meta(self.win.conversation_id)
+        self.assertEqual(project, str(self.proj_a))
+
+    def test_panel_shows_only_the_current_projects_chats_plus_unfiled(self):
+        texts = self._history_button_texts()
+        self.assertEqual(len(texts), 4)
+        self.assertTrue(any("alpha project plans" in t for t in texts))
+        self.assertTrue(any("unfiled old chat" in t for t in texts))
+        self.assertTrue(any("empty project chat" in t for t in texts))
+        self.assertTrue(any("orphaned folder chat" in t for t in texts))
+        self.assertFalse(any("beta project plans" in t for t in texts))
+        # Unfiled rows carry the marker; the project's own chat does not.
+        for t in texts:
+            if "alpha project plans" in t:
+                self.assertNotIn("Unfiled", t)
+            else:
+                self.assertIn("Unfiled", t)
+
+    def test_switching_projects_realigns_the_panel(self):
+        self.win.set_project(str(self.proj_b))
+        texts = self._history_button_texts()
+        self.assertEqual(len(texts), 4)
+        self.assertTrue(any("beta project plans" in t for t in texts))
+        self.assertFalse(any("alpha project plans" in t for t in texts))
+        self.assertTrue(any("unfiled old chat" in t for t in texts))
+
+    def test_search_stays_inside_the_current_project(self):
+        self.win.history_search.setText("beta")
+        self.assertEqual(self._history_button_texts(), [])
+        self.win.history_search.setText("alpha")
+        texts = self._history_button_texts()
+        self.assertEqual(len(texts), 1)
+        self.assertIn("alpha project plans", texts[0])
+        self.win.history_search.setText("")
+        self.assertEqual(len(self._history_button_texts()), 4)
+
+    def test_loading_a_cross_project_conversation_realigns_the_panel(self):
+        self.win.load_conversation(self.chat_b)
+        self.assertEqual(self.win.workspace, str(self.proj_b))
+        texts = self._history_button_texts()
+        self.assertTrue(any("beta project plans" in t for t in texts))
+        self.assertFalse(any("alpha project plans" in t for t in texts))
+
+
 class GovernorTests(unittest.TestCase):
     def snap(self, avail=6.0, busy=False, loaded=None):
         return {"avail_gb": avail, "total_gb": 8.0, "load_1min": 0.5 if not busy else 9.0,
@@ -1173,10 +1300,10 @@ class ContextBudgetTests(unittest.TestCase):
         # The exemption: the pending SKRIBE grading generation keeps
         # its tools even when the payload is already past the stop
         # fraction. Measured fixture: with this script the estimated
-        # payloads are 1386 (write), 1444 (quiet answer), 1666
-        # (grading) — a 1700-token window stays under 90% for the
-        # first two generations (0.82, 0.85) and crosses it only at
-        # the grading generation (0.98), which is exactly the one
+        # payloads are 1499 (write), 1557 (quiet answer), 1779
+        # (grading) — a 1850-token window stays under 90% for the
+        # first two generations (0.81, 0.84) and crosses it only at
+        # the grading generation (0.96), which is exactly the one
         # the exemption protects. The client records the estimate of
         # every call so the fixture cannot silently drift under the
         # threshold: the test asserts the crossing really happened.
@@ -1187,14 +1314,17 @@ class ContextBudgetTests(unittest.TestCase):
         # Recalibrated 2026-11-11: the code_graph tool (Tier 2 #2)
         # added one built-in schema, ~159 estimated tokens on every
         # generation — the window moved from 1550 to 1700 to keep
-        # the same three relationships.)
+        # the same three relationships. Recalibrated 2026-11-13:
+        # the export_replay tool added one built-in schema, ~113
+        # estimated tokens on every generation — the window moved
+        # from 1700 to 1850 to keep the same three relationships.)
         from forge.worker import AgentWorker
         with tempfile.TemporaryDirectory() as td:
             log = _FakeEventLog()
             client = _GradingClient()
             worker = AgentWorker(
                 client, "maternion/minicpm5-heretic:2b",
-                [{"role": "user", "content": "go"}], {"num_ctx": 1700},
+                [{"role": "user", "content": "go"}], {"num_ctx": 1850},
                 td, eventlog=log)
             worker.approval_needed.connect(
                 lambda *a: worker.resolve_approval(True))
@@ -1204,10 +1334,10 @@ class ContextBudgetTests(unittest.TestCase):
             worker.run()
             self.assertEqual(client.calls, 3)
             # The first two generations were under the fraction…
-            self.assertLess(client.estimates[0], 0.90 * 1700)
-            self.assertLess(client.estimates[1], 0.90 * 1700)
+            self.assertLess(client.estimates[0], 0.90 * 1850)
+            self.assertLess(client.estimates[1], 0.90 * 1850)
             # …the grading generation was over it…
-            self.assertGreaterEqual(client.estimates[2], 0.90 * 1700)
+            self.assertGreaterEqual(client.estimates[2], 0.90 * 1850)
             # …and still kept its tools, with no budget trip logged.
             self.assertTrue(client.schemas_seen[2])
             self.assertNotIn("context_budget_stop", log.kinds())
@@ -1316,7 +1446,12 @@ class ContextContinuityTests(unittest.TestCase):
             # stop fires — asserted below). Same precedent as the
             # 2026-11-09 file-kit recalibration in the SKRIBE
             # grading test above.
-            self.assertTrue(all(f["estimate"] < 7380 for f in folds))
+            # Recalibrated 2026-11-13: the export_replay tool
+            # added one built-in schema, ~113 estimated tokens on
+            # every generation — the fold estimates moved from
+            # 6151/7306 to 6264/7419, so the ceiling moved from
+            # 7380 to 7500 to keep the same headroom.
+            self.assertTrue(all(f["estimate"] < 7500 for f in folds))
             self.assertNotIn("context_budget_stop", log.kinds())
             self.assertEqual(hits["n"], 1)
             self.assertTrue(any(m.get("summary") for m in worker.messages))
@@ -8993,6 +9128,38 @@ class DeckPlanActionTests(unittest.TestCase):
         self.assertIn("/plan?k=", PAGE)               # the endpoint it posts to
         self.assertIn("p.status === 'draft'", PAGE)   # shown only for a draft
 
+    def test_page_has_abandon_control_for_a_running_plan(self):
+        # Remainder R2: the Abandon row shows only while the plan
+        # is running or interrupted — never for a draft.
+        from forge.deck import PAGE
+        self.assertIn('id="planabandon"', PAGE)
+        self.assertIn("Abandon plan", PAGE)
+        self.assertIn("planAction('abandon')", PAGE)
+        self.assertIn("p.status === 'running'", PAGE)
+        self.assertIn("p.status === 'interrupted'", PAGE)
+
+    def test_abandon_from_the_phone_ends_a_running_plan(self):
+        # Remainder R2: /plan with "abandon" lands on
+        # abandon_plan through the same slot as approve/kill.
+        from forge import planning
+        self.win.plan_state = planning.new_plan(["Step A", "Step B"])
+        self.win.plan_state["status"] = "running"
+        holder = self._holder()
+        self.win._deck_plan_action("abandon", holder)
+        self.assertTrue(holder["event"].is_set())
+        self.assertTrue(holder["result"][0])
+        self.assertIn("abandoned", holder["result"][1].lower())
+        self.assertEqual(self.win.plan_state["status"], "abandoned")
+
+    def test_abandon_from_the_phone_refuses_a_draft(self):
+        from forge import planning
+        self.win.plan_state = planning.new_plan(["Step A"])
+        holder = self._holder()
+        self.win._deck_plan_action("abandon", holder)
+        self.assertFalse(holder["result"][0])
+        self.assertIn("Kill", holder["result"][1])
+        self.assertEqual(self.win.plan_state["status"], "draft")
+
     def test_approve_releases_the_gate_with_the_current_steps(self):
         from forge import planning
         self.win.plan_state = planning.new_plan(["Step A", "Step B"])
@@ -9098,6 +9265,14 @@ class DeckPlanActionTests(unittest.TestCase):
             self.assertIs(body["ok"], False)
             self.assertIn("no longer waiting", body["error"])
             self.assertEqual(seen, ["approve", "kill"])
+            # Abandon reaches the window too (Remainder R2).
+            verdict["answer"] = (True,
+                "Plan abandoned — it ends here.")
+            status, body = post({"action": "abandon"})
+            self.assertEqual(status, 200)
+            self.assertIs(body["ok"], True)
+            self.assertIn("abandoned", body["message"].lower())
+            self.assertEqual(seen, ["approve", "kill", "abandon"])
         finally:
             server.stop()
 
@@ -10803,6 +10978,191 @@ class PlanningWindowTests(unittest.TestCase):
         step2 = self.win.plan_state["steps"][1]
         self.assertEqual(step2["state"], "active")
         self.assertEqual(step2["resource"], "")
+
+
+class AbandonPlanTests(unittest.TestCase):
+    """Remainder R2 — the owner abandons a running plan: the
+    trajectory is marked abandoned in memory, in the stored
+    conversation, and in the trajectory.json copy; the sidecar
+    says abandoned; a later resume never re-arms it. Only the
+    owner's explicit act writes "abandoned" — nothing infers it."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from forge import main as main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.store = ConversationStore(root / "c.db")
+        self.win.store = self.store
+        self.win.eventlog = EventLog(root / "log")
+        self._real_app_dir = main_mod.APP_DIR
+        main_mod.APP_DIR = root / "app"
+        self.app_dir = root / "app"
+        self.win.conversation_id = None
+        self.win.plan_state = None
+        self.win.worker = None
+        self.win._plan_render()
+
+    def tearDown(self):
+        from forge import main as main_mod
+        main_mod.APP_DIR = self._real_app_dir
+        self.win.plan_state = None
+        self.win.worker = None
+        self.temp.cleanup()
+
+    def _conversation(self):
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "build the thing"}]
+        return self.store.save(None, msgs, model=None, project=None)
+
+    def _running_plan(self, cid, steps=("One", "Two", "Three")):
+        from forge import planning
+        self.win.load_conversation(cid)
+        plan = planning.new_plan(list(steps),
+                                 request="Build the thing")
+        plan["status"] = "running"
+        plan["steps"][0]["state"] = "done"
+        plan["steps"][1]["state"] = "active"
+        self.win.plan_state = plan
+        self.win._plan_render()
+        self.win._plan_persist()
+        return plan
+
+    def test_abandon_marks_everywhere_and_clears_the_plan(self):
+        import json as _json
+        from forge import context as context_mod
+        from forge import planning
+        cid = self._conversation()
+        self._running_plan(cid)
+        old_data = context_mod.build_trajectory(
+            [{"role": "user", "content": "Build the thing"}],
+            plan_steps=["One", "Two", "Three"],
+            plan_done={0}, title="Build the thing")
+        self.win.messages.append(
+            context_mod.trajectory_message(old_data))
+        ws = Path(self.temp.name) / "ws"
+        ws.mkdir()
+        old_workspace = self.win.workspace
+        self.win.workspace = str(ws)
+        try:
+            ok, message = self.win.abandon_plan()
+        finally:
+            self.win.workspace = old_workspace
+        self.assertTrue(ok)
+        self.assertIn("abandoned", message.lower())
+        # In memory, re-rendered.
+        traj = context_mod.latest_trajectory(self.win.messages)
+        self.assertEqual(
+            traj["trajectory_data"]["plan_status"]["status"],
+            "abandoned")
+        self.assertIn("ABANDONED", traj["content"])
+        # In the trajectory.json copy.
+        stored = _json.loads(
+            (ws / ".forge" / "context" / "trajectory.json")
+            .read_text(encoding="utf-8"))
+        self.assertEqual(stored["plan_status"]["status"],
+                         "abandoned")
+        # In the stored conversation: a reload shows the same
+        # abandoned record.
+        self.win.load_conversation(cid)
+        reloaded = context_mod.latest_trajectory(self.win.messages)
+        self.assertEqual(
+            reloaded["trajectory_data"]["plan_status"]["status"],
+            "abandoned")
+        # The sidecar says abandoned; the active step reads
+        # interrupted; the deck snapshot agrees.
+        saved = planning.load_plan(self.app_dir, cid)
+        self.assertEqual(saved["status"], "abandoned")
+        self.assertEqual([s["state"] for s in saved["steps"]],
+                         ["done", "interrupted", "pending"])
+        self.assertEqual(
+            self.win.deck.snapshot()["plan"]["status"], "abandoned")
+        # A resume never re-arms it.
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            worker = AgentWorker(
+                _TrajectoryCaptureClient(), "fake",
+                list(self.win.messages), {"num_ctx": 8000}, td,
+                eventlog=_FakeEventLog())
+            worker._restore_trajectory_plan()
+            self.assertIsNone(worker._plan_steps)
+
+    def test_abandon_refuses_draft_done_and_no_plan(self):
+        from forge import planning
+        # No plan at all.
+        ok, message = self.win.abandon_plan()
+        self.assertFalse(ok)
+        self.assertIn("No plan", message)
+        # A draft has Kill, not Abandon.
+        self.win.plan_state = planning.new_plan(["Step A"])
+        ok, message = self.win.abandon_plan()
+        self.assertFalse(ok)
+        self.assertIn("Kill", message)
+        self.assertEqual(self.win.plan_state["status"], "draft")
+        # A finished plan is already over.
+        self.win.plan_state["status"] = "done"
+        ok, _message = self.win.abandon_plan()
+        self.assertFalse(ok)
+        self.assertEqual(self.win.plan_state["status"], "done")
+        # An already-abandoned plan stays abandoned.
+        self.win.plan_state["status"] = "abandoned"
+        ok, _message = self.win.abandon_plan()
+        self.assertFalse(ok)
+
+    def test_abandon_refuses_while_a_turn_runs(self):
+        cid = self._conversation()
+        self._running_plan(cid)
+        self.win.worker = _PlanRecordingWorker()
+        ok, message = self.win.abandon_plan()
+        self.assertFalse(ok)
+        self.assertIn("running", message.lower())
+        self.assertEqual(self.win.plan_state["status"], "running")
+
+    def test_abandon_without_a_trajectory_still_ends_the_plan(self):
+        # A plan that never saturated has no trajectory on
+        # record — abandon still marks the sidecar, no crash.
+        from forge import planning
+        cid = self._conversation()
+        self._running_plan(cid)
+        ok, _message = self.win.abandon_plan()
+        self.assertTrue(ok)
+        self.assertEqual(self.win.plan_state["status"], "abandoned")
+        self.assertEqual(
+            planning.load_plan(self.app_dir, cid)["status"],
+            "abandoned")
+
+    def test_abandon_button_enabled_only_for_a_live_plan(self):
+        from forge import planning
+        self.assertFalse(self.win.plan_abandon_btn.isEnabled())
+        self.win.plan_state = planning.new_plan(["Step A"])
+        self.win._plan_render()
+        self.assertFalse(self.win.plan_abandon_btn.isEnabled())
+        self.win.plan_state["status"] = "running"
+        self.win._plan_render()
+        self.assertTrue(self.win.plan_abandon_btn.isEnabled())
+        self.win.plan_state["status"] = "interrupted"
+        self.win._plan_render()
+        self.assertTrue(self.win.plan_abandon_btn.isEnabled())
+        self.win.plan_state["status"] = "abandoned"
+        self.win._plan_render()
+        self.assertFalse(self.win.plan_abandon_btn.isEnabled())
+
+    def test_palette_entry_and_binding_exist(self):
+        from forge import palette as palette_mod
+        ids = [e["id"] for e in palette_mod.base_catalog()]
+        self.assertIn("abandon_plan", ids)
+        _entries, bindings = self.win.palette_actions()
+        self.assertIn("abandon_plan", bindings)
 
 
 # ---------------------------------------------------------------------------
@@ -13602,6 +13962,196 @@ class ContextFoldTests(unittest.TestCase):
                                     style="weird")
         self.assertIsNotNone(folded)
         self.assertTrue(folded[1]["content"].startswith(ctx.SUMMARY_PREFIX))
+
+
+class ArchiveCleanupTests(unittest.TestCase):
+    """Remainder R6 — the M2 archive cleanup policy: a visible
+    count/size line, a prune action, and an auto-prune setting
+    that defaults OFF. The hard rule throughout: an archive the
+    current trajectory.json points at is NEVER deleted, however
+    old."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.ws = root / "proj"
+        self.ws.mkdir()
+        self.ctx_dir = self.ws / ".forge" / "context"
+        self.ctx_dir.mkdir(parents=True)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(self.ws)
+        self._old_settings = {
+            key: self.win.settings.get(key, None)
+            for key in ("archive_auto_prune", "archive_prune_days")}
+        self.win.settings.pop("archive_auto_prune", None)
+        self.win.settings.pop("archive_prune_days", None)
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        for key, value in self._old_settings.items():
+            if value is None:
+                self.win.settings.pop(key, None)
+            else:
+                self.win.settings[key] = value
+        self.temp.cleanup()
+
+    def _archive(self, name, size=100, age_days=0):
+        import os
+        import time
+        path = self.ctx_dir / name
+        path.write_text("x" * size, encoding="utf-8")
+        stamp = time.time() - age_days * 86400
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def _trajectory(self, rels):
+        import json
+        (self.ctx_dir / "trajectory.json").write_text(
+            json.dumps({"record_pointer": rels}), encoding="utf-8")
+
+    # -- the pure layer (forge/context.py) -------------------------
+    def test_stats_count_and_size_ignores_other_files(self):
+        from forge import context as ctx
+        self._archive("fold-1.json", size=100)
+        self._archive("fold-2.json", size=200)
+        self._trajectory([".forge/context/fold-1.json"])
+        (self.ctx_dir / "notes.txt").write_text("not an archive")
+        stats = ctx.archive_stats(str(self.ws))
+        self.assertEqual(stats, {"count": 2, "bytes": 300})
+
+    def test_stats_missing_folder_is_zero(self):
+        from forge import context as ctx
+        self.assertEqual(ctx.archive_stats(str(self.ws / "nope")),
+                         {"count": 0, "bytes": 0})
+
+    def test_referenced_archives_reads_record_pointer(self):
+        from forge import context as ctx
+        self._trajectory([".forge/context/fold-1.json",
+                          ".forge/context/fold-3.json",
+                          ".forge/context/not-a-fold.md"])
+        self.assertEqual(ctx.referenced_archives(str(self.ws)),
+                         {"fold-1.json", "fold-3.json"})
+
+    def test_prune_removes_only_old_unreferenced(self):
+        from forge import context as ctx
+        import time
+        old = self._archive("fold-1.json", size=100, age_days=40)
+        ref = self._archive("fold-2.json", size=200, age_days=40)
+        new = self._archive("fold-3.json", size=300, age_days=1)
+        self._trajectory([".forge/context/fold-2.json"])
+        result = ctx.prune_archives(str(self.ws), 30,
+                                    now=time.time())
+        self.assertEqual(result["deleted"], ["fold-1.json"])
+        self.assertEqual(result["kept_referenced"], ["fold-2.json"])
+        self.assertEqual(result["kept_new"], ["fold-3.json"])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["freed_bytes"], 100)
+        self.assertFalse(old.exists())
+        self.assertTrue(ref.exists())
+        self.assertTrue(new.exists())
+        # trajectory.json itself is never a prune target.
+        self.assertTrue((self.ctx_dir / "trajectory.json").exists())
+
+    def test_no_trajectory_means_no_references(self):
+        from forge import context as ctx
+        import time
+        old = self._archive("fold-1.json", size=50, age_days=40)
+        result = ctx.prune_archives(str(self.ws), 30,
+                                    now=time.time())
+        self.assertEqual(result["deleted"], ["fold-1.json"])
+        self.assertFalse(old.exists())
+
+    def test_unreadable_trajectory_refuses_prune(self):
+        from forge import context as ctx
+        import time
+        old = self._archive("fold-1.json", size=50, age_days=40)
+        (self.ctx_dir / "trajectory.json").write_text(
+            "{not json", encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            ctx.prune_archives(str(self.ws), 30, now=time.time())
+        self.assertIn("trajectory.json", str(caught.exception))
+        # Nothing deleted when the record is unreadable.
+        self.assertTrue(old.exists())
+
+    # -- the window: dialog line, prune button, auto-prune --------
+    def test_dialog_line_shows_count_and_size(self):
+        from forge.main import SettingsDialog
+        self._archive("fold-1.json", size=100)
+        self._archive("fold-2.json", size=200)
+        dlg = SettingsDialog(self.win, {})
+        self.assertEqual(dlg.archives_line.text(),
+                         "2 files, 300 bytes")
+        dlg2 = SettingsDialog(self.win, {})
+        (self.ctx_dir / "fold-1.json").unlink()
+        (self.ctx_dir / "fold-2.json").unlink()
+        dlg2.archives_line.setText(dlg2._archives_text())
+        self.assertEqual(dlg2.archives_line.text(),
+                         "0 files — nothing archived yet.")
+
+    def test_dialog_defaults_auto_prune_off_days_30(self):
+        from forge.main import SettingsDialog
+        dlg = SettingsDialog(self.win, {})
+        self.assertFalse(dlg.archive_auto_prune.isChecked())
+        self.assertEqual(dlg.archive_prune_days.value(), 30)
+        values = dlg.values()
+        self.assertFalse(values["archive_auto_prune"])
+        self.assertEqual(values["archive_prune_days"], 30)
+        dlg2 = SettingsDialog(
+            self.win, {"archive_auto_prune": True,
+                       "archive_prune_days": 7})
+        self.assertTrue(dlg2.archive_auto_prune.isChecked())
+        self.assertEqual(dlg2.archive_prune_days.value(), 7)
+
+    def test_prune_button_deletes_old_keeps_referenced(self):
+        from forge.main import SettingsDialog
+        old = self._archive("fold-1.json", size=100, age_days=40)
+        ref = self._archive("fold-2.json", size=200, age_days=40)
+        new = self._archive("fold-3.json", size=300, age_days=1)
+        self._trajectory([".forge/context/fold-2.json"])
+        dlg = SettingsDialog(self.win, {})
+        dlg._prune_archives()
+        self.assertFalse(old.exists())
+        self.assertTrue(ref.exists())
+        self.assertTrue(new.exists())
+        self.assertIn("Pruned 1 archive(s)", dlg.prune_message.text())
+        self.assertIn("2 kept", dlg.prune_message.text())
+        self.assertEqual(dlg.archives_line.text(),
+                         "2 files, 500 bytes")
+
+    def test_auto_prune_off_does_nothing(self):
+        old = self._archive("fold-1.json", size=100, age_days=40)
+        self.win.settings["archive_auto_prune"] = False
+        self.win._auto_prune_archives()
+        self.assertTrue(old.exists())
+
+    def test_auto_prune_on_deletes_old_keeps_referenced(self):
+        old = self._archive("fold-1.json", size=100, age_days=40)
+        ref = self._archive("fold-2.json", size=200, age_days=40)
+        self._trajectory([".forge/context/fold-2.json"])
+        self.win.settings["archive_auto_prune"] = True
+        self.win.settings["archive_prune_days"] = 30
+        self.win._auto_prune_archives()
+        self.assertFalse(old.exists())
+        self.assertTrue(ref.exists())
+
+    def test_prune_with_no_workspace_returns_error(self):
+        self.win.workspace = ""
+        result = self.win.prune_context_archives()
+        self.assertEqual(result["deleted"], [])
+        self.assertIn("No project open", result["error"])
 
 
 class _FoldClient:
@@ -47543,11 +48093,12 @@ class AntiRutTests(unittest.TestCase):
 
 class HandoffKeeperTests(unittest.TestCase):
     """Study item M7: seat returns close in a fixed five-field
-    schema (ASKED/DONE/FILES/EVIDENCE/OPEN), a missing-field return
-    gets exactly one repair round, an unparseable return reaches
-    its caller flagged with the raw text intact, and the keeper
-    pass at task end files at most a few curated bullets in
-    .forge/learnings.md — never a raw dump."""
+    schema (ASKED/DONE/FILES/EVIDENCE/OPEN) plus an OPTIONAL
+    sixth section, DECISIONS (Remainder R8); a missing-field
+    return gets exactly one repair round, an unparseable return
+    reaches its caller flagged with the raw text intact, and the
+    keeper pass at task end files at most a few curated bullets
+    in .forge/learnings.md — never a raw dump."""
 
     FULL = ("WRONG: nothing. MISSING: a test. CHANGE: add one.\n"
             "ASKED: build the thing\n"
@@ -47592,6 +48143,66 @@ class HandoffKeeperTests(unittest.TestCase):
         self.assertIn("OPEN", text)
         self.assertNotIn("ASKED", text)
         self.assertNotIn("DONE", text)
+
+    # -- Remainder R8: the OPTIONAL DECISIONS section --
+
+    def test_parse_decisions_section(self):
+        from forge import handoff
+        text = self.FULL + (
+            "\nDECISIONS: chose SQLite for the store\n"
+            "- rejected Postgres, it needs a server")
+        parsed, missing, attempted = handoff.parse_handoff(text)
+        self.assertEqual(missing, [])
+        self.assertTrue(attempted)
+        self.assertEqual(parsed["decisions"],
+                         ["chose SQLite for the store",
+                          "rejected Postgres, it needs a server"])
+
+    def test_parse_without_decisions_is_byte_identical(self):
+        # Remainder R8: a legacy handoff without DECISIONS parses
+        # exactly as before — the five required fields are
+        # untouched, decisions is simply [].
+        from forge import handoff
+        parsed, missing, attempted = handoff.parse_handoff(self.FULL)
+        self.assertEqual(missing, [])
+        self.assertTrue(attempted)
+        self.assertEqual(parsed["decisions"], [])
+        self.assertEqual(parsed["asked"], "build the thing")
+        self.assertEqual(parsed["done"], "wrote the feature and its test")
+        self.assertEqual(parsed["files"], ["a.py", "b.py"])
+        self.assertIn("pytest passed", parsed["evidence"])
+        self.assertEqual(parsed["open"], ["re-check the timeout path"])
+
+    def test_decisions_never_missing_never_repaired(self):
+        # Remainder R8: the validator must NOT require DECISIONS
+        # — a return missing OPEN reports only OPEN, and the
+        # repair never asks for DECISIONS.
+        from forge import handoff
+        text = ("ASKED: build it\nDONE: built it\n"
+                "FILES: a.py\nEVIDENCE: it ran\n")
+        parsed, missing, attempted = handoff.parse_handoff(text)
+        self.assertEqual(missing, ["open"])
+        self.assertNotIn("decisions", missing)
+        self.assertEqual(parsed["decisions"], [])
+        self.assertNotIn("DECISIONS",
+                         handoff.repair_instruction(missing))
+
+    def test_decisions_comma_is_one_decision(self):
+        # A decision is a sentence — commas do not split it.
+        from forge import handoff
+        text = self.FULL + ("\nDECISIONS: chose SQLite, rejected "
+                            "Postgres because it needs a server")
+        parsed, _missing, _attempted = handoff.parse_handoff(text)
+        self.assertEqual(parsed["decisions"],
+                         ["chose SQLite, rejected Postgres because "
+                          "it needs a server"])
+
+    def test_decisions_none_is_empty(self):
+        from forge import handoff
+        parsed, missing, _attempted = handoff.parse_handoff(
+            self.FULL + "\nDECISIONS: (none)")
+        self.assertEqual(parsed["decisions"], [])
+        self.assertEqual(missing, [])
 
     # -- the council seat, end to end --
 
@@ -47807,6 +48418,98 @@ class HandoffKeeperTests(unittest.TestCase):
         w2.run()
         self.assertEqual(path.read_text(encoding="utf-8"), before)
 
+    def test_keeper_files_decision_bullets(self):
+        # Remainder R8: DECISIONS items land in learnings.md as
+        # "Decision (<seat>): <item>", after the OPEN items.
+        from forge import handoff
+        root = tempfile.mkdtemp()
+        handoffs = [{"seat": "council", "unparsed": False,
+                     "parsed": {"asked": "build it", "done": "built it",
+                                "files": [], "evidence": "ran fine",
+                                "open": ["check the timeout path"],
+                                "decisions": [
+                                    "chose SQLite for the store",
+                                    "rejected Postgres, needs a server"]},
+                     "missing": [], "findings": []}]
+        result = handoff.keeper_pass(root, handoffs)
+        self.assertEqual(result["kept"], 3)
+        self.assertEqual(result["decisions_dropped"], 0)
+        text = (Path(root) / ".forge" / "learnings.md").read_text(
+            encoding="utf-8")
+        self.assertIn("Open (council): check the timeout path", text)
+        self.assertIn("Decision (council): chose SQLite for the store",
+                      text)
+        self.assertIn("Decision (council): rejected Postgres, "
+                      "needs a server", text)
+
+    def test_keeper_cap_counts_dropped_decisions(self):
+        # Remainder R8: decisions the per-task cap drops are
+        # COUNTED (the R7 truncation convention), not silently
+        # lost.
+        from forge import handoff
+        root = tempfile.mkdtemp()
+        handoffs = [{"seat": "council", "unparsed": False,
+                     "parsed": {"asked": "build it", "done": "built it",
+                                "files": [], "evidence": "ran fine",
+                                "open": ["check the timeout path",
+                                         "check the retry path"],
+                                "decisions": ["chose A", "chose B",
+                                              "chose C"]},
+                     "missing": [], "findings": []}]
+        result = handoff.keeper_pass(root, handoffs)
+        self.assertEqual(result["kept"], 3)  # 2 open + 1 decision
+        self.assertEqual(result["discarded"], 2)
+        self.assertEqual(result["decisions_dropped"], 2)
+        text = (Path(root) / ".forge" / "learnings.md").read_text(
+            encoding="utf-8")
+        self.assertIn("Decision (council): chose A", text)
+        self.assertNotIn("chose B", text)
+        self.assertNotIn("chose C", text)
+
+    def test_keeper_log_accepts_a_one_arg_log(self):
+        # Fixed in place (Remainder R8): the fan-out path passes
+        # the window's one-arg log, and the event-style call used
+        # to raise TypeError inside the pass — silently resetting
+        # `discarded` to 0. A one-arg log now earns the plain line
+        # and the true counts come back.
+        from forge import handoff
+        root = tempfile.mkdtemp()
+        handoffs = [{"seat": "council", "unparsed": False,
+                     "parsed": {"asked": "build it", "done": "built it",
+                                "files": [], "evidence": "ran fine",
+                                "open": ["one", "two", "three", "four"]},
+                     "missing": [], "findings": []}]
+        calls = []
+        result = handoff.keeper_pass(
+            root, handoffs, log=lambda msg: calls.append(msg))
+        self.assertEqual(result["kept"], 3)
+        self.assertEqual(result["discarded"], 1)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("keeper_pass", calls[0])
+        self.assertIn("kept 3", calls[0])
+
+    def test_council_decisions_flow_end_to_end(self):
+        # Remainder R8: a reviewer return with DECISIONS parses
+        # into the council handoff and the keeper files it.
+        ws = tempfile.mkdtemp()
+        reply = self.FULL + ("\nDECISIONS: chose SQLite, rejected "
+                             "Postgres because it needs a server")
+        client = self._reply_client(
+            [{"content": "first draft"}, {"content": "revised draft"}],
+            [reply])
+        w, finished = self._worker(client, ws, council=True,
+                                   reviewer_model="rev-model")
+        w.run()
+        self.assertEqual(w._council_handoff["parsed"]["decisions"],
+                         ["chose SQLite, rejected Postgres because "
+                          "it needs a server"])
+        path = Path(ws) / ".forge" / "learnings.md"
+        self.assertTrue(path.exists())
+        self.assertIn("Decision (council): chose SQLite, rejected "
+                      "Postgres because it needs a server",
+                      path.read_text(encoding="utf-8"))
+        self.assertIn("revised draft", finished[0])
+
     def test_keeper_writes_nothing_for_clean_task(self):
         ws = tempfile.mkdtemp()
         clean = ("WRONG: nothing.\nASKED: build the thing\n"
@@ -47932,6 +48635,175 @@ class TrajectorySummaryTests(unittest.TestCase):
         self.assertEqual(data["record_pointer"],
                          [".forge/context/fold-1.json"])
         self.assertIn(".forge/context/fold-1.json",
+                      context_mod.render_trajectory(data))
+
+    def _fat_history(self, n_files=32, n_errors=13):
+        """A history with more files and errors than the caps
+        hold: n_files distinct successful writes, n_errors
+        distinct failed tool results."""
+        msgs = [{"role": "user", "content": "build everything"}]
+        for i in range(n_files):
+            path = f"src/f{i:02d}.py"
+            msgs.append({"role": "assistant", "content": "",
+                         "tool_calls": [
+                             {"function": {
+                                 "name": "write_file",
+                                 "arguments": {"path": path,
+                                               "content": "x"}}}]})
+            msgs.append({"role": "tool", "name": "write_file",
+                         "content": f"Wrote {path}"})
+        for i in range(n_errors):
+            msgs.append({"role": "tool", "name": "run_command",
+                         "content": f"Tool error: boom {i}"})
+        return msgs
+
+    def test_truncation_counts_are_exact_in_json(self):
+        # Remainder R7: the caps no longer truncate silently —
+        # the dropped counts are fixed fields, exact.
+        from forge import context as context_mod
+        steps = [f"Step {i}" for i in range(25)]
+        data = context_mod.build_trajectory(
+            self._fat_history(), plan_steps=steps, plan_done=set(),
+            title="Big run")
+        self.assertEqual(list(data.keys()),
+                         list(context_mod.TRAJECTORY_FIELDS))
+        self.assertEqual(len(data["files_changed"]), 20)
+        self.assertEqual(data["files_changed_truncated"], 12)
+        self.assertEqual(len(data["errors"]), 10)
+        self.assertEqual(data["errors_truncated"], 3)
+        self.assertEqual(len(data["open_items"]), 20)
+        self.assertEqual(data["open_items_truncated"], 5)
+
+    def test_render_marks_truncation_with_exact_counts(self):
+        from forge import context as context_mod
+        steps = [f"Step {i}" for i in range(25)]
+        data = context_mod.build_trajectory(
+            self._fat_history(), plan_steps=steps, plan_done=set(),
+            title="Big run")
+        text = context_mod.render_trajectory(data)
+        self.assertIn("(+12 more files, see fold archives)", text)
+        self.assertIn("(+3 more errors, see fold archives)", text)
+        self.assertIn("(+5 more open items, see fold archives)",
+                      text)
+
+    def test_no_truncation_no_marker(self):
+        from forge import context as context_mod
+        data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget")
+        self.assertEqual(data["files_changed_truncated"], 0)
+        self.assertEqual(data["errors_truncated"], 0)
+        self.assertEqual(data["open_items_truncated"], 0)
+        text = context_mod.render_trajectory(data)
+        self.assertNotIn("more files", text)
+        self.assertNotIn("more errors", text)
+        self.assertNotIn("more open items", text)
+
+    def test_singular_marker(self):
+        from forge import context as context_mod
+        data = context_mod.build_trajectory(
+            self._fat_history(n_files=21, n_errors=0))
+        self.assertEqual(data["files_changed_truncated"], 1)
+        self.assertIn("(+1 more file, see fold archives)",
+                      context_mod.render_trajectory(data))
+
+    def test_legacy_record_without_counts_renders_unchanged(self):
+        # Remainder R7: a trajectory written before the counts
+        # existed has no *_truncated keys — it renders exactly as
+        # it always did, no marker invented.
+        from forge import context as context_mod
+        legacy = {"goal": "Build the widget",
+                  "plan_status": None,
+                  "files_changed": ["src/a.py"],
+                  "decisions": [],
+                  "errors": ["Tool error: boom"],
+                  "open_items": ["Ship it"],
+                  "record_pointer": []}
+        with_zeros = dict(legacy,
+                          files_changed_truncated=0,
+                          errors_truncated=0,
+                          open_items_truncated=0)
+        self.assertEqual(context_mod.render_trajectory(legacy),
+                         context_mod.render_trajectory(with_zeros))
+        self.assertNotIn("more files",
+                         context_mod.render_trajectory(legacy))
+
+    def test_stored_json_carries_counts_sorted(self):
+        from forge import context as context_mod
+        import json
+        data = context_mod.build_trajectory(self._fat_history())
+        with tempfile.TemporaryDirectory() as td:
+            rel = context_mod.store_trajectory(td, data)
+            self.assertEqual(rel, ".forge/context/trajectory.json")
+            raw = (Path(td) / ".forge" / "context"
+                   / "trajectory.json").read_text(encoding="utf-8")
+            stored = json.loads(raw)
+            self.assertEqual(stored["files_changed_truncated"], 12)
+            self.assertEqual(stored["errors_truncated"], 3)
+            # sort_keys discipline: the file's keys are sorted.
+            self.assertEqual(list(stored.keys()),
+                             sorted(stored.keys()))
+
+    def test_trajectory_carries_handoff_decisions(self):
+        # Remainder R8: the trajectory's decisions field is
+        # populated from handoff DECISIONS items when present —
+        # replacing "(not recorded)".
+        from forge import context as context_mod
+        handoffs = [{"parsed": {"open": [],
+                                "decisions": [
+                                    "chose SQLite for the store",
+                                    "rejected Postgres, needs a server"]}}]
+        data = context_mod.build_trajectory(
+            self._history(), handoffs=handoffs)
+        self.assertEqual(data["decisions"],
+                         ["chose SQLite for the store",
+                          "rejected Postgres, needs a server"])
+        self.assertEqual(data["decisions_truncated"], 0)
+        text = context_mod.render_trajectory(data)
+        self.assertIn("Decisions: chose SQLite for the store; "
+                      "rejected Postgres, needs a server", text)
+        self.assertNotIn("Decisions: (not recorded)", text)
+
+    def test_trajectory_decisions_merge_plan_doc_first(self):
+        # Remainder R8: plan-document decisions (the owner's
+        # record) come first, then the seats', deduplicated.
+        from forge import context as context_mod
+        handoffs = [{"parsed": {"open": [],
+                                "decisions": [
+                                    "chose SQLite for the store",
+                                    "use the stdlib only"]}}]
+        data = context_mod.build_trajectory(
+            self._history(), handoffs=handoffs,
+            decisions=["chose SQLite for the store",
+                       "ship one install only"])
+        self.assertEqual(data["decisions"],
+                         ["chose SQLite for the store",
+                          "ship one install only",
+                          "use the stdlib only"])
+
+    def test_trajectory_decisions_capped_with_marker(self):
+        # Remainder R8: decisions cap at 10, with the R7
+        # truncation convention — exact count in the JSON, marker
+        # in the render.
+        from forge import context as context_mod
+        handoffs = [{"parsed": {"open": [],
+                                "decisions": [f"decision {i}"
+                                              for i in range(12)]}}]
+        data = context_mod.build_trajectory(
+            self._history(), handoffs=handoffs)
+        self.assertEqual(len(data["decisions"]), 10)
+        self.assertEqual(data["decisions_truncated"], 2)
+        self.assertIn("(+2 more decisions, see fold archives)",
+                      context_mod.render_trajectory(data))
+
+    def test_trajectory_without_decisions_unchanged(self):
+        # Remainder R8: no decisions anywhere still says so —
+        # the field honestly reports "(not recorded)".
+        from forge import context as context_mod
+        data = context_mod.build_trajectory(self._history())
+        self.assertEqual(data["decisions"], [])
+        self.assertEqual(data["decisions_truncated"], 0)
+        self.assertIn("Decisions: (not recorded)",
                       context_mod.render_trajectory(data))
 
     def test_store_and_replacement_shrink_a_fat_history(self):
@@ -48140,6 +49012,64 @@ class TrajectorySummaryTests(unittest.TestCase):
         self.assertIn("do not resume this one", msgs[0]["content"])
         self.assertIsNone(context_mod.supersede_trajectory(msgs))
 
+    def test_abandon_helper_marks_only_a_live_plan(self):
+        # Remainder R2: the same live-plan rules as supersede,
+        # through the abandon helper — the owner's explicit act.
+        from forge import context as context_mod
+        # Nothing to abandon: no trajectory at all.
+        self.assertIsNone(context_mod.abandon_trajectory(
+            [{"role": "user", "content": "hi"}]))
+        # No plan on record.
+        no_plan = context_mod.build_trajectory(self._history())
+        msgs = [context_mod.trajectory_message(no_plan)]
+        self.assertIsNone(context_mod.abandon_trajectory(msgs))
+        # A finished plan needs no mark.
+        done_data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0, 1, 2}, title="Build the widget")
+        msgs = [context_mod.trajectory_message(done_data)]
+        self.assertIsNone(context_mod.abandon_trajectory(msgs))
+        # A live plan: marked, re-rendered, and idempotent —
+        # and a superseded plan is already dead, not re-marked.
+        data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget")
+        msgs = [context_mod.trajectory_message(data),
+                {"role": "user", "content": "continue"}]
+        marked = context_mod.abandon_trajectory(msgs)
+        self.assertIsNotNone(marked)
+        self.assertEqual(marked["plan_status"]["status"],
+                         "abandoned")
+        self.assertIn("ABANDONED", msgs[0]["content"])
+        self.assertIn("do not resume it", msgs[0]["content"])
+        self.assertIsNone(context_mod.abandon_trajectory(msgs))
+        data2 = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget")
+        msgs2 = [context_mod.trajectory_message(data2)]
+        context_mod.supersede_trajectory(msgs2)
+        self.assertIsNone(context_mod.abandon_trajectory(msgs2))
+
+    def test_live_unfinished_trajectory_rearms(self):
+        # The positive side of the dead-plan tests: an
+        # INTERRUPTED plan (live, unfinished) still re-arms —
+        # abandon must never break the ordinary resume.
+        from forge import context as context_mod
+        from forge.worker import AgentWorker
+        data = context_mod.build_trajectory(
+            self._history(), plan_steps=self._steps(),
+            plan_done={0}, title="Build the widget")
+        msgs = [context_mod.trajectory_message(data),
+                {"role": "user", "content": "continue"}]
+        with tempfile.TemporaryDirectory() as td:
+            worker = AgentWorker(_TrajectoryCaptureClient(), "fake",
+                                 msgs, {"num_ctx": 8000}, td,
+                                 eventlog=_FakeEventLog())
+            worker._restore_trajectory_plan()
+            self.assertEqual(worker._plan_steps, self._steps())
+            self.assertEqual(worker._plan_done, {0})
+            self.assertEqual(worker._plan_title, "Build the widget")
+
     def test_superseded_and_abandoned_trajectories_rearm_nothing(self):
         from forge import context as context_mod
         from forge.worker import AgentWorker
@@ -48158,15 +49088,17 @@ class TrajectorySummaryTests(unittest.TestCase):
             self.assertIsNone(worker._plan_steps)
             self.assertEqual(worker._plan_done, set())
             self.assertIn("trajectory_plan_skipped", log.kinds())
-            # Abandoned is dead the same way (no UI writes it
-            # yet — a future explicit-abandon path will).
+            # Abandoned is dead the same way — and the abandon
+            # helper (Remainder R2) writes it now, so the
+            # restore is exercised through the real path.
             data2 = context_mod.build_trajectory(
                 self._history(), plan_steps=self._steps(),
                 plan_done={0}, title="Build the widget")
-            data2["plan_status"]["status"] = "abandoned"
-            worker.messages = [
-                context_mod.trajectory_message(data2),
-                {"role": "user", "content": "continue"}]
+            msgs2 = [context_mod.trajectory_message(data2),
+                     {"role": "user", "content": "continue"}]
+            self.assertIsNotNone(
+                context_mod.abandon_trajectory(msgs2))
+            worker.messages = msgs2
             worker._restore_trajectory_plan()
             self.assertIsNone(worker._plan_steps)
 
@@ -48356,6 +49288,125 @@ class SessionReplayTests(unittest.TestCase):
                                  "Chat", self._messages(), self._entries()))
 
 
+class ReplayToolTests(unittest.TestCase):
+    """Remainder R4 — the agent-callable replay tool: the M9
+    export seam as a builtin tool the model can call. Write
+    class, approval gated, offered in Code mode only; it renders
+    the live messages through the same export_replay the menu
+    calls, so both doors land on one file per conversation.
+    Transcript-only from the agent (the timeline lives in the
+    window's session marks); the file says so."""
+
+    def _worker(self, td, messages, conversation_id=7):
+        from forge.worker import AgentWorker
+        return AgentWorker(_TrajectoryCaptureClient(), "fake-model",
+                           messages, {"num_ctx": 8000}, td,
+                           eventlog=_FakeEventLog(),
+                           conversation_id=conversation_id)
+
+    def test_tool_is_listed_write_class_and_code_only(self):
+        from forge.tools import TOOL_SCHEMAS, BUILTIN_NAMES
+        from forge import permissions as perms_mod
+        self.assertIn("export_replay", BUILTIN_NAMES)
+        schema = [s for s in TOOL_SCHEMAS
+                  if s["function"]["name"] == "export_replay"]
+        self.assertEqual(len(schema), 1)
+        self.assertEqual(
+            schema[0]["function"]["parameters"]["properties"], {})
+        self.assertEqual(perms_mod.tool_class("export_replay"),
+                         "write")
+        names = list(BUILTIN_NAMES)
+        self.assertIn("export_replay",
+                      perms_mod.mode_visible_tools("code", names))
+        self.assertNotIn("export_replay",
+                         perms_mod.mode_visible_tools("ask", names))
+        self.assertNotIn("export_replay",
+                         perms_mod.mode_visible_tools("research",
+                                                      names))
+
+    def test_call_writes_the_file_and_returns_the_path(self):
+        from pathlib import Path
+        messages = [
+            {"role": "user", "content": "build the widget"},
+            {"role": "assistant", "content": "Done."},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            worker = self._worker(td, messages, conversation_id=7)
+            result = worker._dispatch("export_replay", {})
+            path = Path(td) / ".forge" / "replays" \
+                / "conversation-7-replay.html"
+            self.assertTrue(path.is_file())
+            self.assertIn(str(path), result)
+            self.assertIn("transcript-only", result)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("build the widget", text)
+            self.assertIn("No timeline recorded for this session",
+                          text)
+            # Same deterministic file the menu export writes.
+            from forge import replay as replay_mod
+            self.assertEqual(
+                replay_mod.export_replay(
+                    td, 7, "Chat", messages, []),
+                path)
+
+    def test_hostile_content_still_escaped_through_the_tool(self):
+        from pathlib import Path
+        messages = [
+            {"role": "user",
+             "content": "<script>alert('xss')</script>"},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            worker = self._worker(td, messages)
+            worker._dispatch("export_replay", {})
+            text = (Path(td) / ".forge" / "replays"
+                    / "conversation-7-replay.html").read_text(
+                        encoding="utf-8")
+            self.assertNotIn("<script>", text)
+            self.assertIn("&lt;script&gt;", text)
+            self.assertNotIn('href="', text)
+            self.assertNotIn('src="', text)
+
+    def test_approval_behaviour_follows_the_write_convention(self):
+        from forge.tools import describe_tool
+        from forge import permissions as perms_mod
+        with tempfile.TemporaryDirectory() as td:
+            worker = self._worker(td, [])
+            # Approval gated like every write-class builtin.
+            self.assertTrue(worker._needs_approval("export_replay"))
+            # The approval dialog names the destination, never
+            # the "Unknown tool request" fallback.
+            text = describe_tool("export_replay", {}, td)
+            self.assertIn(".forge/replays/", text)
+            self.assertNotIn("Unknown tool", text)
+            # Ask mode refuses it at the mode gate.
+            allowed, reason = perms_mod.mode_allows(
+                "ask", "export_replay", {})
+            self.assertFalse(allowed)
+            self.assertIn("ASK (read-only)", reason)
+
+    def test_no_conversation_id_uses_the_current_fallback(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as td:
+            worker = self._worker(td, [{"role": "user",
+                                        "content": "hi"}],
+                                  conversation_id=None)
+            result = worker._dispatch("export_replay", {})
+            path = (Path(td) / ".forge" / "replays"
+                    / "conversation-current-replay.html")
+            self.assertTrue(path.is_file())
+            self.assertIn(str(path), result)
+
+    def test_no_workspace_is_a_tool_error_not_a_crash(self):
+        from forge.worker import AgentWorker
+        worker = AgentWorker(_TrajectoryCaptureClient(), "fake",
+                             [{"role": "user", "content": "hi"}],
+                             {"num_ctx": 8000}, "",
+                             eventlog=_FakeEventLog())
+        result = worker._execute("export_replay", {})
+        self.assertTrue(result.startswith("Tool error:"))
+        self.assertIn("workspace", result.lower())
+
+
 class SaveRunAsSkillTests(unittest.TestCase):
     """Study item M10 — "save this run as a skill": OFF by default
     (settings `offer_save_run_as_skill`), so a finished task ends
@@ -48374,7 +49425,7 @@ class SaveRunAsSkillTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def _worker(self, script, hits, log, skills_dir, offer=False,
-                planning=True, approve_save=True):
+                planning=True, approve_save=True, app_dir=None):
         from forge.worker import AgentWorker
         from forge import run_skill as run_skill_mod
         schema = {"type": "function",
@@ -48398,7 +49449,8 @@ class SaveRunAsSkillTests(unittest.TestCase):
                          "classes": {}},
             planning=planning, skribe_writes=False,
             skills_dir=skills_dir,
-            offer_save_run_as_skill=offer)
+            offer_save_run_as_skill=offer,
+            checkpoint_app_dir=app_dir)
         asked = {"names": []}
         drafted = []
         worker.skill_drafted.connect(drafted.append)
@@ -48680,6 +49732,150 @@ class SaveRunAsSkillTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(used, "x-2")
 
+    # -- Remainder R3: the same acceptance drafts a recipe too ----
+    def test_on_success_accept_writes_skill_and_recipe_draft(self):
+        import json as _json
+        from pathlib import Path
+        from forge import recipes as recipes_mod
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        app_dir = Path(tempfile.mkdtemp())
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir,
+            offer=True, app_dir=str(app_dir))
+        self._drive_approved(worker, seen)
+        self.assertEqual(len(drafted), 1)
+        self.assertTrue(drafted[0]["ok"])
+        self.assertTrue(drafted[0]["recipe_ok"])
+        self.assertEqual(drafted[0]["recipe"], "build-it")
+        # The skill landed as before.
+        self.assertTrue(
+            (Path(skills_dir) / "build-it" / "SKILL.md").is_file())
+        # The recipe draft landed in the drafts folder, in the
+        # loader's shape, marked as a draft.
+        recipe_file = (app_dir / "recipes" / "drafts"
+                       / "build-it.json")
+        self.assertTrue(recipe_file.is_file())
+        data = _json.loads(recipe_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["name"], "build it")
+        self.assertIn("build it", data["description"])
+        self.assertEqual(data["params"], [])
+        self.assertEqual(data["mode"], "code")
+        self.assertIs(data["draft"], True)
+        for step in ("Alpha step", "Beta step", "Gamma step"):
+            self.assertIn(step, data["prompt"])
+        self.assertIn("a.py", data["prompt"])
+        # The loader does NOT see a draft — it is not runnable.
+        recipes, problems = recipes_mod.load_recipes(app_dir)
+        self.assertEqual(recipes, [])
+        self.assertEqual(problems, [])
+        # Promoting it (move to recipes/) makes it load + render.
+        promoted = app_dir / "recipes" / "build-it.json"
+        recipe_file.replace(promoted)
+        recipes, problems = recipes_mod.load_recipes(app_dir)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(recipes), 1)
+        self.assertEqual(recipes[0]["name"], "build it")
+        rendered = recipes_mod.render(recipes[0], {})
+        self.assertIn("Alpha step", rendered)
+
+    def test_on_success_decline_writes_no_recipe(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        app_dir = Path(tempfile.mkdtemp())
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir,
+            offer=True, approve_save=False, app_dir=str(app_dir))
+        self._drive_approved(worker, seen)
+        self.assertEqual(drafted, [])
+        self.assertFalse((app_dir / "recipes").exists())
+
+    def test_recipe_draft_never_overwrites(self):
+        import json as _json
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        app_dir = Path(tempfile.mkdtemp())
+        drafts = app_dir / "recipes" / "drafts"
+        drafts.mkdir(parents=True)
+        sentinel = drafts / "build-it.json"
+        sentinel.write_text('{"sentinel": true}\n',
+                            encoding="utf-8")
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir,
+            offer=True, app_dir=str(app_dir))
+        self._drive_approved(worker, seen)
+        self.assertTrue(drafted[0]["ok"])
+        self.assertEqual(drafted[0]["recipe"], "build-it-2")
+        # The sentinel is untouched; the new draft took the suffix.
+        self.assertEqual(
+            _json.loads(sentinel.read_text(encoding="utf-8")),
+            {"sentinel": True})
+        self.assertTrue((drafts / "build-it-2.json").is_file())
+
+    def test_off_writes_no_recipe(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        app_dir = Path(tempfile.mkdtemp())
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir,
+            app_dir=str(app_dir))
+        self._drive_approved(worker, seen)
+        self.assertEqual(drafted, [])
+        self.assertFalse((app_dir / "recipes").exists())
+
+    def test_no_app_dir_skill_only(self):
+        from pathlib import Path
+        hits = {"n": 0}
+        log = _FakeEventLog()
+        skills_dir = tempfile.mkdtemp()
+        worker, client, seen, asked, drafted = self._worker(
+            self._completed_script(), hits, log, skills_dir,
+            offer=True)
+        self._drive_approved(worker, seen)
+        self.assertEqual(len(drafted), 1)
+        self.assertTrue(drafted[0]["ok"])
+        self.assertIsNone(drafted[0]["recipe"])
+        self.assertFalse(drafted[0]["recipe_ok"])
+        self.assertTrue(
+            (Path(skills_dir) / "build-it" / "SKILL.md").is_file())
+
+    def test_build_run_recipe_draft_shape(self):
+        from forge import run_skill as run_skill_mod
+        traj = {"goal": "Build the parser!",
+                "plan_status": {"title": "Build the parser!",
+                                "total": 2, "done": [1, 2],
+                                "steps": ["Create a.py", "Edit b.py"],
+                                "open": []},
+                "files_changed": ["a.py"],
+                "decisions": [], "errors": ["Tool error: boom"],
+                "open_items": [], "record_pointer": []}
+        draft = run_skill_mod.build_run_recipe_draft(
+            traj, success="Parser handles all fixtures")
+        self.assertEqual(draft["slug"], "build-the-parser")
+        self.assertEqual(draft["name"], "Build the parser!")
+        self.assertEqual(draft["params"], [])
+        self.assertEqual(draft["mode"], "code")
+        self.assertIs(draft["draft"], True)
+        self.assertIn("1. Create a.py", draft["prompt"])
+        self.assertIn("2. Edit b.py", draft["prompt"])
+        self.assertIn("Parser handles all fixtures", draft["prompt"])
+        self.assertIn("a.py", draft["prompt"])
+        self.assertIn("boom", draft["prompt"])
+        # No goal on record: falls back to the plan title.
+        draft2 = run_skill_mod.build_run_recipe_draft(
+            {"goal": "(not recorded)",
+             "plan_status": {"title": "Fallback title",
+                             "steps": ["Only step"]}})
+        self.assertEqual(draft2["name"], "Fallback title")
+        self.assertEqual(draft2["slug"], "fallback-title")
+
 
 class AuthoritativeSourcesTests(unittest.TestCase):
     """Study item M11 — authoritative sources before scraping.
@@ -48841,13 +50037,71 @@ class FanOutTests(unittest.TestCase):
         return spawn
 
     # -- validation: the seeding rule and the refusals ------------
-    def test_cap_1_refuses_and_spawns_nothing(self):
+    def test_cap_1_runs_sequentially_one_at_a_time(self):
+        # Remainder R5: cap 1 is NO LONGER a refusal — the batch
+        # runs sequentially, one fresh-context item at a time,
+        # with the same handoff collection. (This test replaces
+        # the old test_cap_1_refuses_and_spawns_nothing.)
         from forge.fanout import FanOutRun
+        items = self._items("a one", "b two", "c three")
         spawn = self._stub_spawn()
-        with self.assertRaises(ValueError) as caught:
-            FanOutRun(self._items("a one", "b two"), 1, spawn)
-        self.assertIn("cap 1", str(caught.exception))
-        self.assertEqual(spawn.state["calls"], [])
+        run = FanOutRun(items, 1, spawn)
+        self.assertTrue(run.sequential)
+        self.assertEqual(run.cap, 1)
+        run.start()
+        # Only the first item starts; the rest queue in order.
+        self.assertEqual(spawn.state["calls"], ["a"])
+        run.on_settled("h1", self._handoff("a one"))
+        self.assertEqual(spawn.state["calls"], ["a", "b"])
+        self.assertFalse(run.done)
+        run.on_settled("h2", self._handoff("b two"))
+        self.assertEqual(spawn.state["calls"], ["a", "b", "c"])
+        run.on_settled("h3", self._handoff("c three"))
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 3)
+        for entry in run.results:
+            self.assertEqual(entry["missing"], [])
+            self.assertFalse(entry["unparsed"])
+
+    def test_sequential_flag_forces_one_at_a_time_at_cap_2(self):
+        # Remainder R5: the owner may choose sequential at cap >
+        # 1 — the run then uses an effective cap of 1.
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two", "c three")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 2, spawn, sequential=True)
+        self.assertTrue(run.sequential)
+        self.assertEqual(run.cap, 1)
+        run.start()
+        self.assertEqual(spawn.state["calls"], ["a"])
+        run.on_settled("h1", self._handoff("a one"))
+        self.assertEqual(spawn.state["calls"], ["a", "b"])
+        run.on_settled("h2", self._handoff("b two"))
+        run.on_settled("h3", self._handoff("c three"))
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 3)
+
+    def test_sequential_repair_round_keeps_one_live(self):
+        # Remainder R5: a repair turn in a sequential run holds
+        # the one slot — the next item does not start until the
+        # repair settles.
+        from forge.fanout import FanOutRun
+        items = self._items("a one", "b two")
+        spawn = self._stub_spawn()
+        run = FanOutRun(items, 1, spawn)
+        run.start()
+        actions = run.on_settled("h1", self._incomplete("a one"))
+        self.assertIsNotNone(actions["repair"])
+        self.assertEqual(spawn.state["calls"], ["a"])
+        run.note_repair("r1", actions["repair"]["index"])
+        actions = run.on_settled("r1", "OPEN: nothing open",
+                                 is_repair=True)
+        self.assertEqual(spawn.state["calls"], ["a", "b"])
+        self.assertFalse(actions["done"])
+        run.on_settled("h2", self._handoff("b two"))
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 2)
+        self.assertEqual(run.results[0]["missing"], [])
 
     def test_dependent_item_refuses_the_whole_batch(self):
         from forge.fanout import FanOutItem, FanOutRun
@@ -49037,6 +50291,16 @@ class FanOutTests(unittest.TestCase):
         for marker in ("ASKED:", "DONE:", "FILES:", "EVIDENCE:", "OPEN:"):
             self.assertIn(marker, text)
 
+    def test_fanout_instruction_carries_optional_decisions(self):
+        # Remainder R8: the fanned turn is asked for DECISIONS —
+        # as an optional section, never a requirement.
+        from forge.fanout import FanOutItem, fanout_instruction
+        text = fanout_instruction(
+            FanOutItem(task="ALPHA task", independent=True))
+        self.assertIn("DECISIONS:", text)
+        self.assertIn("optional", text)
+        self.assertIn("rejected", text)
+
 
 class FanOutWindowTests(unittest.TestCase):
     """Study item M12, window driver: real workers on the #64
@@ -49166,12 +50430,96 @@ class FanOutWindowTests(unittest.TestCase):
                            title=t.split()[0]) for t in tasks]
 
     # -- refusals at the window ------------------------------------
-    def test_cap_1_fan_out_refuses_with_nothing_running(self):
+    def test_cap_1_batch_runs_sequentially_live(self):
+        # Remainder R5: cap 1 is NO LONGER a refusal — the batch
+        # runs sequentially with real workers, one fresh-context
+        # turn at a time, each return collected as a schema-valid
+        # handoff and the keeper fed. (This test replaces the old
+        # test_cap_1_fan_out_refuses_with_nothing_running.)
         self.win.settings["max_parallel_turns"] = 1
-        self.assertFalse(self.win.fan_out_batch(
-            self._items("a one", "b two")))
-        self.assertEqual(self.win._streams, {})
-        self.assertIsNone(self.win.worker)
+        self.client.arm("ALPHA", [[("block",),
+                                   ("text", self._handoff(
+                                       "ALPHA task",
+                                       "check the widget wiring"))]])
+        self.client.arm("BETA", [[("text", self._handoff("BETA task"))]])
+        self.assertTrue(self.win.fan_out_batch(
+            self._items("ALPHA task", "BETA task")))
+        run = self.win._fanout_run
+        self.assertIsNotNone(run)
+        self.assertTrue(run.sequential)
+        self.assertEqual(run.cap, 1)
+        self.assertTrue(self._pump_until(
+            lambda: self.client.entered["ALPHA"].is_set()),
+            "first sequential item never entered its generation")
+        # One at a time: BETA has not started while ALPHA is live.
+        self.assertNotIn("BETA", self.client.calls)
+        self.client.release["ALPHA"].set()
+        self.assertTrue(self._pump_until(
+            lambda: self.win._fanout_run is None),
+            "sequential fan-out never finished")
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 2)
+        for entry in run.results:
+            self.assertEqual(entry["missing"], [])
+            self.assertFalse(entry["unparsed"])
+        # The keeper filed the one OPEN item from the batch.
+        learnings = self.ws / ".forge" / "learnings.md"
+        self.assertTrue(learnings.exists())
+        self.assertIn("check the widget wiring", learnings.read_text())
+
+    def test_submit_fan_out_at_cap_1_says_sequential(self):
+        # Remainder R5: through the UI core at cap 1, the batch
+        # runs and the message says one at a time.
+        self.win.settings["max_parallel_turns"] = 1
+        self.client.arm("ALPHA", [[("text", self._handoff("ALPHA task"))]])
+        self.client.arm("BETA", [[("text", self._handoff("BETA task"))]])
+        ok, message = self.win.submit_fan_out(
+            "ALPHA task\nBETA task", True)
+        self.assertTrue(ok, message)
+        self.assertIn("one at a time", message)
+        run = self.win._fanout_run
+        self.assertIsNotNone(run)
+        self.assertTrue(run.sequential)
+        self.assertTrue(self._pump_until(
+            lambda: self.win._fanout_run is None),
+            "sequential fan-out never finished")
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 2)
+
+    def test_dialog_checkbox_forces_sequential_at_cap_2(self):
+        # Remainder R5: the dialog's checkbox, ticked at cap 2,
+        # runs the batch one at a time. It starts UNCHECKED.
+        from forge.main import FanOutDialog
+        self.client.arm("ALPHA", [[("text", self._handoff("ALPHA task"))]])
+        self.client.arm("BETA", [[("text", self._handoff("BETA task"))]])
+        dlg = FanOutDialog(self.win)
+        self.assertFalse(dlg.seq_check.isChecked())
+        self.assertTrue(dlg.seq_check.isEnabled())
+        dlg.items_edit.setPlainText("ALPHA task\nBETA task")
+        dlg.indep_check.setChecked(True)
+        dlg.seq_check.setChecked(True)
+        dlg._accept()
+        from PySide6.QtWidgets import QDialog
+        self.assertEqual(dlg.result(), QDialog.Accepted)
+        run = self.win._fanout_run
+        self.assertIsNotNone(run)
+        self.assertTrue(run.sequential)
+        self.assertEqual(run.cap, 1)
+        self.assertTrue(self._pump_until(
+            lambda: self.win._fanout_run is None),
+            "sequential fan-out never finished")
+        self.assertTrue(run.done)
+        self.assertEqual(len(run.results), 2)
+
+    def test_dialog_sequential_box_locked_at_cap_1(self):
+        # Remainder R5: at cap 1 the run is sequential anyway,
+        # so the box is checked and locked — no parallel to
+        # choose.
+        from forge.main import FanOutDialog
+        self.win.settings["max_parallel_turns"] = 1
+        dlg = FanOutDialog(self.win)
+        self.assertTrue(dlg.seq_check.isChecked())
+        self.assertFalse(dlg.seq_check.isEnabled())
         self.assertIsNone(self.win._fanout_run)
 
     def test_dependent_batch_refused_at_window(self):
@@ -54891,3 +56239,378 @@ class PresendSecurityReviewTests(unittest.TestCase):
             timeline_mod.presend_stats(records, "beta"),
             {"blocked": 0, "send": 0, "redact": 0, "allow": 0,
              "cancel": 0, "scan_off": 0, "exempted": 0})
+
+
+class C1RcloneProtectionTests(unittest.TestCase):
+    """Re-audit C1 (S2 W1): item #70's cloudstore adopted rclone, and
+    rclone's own config (~/.config/rclone/rclone.conf) holds OAuth
+    refresh tokens — but neither protection list learned about it,
+    so with a broad workspace read_file pulled the tokens with no
+    approval. Both layers now know the name and the segment."""
+
+    def test_read_file_refuses_rclone_conf(self):
+        from forge import tools as tools_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            conf = home / ".config" / "rclone" / "rclone.conf"
+            conf.parent.mkdir(parents=True)
+            conf.write_text("[drive]\nrefresh_token = FAKE-TOKEN\n")
+            with self.assertRaises(tools_mod.ToolError):
+                tools_mod.execute_tool(
+                    "read_file", {"path": ".config/rclone/rclone.conf"},
+                    str(home))
+            # The segment covers the whole config dir, not just the
+            # one file.
+            (conf.parent / "other.conf").write_text("x\n")
+            with self.assertRaises(tools_mod.ToolError):
+                tools_mod.execute_tool(
+                    "read_file", {"path": ".config/rclone/other.conf"},
+                    str(home))
+            # A normal file in the same workspace still reads.
+            (home / "notes.md").write_text("hello\n")
+            self.assertIn("hello", tools_mod.execute_tool(
+                "read_file", {"path": "notes.md"}, str(home)))
+
+    def test_is_sensitive_path_matches_rclone(self):
+        from forge.permissions import is_sensitive_path
+        for path in ("rclone.conf", ".config/rclone/rclone.conf",
+                     ".config/rclone/other.conf",
+                     "~/.config/rclone/rclone.conf"):
+            self.assertTrue(is_sensitive_path(path), path)
+        # Near-misses stay ordinary files: the name must match
+        # exactly as a basename, the segment exactly as a component.
+        for path in ("rclone-notes.md", "src/rclone.py", "notes.md"):
+            self.assertFalse(is_sensitive_path(path), path)
+
+
+class C7DownloadFilenameTests(unittest.TestCase):
+    """Re-audit C7 (S4 W3): /dl interpolated the filename from disk
+    into Content-Disposition verbatim — a quote or CR/LF in a listed
+    document's name injected response headers, and a non-latin-1
+    name crashed the handler. Plain names keep the exact old form;
+    anything else gets an ASCII fallback plus RFC 5987 filename*."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _dl(self, server, path):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        url = (f"http://127.0.0.1:{server.port}/dl?k={server.token}"
+               f"&path={urllib.parse.quote(path)}")
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                return r.status, r.read(), r.headers
+        except urllib.error.HTTPError as exc:
+            return exc.code, b"", exc.headers
+
+    def _serve(self, root, relpaths):
+        from forge.deck import DeckServer
+        server = DeckServer()
+        server.set_state(
+            project={"name": "P", "path": str(root)},
+            documents=[{"name": Path(p).name, "path": p}
+                       for p in relpaths])
+        server.start()
+        return server
+
+    def test_dl_normal_name_is_byte_identical(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "design.md").write_text("# The design\n")
+            server = self._serve(root, ["design.md"])
+            try:
+                status, body, headers = self._dl(server, "design.md")
+            finally:
+                server.stop()
+            self.assertEqual(status, 200)
+            self.assertEqual(body.decode(), "# The design\n")
+            self.assertEqual(headers.get("Content-Disposition"),
+                             'attachment; filename="design.md"')
+
+    def test_dl_quoted_name_downloads_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'quo"te.md').write_text("quoted\n")
+            server = self._serve(root, ['quo"te.md'])
+            try:
+                status, body, headers = self._dl(server, 'quo"te.md')
+            finally:
+                server.stop()
+            self.assertEqual(status, 200)
+            self.assertEqual(body.decode(), "quoted\n")
+            value = headers.get("Content-Disposition")
+            # Exactly the wrapping pair of quotes — the quote in the
+            # name neither breaks out of the quoted string nor
+            # reaches the header raw.
+            self.assertEqual(value.count('"'), 2)
+            self.assertIn('filename="quo_te.md"', value)
+            self.assertIn("filename*=UTF-8''quo%22te.md", value)
+
+    def test_dl_emoji_name_downloads_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "📋 notes.md").write_text("emoji\n")
+            server = self._serve(root, ["📋 notes.md"])
+            try:
+                status, body, headers = self._dl(server, "📋 notes.md")
+            finally:
+                server.stop()
+            self.assertEqual(status, 200)
+            self.assertEqual(body.decode(), "emoji\n")
+            value = headers.get("Content-Disposition")
+            self.assertIn('filename="_ notes.md"', value)
+            self.assertIn("filename*=UTF-8''%F0%9F%93%8B%20notes.md",
+                          value)
+
+    def test_dl_crlf_name_cannot_inject_a_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            evil = "evil.md\r\nX-Injected: yes"
+            (root / evil).write_text("injection attempt\n")
+            server = self._serve(root, [evil])
+            try:
+                status, body, headers = self._dl(server, evil)
+            finally:
+                server.stop()
+            self.assertEqual(status, 200)
+            self.assertEqual(body.decode(), "injection attempt\n")
+            # The fake header never reaches the response.
+            self.assertIsNone(headers.get("X-Injected"))
+            value = headers.get("Content-Disposition")
+            self.assertNotIn("\r", value)
+            self.assertNotIn("\n", value)
+            self.assertIn('filename="evil.md__X-Injected: yes"', value)
+
+    def test_content_disposition_helper_edge_shapes(self):
+        from forge.deck import content_disposition_for_download
+        self.assertEqual(
+            content_disposition_for_download(""),
+            "attachment; filename=\"download\"; filename*=UTF-8''")
+        self.assertEqual(
+            content_disposition_for_download("a\\b.md"),
+            "attachment; filename=\"a_b.md\"; "
+            "filename*=UTF-8''a%5Cb.md")
+
+
+class C13RememberedRuleBypassTests(unittest.TestCase):
+    """Re-audit C13 (S7 W1): a remembered rule keyed on the slug
+    alone used to void the diff gate permanently — one "Approve &
+    remember" click auto-allowed every later update to that plugin
+    or skill, no diff, no dialog. Two halves close it: the gate
+    never offers Remember for update tools, and evaluate_rules
+    never lets a stored allow cover them."""
+
+    OLD_PLUGIN_CODE = ("def _go(args, ctx):\n"
+                       "    return 'old-answer'\n\n"
+                       "HANDLERS = {'go_now': _go}\n")
+    NEW_PLUGIN_CODE = ("def _go(args, ctx):\n"
+                       "    return 'new-answer'\n\n"
+                       "HANDLERS = {'go_now': _go}\n")
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        import forge.main as main_mod
+        self._main = main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.root = root
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(root)
+        self.win.worker = None
+        _RecordingApprovalDialog.instances = []
+        _RecordingApprovalDialog.answer = False
+        self._real_dialog = main_mod.ApprovalDialog
+        main_mod.ApprovalDialog = _RecordingApprovalDialog
+
+    def tearDown(self):
+        self._main.ApprovalDialog = self._real_dialog
+        self.win.workspace = self._old_workspace
+        self.win.worker = None
+        self.temp.cleanup()
+
+    def _plugins_with_demo(self):
+        from forge import create_ext
+        plugins = self.root / "plugins"
+        plugins.mkdir()
+        ok, message = create_ext.create_plugin(
+            plugins, "demo-plugin", "Fetches things.",
+            self.OLD_PLUGIN_CODE)
+        self.assertTrue(ok, message)
+        return plugins
+
+    def _update_worker(self, rules, args, plugins):
+        from forge import create_ext as create_mod
+        from forge.worker import AgentWorker
+        calls = {"handler": 0}
+
+        def _handler(a, ws):
+            calls["handler"] += 1
+            return "updated"
+        extra = {"update_plugin": (create_mod.UPDATE_PLUGIN_SCHEMA,
+                                   _handler, True, "Forge shell")}
+        ws = Path(tempfile.mkdtemp())
+        worker = AgentWorker(_ScriptedClient([
+            {"tool": "update_plugin", "args": args},
+            {"content": "done"}]), "fake",
+            [{"role": "user", "content": "go"}], {}, str(ws),
+            permissions={"rules": rules, "mode": "code", "classes": {}},
+            skribe_writes=False, extra_tools=extra,
+            plugins_dir=plugins)
+        return worker, calls
+
+    # -- the carve-out at evaluate_rules ---------------------------
+    def test_evaluate_rules_never_allows_updates(self):
+        from forge.permissions import evaluate_rules
+        rules = [{"scope": "global", "tool": "update_plugin",
+                  "pattern": "demo-plugin", "action": "allow"},
+                 {"scope": "global", "tool": "update_skill",
+                  "pattern": "demo-skill", "action": "allow"}]
+        self.assertEqual(
+            evaluate_rules(rules, "update_plugin", "demo-plugin"), "ask")
+        self.assertEqual(
+            evaluate_rules(rules, "update_skill", "demo-skill"), "ask")
+        # A deny for an update still denies — the carve-out only
+        # retires the silent approval, never the owner's no.
+        deny = [{"scope": "global", "tool": "update_plugin",
+                 "pattern": "demo-plugin", "action": "deny"}]
+        self.assertEqual(
+            evaluate_rules(deny, "update_plugin", "demo-plugin"), "deny")
+
+    def test_evaluate_rules_other_tools_unaffected(self):
+        from forge.permissions import evaluate_rules, fnmatch_escape
+        rules = [{"scope": "/p", "tool": "run_command",
+                  "pattern": fnmatch_escape("ls -la"), "action": "allow",
+                  "exact": True},
+                 {"scope": "global", "tool": "write_file",
+                  "pattern": "a.py", "action": "allow"}]
+        self.assertEqual(
+            evaluate_rules(rules, "run_command", "ls -la", "/p"), "allow")
+        self.assertEqual(
+            evaluate_rules(rules, "write_file", "a.py"), "allow")
+
+    # -- the worker asks, with a diff, despite the rule ------------
+    def test_worker_asks_with_diff_despite_remembered_rule(self):
+        plugins = self._plugins_with_demo()
+        rules = [{"scope": "global", "tool": "update_plugin",
+                  "pattern": "demo-plugin", "action": "allow"}]
+        args = {"name": "demo-plugin", "description": "Fetches things.",
+                "code": self.NEW_PLUGIN_CODE}
+        worker, calls = self._update_worker(rules, args, plugins)
+        asked = {"calls": []}
+
+        def _ask(name, a, description, diff):
+            asked["calls"].append((name, a, diff))
+            worker.resolve_approval(False)
+        worker.approval_needed.connect(_ask)
+        worker.run()
+        # The gate opened — the rule did not auto-allow — and the
+        # diff arrived with the ask, showing the code change.
+        self.assertEqual(len(asked["calls"]), 1)
+        name, _a, diff = asked["calls"][0]
+        self.assertEqual(name, "update_plugin")
+        self.assertIsNotNone(diff)
+        self.assertIn("-    return 'old-answer'", diff.body)
+        self.assertIn("+    return 'new-answer'", diff.body)
+        # Denied, so the update never executed.
+        self.assertEqual(calls["handler"], 0)
+        self.assertIn("old-answer", (plugins / "demo-plugin"
+                                     / "plugin.py").read_text())
+
+    def test_worker_asks_even_for_identical_code(self):
+        plugins = self._plugins_with_demo()
+        rules = [{"scope": "global", "tool": "update_plugin",
+                  "pattern": "demo-plugin", "action": "allow"}]
+        # The re-proposal is byte-identical to what is on disk —
+        # rules never cover updates, so it still asks.
+        args = {"name": "demo-plugin", "description": "Fetches things.",
+                "code": self.OLD_PLUGIN_CODE}
+        worker, _calls = self._update_worker(rules, args, plugins)
+        asked = {"n": 0}
+
+        def _ask(*a):
+            asked["n"] += 1
+            worker.resolve_approval(False)
+        worker.approval_needed.connect(_ask)
+        worker.run()
+        self.assertEqual(asked["n"], 1)
+
+    def test_remembered_run_command_rule_still_auto_allows(self):
+        from forge.permissions import fnmatch_escape
+        from forge.worker import AgentWorker
+        ws = Path(tempfile.mkdtemp())
+        marker = ws / "ran.txt"
+        cmd = f"touch {marker}"
+        rules = [{"scope": str(ws), "tool": "run_command",
+                  "pattern": fnmatch_escape(cmd), "action": "allow",
+                  "exact": True}]
+        worker = AgentWorker(_ScriptedClient([
+            {"tool": "run_command", "args": {"command": cmd}},
+            {"content": "done"}]), "fake",
+            [{"role": "user", "content": "go"}], {}, str(ws),
+            permissions={"rules": rules, "mode": "code", "classes": {}},
+            skribe_writes=False)
+        asked = {"n": 0}
+        worker.approval_needed.connect(
+            lambda *a: asked.__setitem__("n", asked["n"] + 1))
+        worker.run()
+        self.assertEqual(asked["n"], 0)  # the gate was never opened
+        self.assertTrue(marker.exists())
+
+    # -- the gate never offers Remember for updates ----------------
+    def test_remember_hidden_on_update_approvals(self):
+        from forge import diffview
+        plugins = self._plugins_with_demo()
+        args = {"name": "demo-plugin", "description": "Fetches things.",
+                "code": self.NEW_PLUGIN_CODE}
+        diff = diffview.diff_for_approval(
+            "update_plugin", args, str(self.root), plugins_dir=plugins)
+        self.assertIsNotNone(diff)
+        self.win.request_approval("update_plugin", args,
+                                  "Update plugin demo-plugin?", diff)
+        fake = _RecordingApprovalDialog.instances[0]
+        self.assertIsNotNone(fake.diff)
+        self.assertFalse(fake.show_remember)
+
+    def test_remember_hidden_on_update_skill_approvals(self):
+        from forge import create_ext, diffview
+        skills = self.root / "skills"
+        skills.mkdir()
+        ok, message = create_ext.create_skill(
+            skills, "demo-skill", "Old description.", "old instructions")
+        self.assertTrue(ok, message)
+        args = {"name": "demo-skill", "description": "Old description.",
+                "body": "new instructions"}
+        diff = diffview.diff_for_approval(
+            "update_skill", args, str(self.root), skills_dir=skills)
+        self.assertIsNotNone(diff)
+        self.win.request_approval("update_skill", args,
+                                  "Update skill demo-skill?", diff)
+        fake = _RecordingApprovalDialog.instances[0]
+        self.assertFalse(fake.show_remember)
+
+    def test_remember_still_offered_for_other_tools(self):
+        from forge import diffview
+        (self.root / "a.txt").write_text("old line\n")
+        args = {"path": "a.txt", "content": "new line\n"}
+        diff = diffview.diff_for_approval("write_file", args,
+                                          str(self.root))
+        self.win.request_approval("write_file", args, "Write a.txt?",
+                                  diff)
+        fake = _RecordingApprovalDialog.instances[0]
+        self.assertTrue(fake.show_remember)

@@ -1220,6 +1220,7 @@ class AgentWorker(QThread):
                  mcp_trust_save=None,
                  surface_state: dict | None = None,
                  on_event=None,
+                 conversation_id=None,
                  light_machine: bool = False):
         super().__init__()
         self.client, self.model = client, model
@@ -1258,6 +1259,12 @@ class AgentWorker(QThread):
         # event is observed and dropped: the turn itself is
         # unchanged, and no proposal is ever raised from here.
         self.on_event = on_event
+        # Remainder R4: the conversation this turn belongs to, so
+        # the export_replay tool writes the same deterministic
+        # replay file the menu export writes. None (bare
+        # constructions, every pre-R4 test) earns the "current"
+        # fallback filename.
+        self.conversation_id = conversation_id
         # Study item M5: the session's tool-surface memory — a
         # plain dict the window owns and hands to every worker it
         # builds (the mcp_trust pattern above), so _record_surface
@@ -1663,8 +1670,15 @@ class AgentWorker(QThread):
         (untimed, F8; Stop releases it as a decline), and an
         acceptance writes through create_skill, which refuses a
         taken name — run_skill.draft_skill suffixes instead of
-        overwriting. Nothing here ever raises into the turn: any
-        failure is logged and the turn settles as usual."""
+        overwriting. Remainder R3: the same acceptance also drafts
+        the run as a recipe JSON in the recipes drafts folder
+        (run_skill.build_run_recipe_draft / draft_recipe) — the
+        drafts folder is the recipe equivalent of DISABLED, so the
+        draft is never runnable until the owner promotes it. A
+        recipe failure never fails the skill draft: each write has
+        its own try/except and its own log line. Nothing here ever
+        raises into the turn: any failure is logged and the turn
+        settles as usual."""
         try:
             traj = context_mod.build_trajectory(
                 self.messages, plan_steps=self._plan_steps,
@@ -1672,17 +1686,25 @@ class AgentWorker(QThread):
                 handoffs=handoffs)
             draft = run_skill_mod.build_run_skill_draft(
                 traj, success=getattr(self, "_plan_success", ""))
+            recipe = run_skill_mod.build_run_recipe_draft(
+                traj, success=getattr(self, "_plan_success", ""))
             steps = (traj.get("plan_status") or {}).get("steps") or []
             if not draft.get("name") or not steps:
                 return
         except Exception as exc:
             self._log("save_skill_offer_failed", detail=str(exc)[:300])
             return
+        app_dir = getattr(self, "checkpoint_app_dir", None)
         description = (
             f"Save this run as a skill? The draft '{draft['name']}' — "
             f"{draft['description']} — would be written to the skill "
             f"directory as a new DISABLED skill. Edit it in Customize "
             f"before it can load; declining writes nothing.")
+        if app_dir:
+            description += (
+                f" A recipe draft '{recipe['slug']}' would also be "
+                f"saved in the recipes drafts folder — move it to "
+                f"recipes/ to run it.")
         self.status.emit("Paused — save this run as a skill?…")
         decision = {"approved": False}
         event = threading.Event()
@@ -1705,8 +1727,21 @@ class AgentWorker(QThread):
         except Exception as exc:
             ok, used, message = False, draft["name"], str(exc)[:300]
         self._log("save_skill_drafted", skill=used, ok=ok)
+        recipe_used, recipe_ok, recipe_message = None, False, ""
+        if app_dir:
+            try:
+                recipe_ok, recipe_used, recipe_message = \
+                    run_skill_mod.draft_recipe(app_dir, recipe)
+            except Exception as exc:
+                recipe_ok, recipe_used, recipe_message = (
+                    False, recipe["slug"], str(exc)[:300])
+            self._log("save_recipe_drafted", recipe=recipe_used,
+                      ok=recipe_ok)
         self.skill_drafted.emit({"name": used, "ok": ok,
-                                 "message": message})
+                                 "message": message,
+                                 "recipe": recipe_used,
+                                 "recipe_ok": recipe_ok,
+                                 "recipe_message": recipe_message})
 
     def resolve_plan(self, action: str, steps: list[str] | None = None,
                      comment: str | None = None):
@@ -1931,7 +1966,40 @@ class AgentWorker(QThread):
         markings = production_mod.load_markings(self.workspace)
         return markings if markings.present else None
 
+    def _export_replay_tool(self) -> str:
+        """Remainder R4: export this conversation's replay through
+        the M9 seam — the live messages, rendered by
+        replay.export_replay into .forge/replays/. Transcript-only:
+        the turn timeline lives in the window's session marks,
+        which the worker cannot see, and the render says so
+        honestly (the menu export adds the timeline). The filename
+        is the same deterministic
+        conversation-<id>-replay.html the menu writes, so both
+        doors land on one file per conversation. Returns the
+        replay path."""
+        from . import replay as replay_mod
+        if not self.workspace:
+            raise tools_mod.ToolError(
+                "No workspace open — nothing to replay.")
+        cid = getattr(self, "conversation_id", None) or "current"
+        path = replay_mod.export_replay(
+            self.workspace, cid, "Conversation",
+            list(self.messages), [], model=self.model,
+            project=self.workspace)
+        self._log("replay_export", path=str(path))
+        return (f"Session replay exported → {path} (transcript-only; "
+                f"the turn timeline is added by the menu export.)")
+
     def _dispatch(self, name: str, args: dict) -> str:
+        if name == "export_replay":
+            # Remainder R4: the replay tool is worker-state, not
+            # execute_tool state — it renders THIS turn's live
+            # messages through the M9 export seam, and execute_tool
+            # only sees (name, args, workspace). The destination
+            # is fixed inside .forge/ and the tool takes no path
+            # argument, so there is no path to fence; the write
+            # class (approval gate) is the control.
+            return self._export_replay_tool()
         if name in BUILTIN_NAMES:
             containment = self._containment()
             production = self._production()

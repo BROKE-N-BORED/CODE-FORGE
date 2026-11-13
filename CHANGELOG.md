@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-13 — Project-scoped conversations, security fixes, and plan tools
+
+- The Conversations panel now follows the project on the bench: it shows that project's chats plus unfiled ones, and re-aligns when you switch projects or open a chat from another project. Saved chats were already filed by project; the panel just lists them that way now.
+- Security fixes: the cloud storage config file is protected from tool writes; deck download filenames are sanitized; remembered rules no longer bypass approval for skill and plugin updates.
+- Plans can be abandoned explicitly from the plan window, the palette, or the deck. Runs can be saved as recipe drafts, and a replay can be exported as a tool.
+- Fan-out batches now run sequentially in fresh contexts instead of refusing when the cap is one. Fold archives show their count and size, can be pruned, and auto-prune is off by default. Truncated sections are marked with how much more is in the fold archives. Handoffs can carry a Decisions section.
+- Recipe skills for auth, database, and payments now ship with the build.
+- Repository hygiene: .gitignore now covers secret files (.env, keys, provider and connector configs, vault files).
+
 ## 2026-11-13 — Security gates, plain-language errors, and interface polish
 
 - Error dialogs now say what happened in plain words, with the technical detail underneath — 19 error sites across the app, no behavior changed.
