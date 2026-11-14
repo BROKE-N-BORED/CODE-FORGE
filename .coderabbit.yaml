@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 # .coderabbit.yaml — Broke n' Bored Studio shared config (schema header above
-# lets an editor flag bad keys — the class of mistake that bit us twice)
+# lets an editor validate supported values; unknown nested keys may pass)
 # Drop this file at the repo root, on main. Same file works for every
 # Python/Qt desktop repo (CODE-FORGE, REBLEND, SKULLPT, MIMIK, ...).
 # The reviewer reads the copy on the branch under review, so changes to
@@ -15,14 +15,16 @@ reviews:
   # Arlo triages every finding, so extra signal beats extra noise.
   profile: "assertive"
 
-  # Auto-review on PR open + every push. NOTE: on public repos with fewer
-  # than 10 stars the reviewer does NOT auto-review — trigger it manually
-  # with `@coderabbitai review` on the PR. These settings go live on their
-  # own once a repo crosses 10 stars.
+  # Auto-review on PR open + each push, pausing after 5 reviewed commits
+  # (resume with a manual trigger). NOTE: on public repos with fewer than
+  # 10 stars the reviewer does NOT auto-review — trigger it manually with
+  # `@coderabbitai review` on the PR. These settings go live on their own
+  # once a repo crosses 10 stars.
   auto_review:
     enabled: true
     drafts: false
     auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
 
   # No automatic approvals for now: solo dev, no required reviewers, and
   # nothing should ever merge without Joshua or Arlo looking at it.
