@@ -16,10 +16,11 @@ reviews:
   profile: "assertive"
 
   # Auto-review on PR open + each push, pausing after 5 reviewed commits
-  # (resume with a manual trigger). NOTE: on public repos with fewer than
-  # 10 stars the reviewer does NOT auto-review — trigger it manually with
-  # `@coderabbitai review` on the PR. These settings go live on their own
-  # once a repo crosses 10 stars.
+  # (restart automatic reviews with `@coderabbitai resume`, or request one
+  # review with `@coderabbitai review`). NOTE: on public repos with fewer
+  # than 10 stars the reviewer does NOT auto-review — trigger it manually
+  # with `@coderabbitai review` on the PR. These settings go live on their
+  # own once a repo crosses 10 stars.
   auto_review:
     enabled: true
     drafts: false
