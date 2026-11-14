@@ -1,4 +1,6 @@
-# .coderabbit.yaml — Broke n' Bored Studio shared config
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# .coderabbit.yaml — Broke n' Bored Studio shared config (schema header above
+# lets an editor flag bad keys — the class of mistake that bit us twice)
 # Drop this file at the repo root, on main. Same file works for every
 # Python/Qt desktop repo (CODE-FORGE, REBLEND, SKULLPT, MIMIK, ...).
 # The reviewer reads the copy on the branch under review, so changes to
@@ -20,7 +22,7 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    incremental: true
+    auto_incremental_review: true
 
   # No automatic approvals for now: solo dev, no required reviewers, and
   # nothing should ever merge without Joshua or Arlo looking at it.
