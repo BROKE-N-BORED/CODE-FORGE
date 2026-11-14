@@ -70,6 +70,32 @@ Local models are the default. Code Forge can also talk to **Groq**, **Gemini**, 
 - **8 GB RAM** minimum class machine; CPU-only is fine, no GPU required
 - Optional: **Docker** (only for the Docker-backed contained runs)
 
+## Performance envelope — the budget (item #57)
+
+Code Forge is built for a small box, and says so in numbers. The
+min-spec machine is **8 GB RAM, CPU-only, HDD** (the Requirements
+above). Against that box, the budget — stated in full, with the
+reasoning behind every line, in `forge/perf_budget.py`:
+
+| Line | Budget | Kind |
+|---|---|---|
+| Forge process + all resident models, together | ≤ 6 GB RSS | TARGET |
+| Forge process at idle, no model loaded | ≤ 1 GB RSS | TARGET |
+| Cold start, launch to interactive window | ≤ 30 s | TARGET |
+| Install footprint (what ships) | measured, no ceiling | reported |
+| Default context window | 8,192 tokens | suite-enforced |
+| Generation-diet caps (history folding at 80% of the window, turn budget stop at 90%, per-tool output caps) | pinned in `forge/perf_budget.py` | suite-enforced |
+
+TARGET means exactly that: a promise to be proven by measurement,
+not a measured result. The RAM and cold-start lines are proven — or
+the budget gets revised, with the reason written down — by filling
+in `BENCH.md` on the min-spec PC itself; every number there is
+recorded with its Ollama / llama.cpp engine version, because an
+unversioned number cannot be compared. The suite-enforced lines are checked by `tests/test_perf_budget.py`
+on every run: a change that quietly grows a payload cap fails the
+suite instead of shipping quietly. The install footprint is measured
+and reported by the same test file — there is no size cap on the tree.
+
 ## Install
 
 ```bash
@@ -115,7 +141,7 @@ Each project carries a `.forge/` folder: instructions, plans, design documents, 
 
 - Local models are small models, and small models make mistakes. The approval gates exist so you can catch them; planning, review seats, and grading are part of the app for the same reason.
 - Contained mode without Docker is a guardrail at the tool layer, not an operating-system sandbox.
-- This README lists no performance numbers. Forge has a built-in Bench that measures results on your own hardware.
+- The Performance envelope above lists the budget as targets. Forge has a built-in Bench that measures results on your own hardware.
 
 ## Support Code Forge
 

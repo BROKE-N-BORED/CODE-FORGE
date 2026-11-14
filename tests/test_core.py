@@ -952,11 +952,14 @@ class BatchStopTests(unittest.TestCase):
 
 
 class ToolResultDigestTests(unittest.TestCase):
-    """Audit B18, leg 2: a tool result over 24,000 chars is stored
-    in the conversation as a head+tail digest (the model re-reads
-    it every cycle — an undigested giant would eat the window),
-    while the event log's tool_result record keeps the full text
-    and the turn completes normally."""
+    """Audit B18, leg 2: a tool result over the digest threshold is
+    stored in the conversation as a head+tail digest (the model
+    re-reads it every cycle — an undigested giant would eat the
+    window), while the event log's tool_result record keeps the full
+    text and the turn completes normally. These tests pin the
+    EXPLICIT-setting path (24,000 chars: head 19,200 + tail 4,800,
+    the 80/20 split of the setting); the window-scaled default is
+    pinned by DigestScalingTests."""
 
     def test_oversized_result_digested_in_message_full_in_log(self):
         import forge.worker as worker_mod
@@ -969,7 +972,7 @@ class ToolResultDigestTests(unittest.TestCase):
             log = _FakeEventLog()
             worker = AgentWorker(
                 client, "fake", [{"role": "user", "content": "go"}], {},
-                td, eventlog=log,
+                td, eventlog=log, result_digest_chars=24000,
                 permissions={"rules": rules, "mode": "code",
                              "classes": {}})
             real_execute = worker_mod.execute_tool
@@ -986,10 +989,10 @@ class ToolResultDigestTests(unittest.TestCase):
             tools = [m.get("content", "") for m in worker.messages
                      if m.get("role") == "tool"]
             self.assertEqual(len(tools), 1)
-            expected = ("H" * 16000
-                        + "\n[… 10000 chars elided — the full output of "
+            expected = ("H" * 16000 + "M" * 3200
+                        + "\n[… 6000 chars elided — the full output of "
                           "list_directory is recorded in the event log …]\n"
-                        + "T" * 4000)
+                        + "M" * 800 + "T" * 4000)
             self.assertEqual(tools[0], expected)
             self.assertLess(len(tools[0]), len(full))
             records = [f for k, f in log.events if k == "tool_result"]
@@ -1259,10 +1262,15 @@ class ContextBudgetTests(unittest.TestCase):
                                                   "n": {"type": "integer"}}}}}
         extra = {"big_tool": (schema, lambda args: "R" * 20000,
                               False, "test")}
+        # Context fixes (2026-11-13): these tests pin BUDGET
+        # mechanics — the digest size is a controlled variable, held
+        # at the explicit 24,000 so the 20,000-char result stays
+        # verbatim exactly as the fixture's arithmetic assumes.
         return AgentWorker(client, "fake",
                            [{"role": "user", "content": "go"}],
                            {"num_ctx": num_ctx}, td,
-                           extra_tools=extra, eventlog=log)
+                           extra_tools=extra, eventlog=log,
+                           result_digest_chars=24000)
 
     def test_budget_trip_strips_tools_and_turn_settles(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1407,10 +1415,15 @@ class ContextContinuityTests(unittest.TestCase):
             return "R" * 20000
 
         extra = {"big_tool": (schema, handler, False, "test")}
+        # Context fixes (2026-11-13): these tests pin FOLD
+        # mechanics — the digest size is a controlled variable, held
+        # at the explicit 24,000 so the 20,000-char result stays
+        # verbatim exactly as the fixture's arithmetic assumes.
         worker = AgentWorker(client, "fake",
                              messages or [{"role": "user", "content": "go"}],
                              {"num_ctx": num_ctx}, td,
-                             extra_tools=extra, eventlog=log)
+                             extra_tools=extra, eventlog=log,
+                             result_digest_chars=24000)
         return worker, hits
 
     def _fat_history(self):
@@ -6522,6 +6535,270 @@ class EmberTimerTests(unittest.TestCase):
         w.set_mode("thinking")
         w._tick()
         self.assertTrue(w.timer.isActive())
+
+
+class BrandSparkPulseTests(unittest.TestCase):
+    """Brand-spark breathing pulse (GUIFX, 2026-11-13): Joshua pointed
+    at the amber spark next to CODE FORGE and said keep it exactly
+    like it is but make it glow from the inside, pulsing slowly like
+    breathing. The spark pixmap, colors, size and position are all
+    unchanged — the pulse is two radial-gradient light layers (an
+    amber halo under the pixmap, a hot core over it) whose alpha
+    follows a slow 4 s breathing curve, one smooth peak per breath.
+    (Revised 2026-11-13: the first build pulsed like a double-thump;
+    Joshua corrected it to a slow breath.) These tests FAIL on the
+    pre-change code: the spark was a static QLabel with no timer,
+    no glow, and no BrandSparkWidget at all."""
+
+    # The 13 filled cells of _brand_spark_pixmap(), (col, row): color.
+    _CELLS = {(2, 2): "#fff0a8",
+              (2, 1): "#ffc92e", (1, 2): "#ffc92e",
+              (3, 2): "#ffc92e", (2, 3): "#ffc92e",
+              (1, 1): "#f28c13", (3, 1): "#f28c13",
+              (1, 3): "#f28c13", (3, 3): "#f28c13",
+              (2, 0): "#d95d0b", (0, 2): "#d95d0b",
+              (4, 2): "#d95d0b", (2, 4): "#d95d0b"}
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow, STYLE
+        cls.app.setStyleSheet(STYLE)
+        cls.win = ForgeWindow()
+        # Same sidebar poison guard as HeaderFitTests: a window
+        # created and closed without ever being shown saves
+        # layout_sidebar_collapsed=True to the shared settings.
+        cls.win.set_sidebar_collapsed(False)
+        cls.win.resize(1366, 768)
+        cls.win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+        cls.app.processEvents()
+
+    def _widget(self):
+        from forge.main import BrandSparkWidget
+        w = BrandSparkWidget()
+        self.addCleanup(w._timer.stop)
+        self.addCleanup(w.deleteLater)
+        return w
+
+    def _spark_in_window(self):
+        from PySide6.QtWidgets import QWidget
+        spark = self.win.findChild(QWidget, "brandSpark")
+        self.assertIsNotNone(spark, "no brandSpark widget in the window")
+        return spark
+
+    def test_period_is_slow_breath(self):
+        from forge.main import BrandSparkWidget
+        # A slow resting breath = a 4 s cycle (~2 s in, ~2 s out);
+        # the band is 3-5 s so the rhythm stays slow, never hurried.
+        self.assertGreaterEqual(BrandSparkWidget.PERIOD, 3.0)
+        self.assertLessEqual(BrandSparkWidget.PERIOD, 5.0)
+        # The widget's clock completes exactly one cycle per period.
+        # places=4, not 6: the two monotonic() reads are microseconds
+        # apart, and on the breathing curve's slope that jitter is
+        # ~1e-6 of intensity — a wrong period would differ by far more.
+        import time
+        w = self._widget()
+        w._started = time.monotonic() - 0.3
+        first = w.glow_intensity()
+        w._started = time.monotonic() - 0.3 - BrandSparkWidget.PERIOD
+        self.assertAlmostEqual(w.glow_intensity(), first, places=4)
+
+    def test_glow_varies_across_cycle(self):
+        from forge.main import _breathing_intensity
+        peak = _breathing_intensity(0.5)
+        trough = _breathing_intensity(0.0)
+        self.assertAlmostEqual(peak, 1.0, places=6)
+        self.assertLess(trough, 0.2)
+        self.assertGreater(peak, trough)
+        # One smooth peak per breath: the curve rises monotonically
+        # from trough to peak and falls monotonically back — no
+        # second bump anywhere (this fails on a double-thump curve).
+        samples = [_breathing_intensity(i / 40.0) for i in range(41)]
+        for a, b in zip(samples[:20], samples[1:21]):
+            self.assertLessEqual(a, b)
+        for a, b in zip(samples[20:40], samples[21:41]):
+            self.assertGreaterEqual(a, b)
+        # The old second-beat phase (~0.30) is just part of the rise,
+        # well below the peak — not a bump of its own.
+        self.assertLess(_breathing_intensity(0.30), 0.8)
+        # Every phase stays in range.
+        for i in range(21):
+            v = _breathing_intensity(i / 20.0)
+            self.assertGreaterEqual(v, 0.0)
+            self.assertLessEqual(v, 1.0)
+
+    def test_base_spark_pixels_unchanged(self):
+        from forge.main import _brand_spark_pixmap
+        from PySide6.QtGui import QColor
+        img = _brand_spark_pixmap().toImage()
+        self.assertEqual((img.width(), img.height()), (15, 15))
+        for (x, y), hexcol in self._CELLS.items():
+            got = img.pixelColor(x * 3 + 1, y * 3 + 1)
+            self.assertEqual(got, QColor(hexcol),
+                             "cell (%d,%d) changed" % (x, y))
+        # The four corners stay transparent.
+        for (x, y) in ((0, 0), (4, 0), (0, 4), (4, 4)):
+            self.assertEqual(img.pixelColor(x * 3 + 1, y * 3 + 1).alpha(), 0)
+        # The widget draws the same pixmap, not a recolored copy.
+        # (Compared pixel by pixel: raw QImage bytes can differ by
+        # row stride even for identical pixmaps.)
+        w = self._widget()
+        wimg = w._pixmap.toImage()
+        for y in range(15):
+            for x in range(15):
+                self.assertEqual(wimg.pixelColor(x, y),
+                                 img.pixelColor(x, y))
+
+    def test_geometry_is_15x15(self):
+        # A QLabel sizes itself from its pixmap: same 15x15 as the
+        # old label (a plain QWidget would report an invalid sizeHint
+        # and sit 1 px higher in the row — QLabel placement is the
+        # reason BrandSparkWidget subclasses QLabel).
+        w = self._widget()
+        w.show()
+        self.app.processEvents()
+        self.assertEqual((w.width(), w.height()), (15, 15))
+        self.assertEqual((w.sizeHint().width(), w.sizeHint().height()),
+                         (15, 15))
+        self.assertEqual((w.minimumSizeHint().width(),
+                          w.minimumSizeHint().height()), (15, 15))
+
+    def test_timer_interval_floor(self):
+        w = self._widget()
+        self.assertTrue(w._timer.isActive())
+        self.assertGreaterEqual(w._timer.interval(), 40)
+
+    def test_rendered_glow_differs_by_phase(self):
+        import time
+        w = self._widget()
+        w.show()
+        self.app.processEvents()
+
+        def grab_at(phase):
+            w._started = time.monotonic() - phase
+            w._tick()
+            self.app.processEvents()
+            return w.grab().toImage()
+
+        # Peak of the breath is mid-cycle (elapsed 2.0 of the 4 s
+        # period); the floor is at the top of the cycle (elapsed 0.0).
+        bright = grab_at(2.0)
+        dim = grab_at(0.0)
+        self.assertNotEqual(bytes(bright.bits()), bytes(dim.bits()))
+        # The core brightens toward white at the peak...
+        core_bright = bright.pixelColor(7, 7)
+        core_dim = dim.pixelColor(7, 7)
+        self.assertGreater(core_bright.green(), core_dim.green())
+        self.assertGreater(core_bright.blue(), core_dim.blue())
+        # ...the halo lights the transparent gaps at the peak...
+        gap_bright = bright.pixelColor(4, 1)
+        gap_dim = dim.pixelColor(4, 1)
+        self.assertGreater(gap_bright.red(), gap_dim.red())
+        # ...and the spark's own deep-orange pixels never move.
+        self.assertEqual(bright.pixelColor(7, 1), dim.pixelColor(7, 1))
+
+    def test_halo_is_vertically_symmetric(self):
+        # The label is 28 px tall in the brand row; centering the
+        # glow on the geometric center y=14.0 put it on a pixel-row
+        # boundary, and the halo came out visibly stronger above the
+        # spark than below it (+10 red at the top gap). The glow is
+        # centered on the middle pixel row now, so the top and bottom
+        # gaps must match.
+        import time
+        w = self._widget()
+        w.resize(15, 28)
+        w.show()
+        self.app.processEvents()
+        w._started = time.monotonic() - 2.0  # peak of the breath
+        w._tick()
+        self.app.processEvents()
+        img = w.grab().toImage()
+        top = img.pixelColor(4, 8)
+        bottom = img.pixelColor(4, 20)
+        self.assertLessEqual(abs(top.red() - bottom.red()), 3)
+        self.assertLessEqual(abs(top.green() - bottom.green()), 3)
+
+    def test_brand_row_layout_unchanged(self):
+        from forge.main import BrandSparkWidget
+        from PySide6.QtWidgets import QLabel
+        spark = self._spark_in_window()
+        self.assertIsInstance(spark, BrandSparkWidget)
+        self.assertIsInstance(spark, QLabel)
+        self.assertIsNotNone(spark.pixmap())
+        row = spark.parent()
+        lay = row.layout()
+        self.assertEqual(lay.spacing(), 8)
+        brand = lay.itemAt(0).widget()
+        self.assertEqual(brand.text(), "CODE FORGE")
+        self.assertIs(lay.itemAt(1).widget(), spark)
+        # The label stretches to the row height, exactly as the old
+        # QLabel did (15 wide, row tall), one spacing past the brand.
+        self.assertEqual(spark.width(), 15)
+        self.assertEqual(spark.height(), row.height())
+        self.assertEqual(spark.x(), brand.x() + brand.width() + 8)
+        self.assertEqual(spark.y(), 0)
+        # And the PAINTED spark sits where it always did: rows 7..21
+        # of the row (QLabel rounds the 6.5 px centering up). A plain
+        # 15x15 QWidget in this layout would paint at rows 6..20.
+        img = row.grab().toImage()
+        rows = []
+        for y in range(img.height()):
+            for x in range(spark.x(), spark.x() + spark.width()):
+                if img.pixelColor(x, y).red() > 150:
+                    rows.append(y)
+                    break
+        self.assertEqual((min(rows), max(rows)), (7, 21))
+
+    def test_pulse_targets_only_the_spark(self):
+        from PySide6.QtCore import QEvent, QObject
+        from PySide6.QtTest import QTest
+
+        class PaintCounter(QObject):
+            def __init__(self):
+                super().__init__()
+                self.count = 0
+
+            def eventFilter(self, _obj, event):
+                if event.type() == QEvent.Paint:
+                    self.count += 1
+                return False
+
+        spark = self._spark_in_window()
+        row = spark.parent()
+        brand = row.layout().itemAt(0).widget()
+        spark_counter = PaintCounter()
+        brand_counter = PaintCounter()
+        sidebar_counter = PaintCounter()
+        spark.installEventFilter(spark_counter)
+        brand.installEventFilter(brand_counter)
+        self.win.sidebar.installEventFilter(sidebar_counter)
+        # Settle: let any pending paints from show/resize land.
+        QTest.qWait(300)
+        spark0 = spark_counter.count
+        brand0 = brand_counter.count
+        sidebar0 = sidebar_counter.count
+        # A third of a breath cycle of real loop time — ~26 ticks
+        # at the 50 ms interval, plenty to see the pulse repaint.
+        QTest.qWait(1300)
+        self.assertGreaterEqual(spark_counter.count - spark0, 10,
+                                "the spark did not repaint across a cycle")
+        self.assertEqual(brand_counter.count, brand0,
+                         "the brand label repainted during the pulse")
+        # The sidebar DOES repaint — once per spark tick at most.
+        # That is Qt background painting, not a second widget update:
+        # the sidebar is a styled QFrame, so when the spark's 15x15
+        # region is marked dirty Qt repaints the sidebar's gradient
+        # background under that region before painting the spark.
+        # Any child update in the sidebar would do the same; the
+        # repainted region stays 15x15.
+        self.assertLessEqual(sidebar_counter.count - sidebar0,
+                             spark_counter.count - spark0)
 
 
 class SmokeParityTests(unittest.TestCase):
@@ -17320,6 +17597,97 @@ class DeckPageScriptTests(unittest.TestCase):
         self.assertIn("planfishtext", script)
 
 
+class DeckTouchTests(unittest.TestCase):
+    """T13 (2026-11-13): the deck attachment × is a 22px button (24px
+    border box) — too small a touch target. Its hit area grows to 44px
+    via a transparent ::after that extends 10px past the button on
+    every side; the button itself (glyph, disc, position) is untouched,
+    so the × renders exactly as before. Every assertion runs against
+    the SERVED page (build_page(TOKENS)), never a source grep."""
+
+    def _served_page(self):
+        from forge.deck import build_page
+        from forge.main import TOKENS
+        return build_page(TOKENS)
+
+    def _rule(self, page, selector):
+        import re
+        m = re.search(re.escape(selector) + r"\{([^}]*)\}", page)
+        self.assertIsNotNone(m, "missing rule %s" % selector)
+        return m.group(1)
+
+    def test_hit_area_rule_present_in_served_page(self):
+        page = self._served_page()
+        body = self._rule(page, ".attachitem .ax::after")
+        self.assertIn("content:''", body)
+        self.assertIn("position:absolute", body)
+
+    def test_hit_area_is_44px(self):
+        # Arithmetic measurement — no headless browser exists in the
+        # sandbox, so the hit area is computed from the served CSS:
+        # button border box is 22px content + 1px border each side =
+        # 24px; the ::after extends 10px past it on every side:
+        # 24 + 10 + 10 = 44.
+        import re
+        page = self._served_page()
+        ax = self._rule(page, ".attachitem .ax")
+        width = int(re.search(r"width:(\d+)px", ax).group(1))
+        border = int(re.search(r"border:(\d+)px", ax).group(1))
+        after = self._rule(page, ".attachitem .ax::after")
+        ext = [int(v) for v in
+               re.findall(r"(?:top|right|bottom|left):-(\d+)px", after)]
+        self.assertEqual(len(ext), 4, "one extension per side")
+        self.assertEqual(len(set(ext)), 1,
+                         "extension must be even on all sides")
+        hit = width + 2 * border + 2 * ext[0]
+        self.assertGreaterEqual(hit, 40)
+        self.assertLessEqual(hit, 48)
+        self.assertEqual(hit, 44)
+
+    def test_glyph_and_disc_unchanged(self):
+        # The button rule itself is verbatim: same 22px disc, same
+        # position, same 13px × glyph — only the hit area grew.
+        page = self._served_page()
+        self.assertIn(
+            ".attachitem .ax{position:absolute;top:-7px;right:-7px;"
+            "width:22px;height:22px;padding:0;border-radius:11px;",
+            page)
+        ax = self._rule(page, ".attachitem .ax")
+        self.assertIn("font-size:13px", ax)
+        self.assertIn("background:", ax)
+        self.assertIn("border:1px solid", ax)
+        self.assertIn("x.textContent = '✕'", page)
+
+    def test_hit_area_extension_is_out_of_flow(self):
+        # The ::after is absolutely positioned and sizes from its
+        # offsets alone: it cannot shift the chip, the strip, or
+        # anything else in the layout.
+        page = self._served_page()
+        after = self._rule(page, ".attachitem .ax::after")
+        self.assertIn("position:absolute", after)
+        self.assertNotIn("width:", after)
+        self.assertNotIn("height:", after)
+
+    def test_served_script_still_parses(self):
+        # T13 touches the template; the deck rule says the served
+        # script must still parse. (DeckPageScriptTests guards this
+        # too — this pins it for this change's diff.)
+        import re, shutil, subprocess, tempfile
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available for JS syntax check")
+        page = self._served_page()
+        m = re.search(r"<script>(.*?)</script>", page, re.S)
+        self.assertIsNotNone(m)
+        with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                         delete=False) as f:
+            f.write(m.group(1))
+            path = f.name
+        r = subprocess.run([node, "--check", path],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+
 class DeckAppLayoutTests(unittest.TestCase):
     """DECKAPP revamp (2026-11-09): the deck page became an app —
     fixed header, one screen at a time, bottom tab bar — by moving
@@ -21959,6 +22327,8 @@ class SubAgentLimitsTests(unittest.TestCase):
             self.assertEqual(dlg.tester_max_cycles.value(), 4)
             self.assertEqual(dlg.tool_result_digest_chars.value(),
                              worker_mod._TOOL_RESULT_DIGEST_THRESHOLD)
+            # Turn timeout (2026-11-13): absent rests at 30 minutes.
+            self.assertEqual(dlg.turn_timeout_minutes.value(), 30)
             # The ranges the owner can pick from.
             self.assertEqual(dlg.bench_max_cycles.minimum(), 1)
             self.assertEqual(dlg.bench_max_cycles.maximum(), 50)
@@ -21967,6 +22337,9 @@ class SubAgentLimitsTests(unittest.TestCase):
             self.assertEqual(dlg.tool_result_digest_chars.minimum(), 2000)
             self.assertEqual(dlg.tool_result_digest_chars.maximum(), 200000)
             self.assertEqual(dlg.tool_result_digest_chars.singleStep(), 1000)
+            self.assertEqual(dlg.turn_timeout_minutes.minimum(), 0)
+            self.assertEqual(dlg.turn_timeout_minutes.maximum(), 240)
+            self.assertEqual(dlg.turn_timeout_minutes.singleStep(), 5)
             # The note states the concurrency model and the law:
             # the main turn itself has no cycle cap.
             labels = [w.text() for w in dlg.findChildren(QLabel)]
@@ -21976,23 +22349,28 @@ class SubAgentLimitsTests(unittest.TestCase):
             self.assertEqual(vals["bench_max_cycles"], 8)
             self.assertEqual(vals["tester_max_cycles"], 4)
             self.assertEqual(vals["tool_result_digest_chars"], 24000)
+            self.assertEqual(vals["turn_timeout_minutes"], 30)
             dlg.bench_max_cycles.setValue(12)
             dlg.tester_max_cycles.setValue(6)
             dlg.tool_result_digest_chars.setValue(40000)
+            dlg.turn_timeout_minutes.setValue(45)
             vals = dlg.values()
             self.assertEqual(vals["bench_max_cycles"], 12)
             self.assertEqual(vals["tester_max_cycles"], 6)
             self.assertEqual(vals["tool_result_digest_chars"], 40000)
+            self.assertEqual(vals["turn_timeout_minutes"], 45)
         finally:
             dlg.close()
         # Reopen on the saved values: the spins show what was saved.
         dlg2 = SettingsDialog(None, {"bench_max_cycles": 12,
                                      "tester_max_cycles": 6,
-                                     "tool_result_digest_chars": 40000})
+                                     "tool_result_digest_chars": 40000,
+                                     "turn_timeout_minutes": 45})
         try:
             self.assertEqual(dlg2.bench_max_cycles.value(), 12)
             self.assertEqual(dlg2.tester_max_cycles.value(), 6)
             self.assertEqual(dlg2.tool_result_digest_chars.value(), 40000)
+            self.assertEqual(dlg2.turn_timeout_minutes.value(), 45)
         finally:
             dlg2.close()
 
@@ -22077,16 +22455,25 @@ class SubAgentLimitsTests(unittest.TestCase):
 
     def test_worker_result_digest_chars_and_log_invariant(self):
         import forge.worker as worker_mod
-        full = "H" * 5000  # under the 24,000 default, over a 3,000 cap
+        # 5,000 chars: over the scaled default (3,584 at the 8,192
+        # default window — context fixes, 2026-11-13) and over a
+        # 3,000 cap. Recalibrated from the old 24,000 default:
+        # the default path digests now; the log still keeps the
+        # full text, and the GoFish budget still holds the module
+        # constant.
+        full = "H" * 5000
         with tempfile.TemporaryDirectory() as td:
             # Default: the instance holds the module constant and
-            # the 5,000-char result reaches the model verbatim…
+            # the 5,000-char result is digested in the message copy
+            # (it exceeds the scaled threshold)…
             worker, log = self._digest_turn(td, full)
             self.assertEqual(worker.result_digest_chars,
                              worker_mod._TOOL_RESULT_DIGEST_THRESHOLD)
             tools = [m.get("content", "") for m in worker.messages
                      if m.get("role") == "tool"]
-            self.assertEqual(tools, [full])
+            self.assertEqual(len(tools), 1)
+            self.assertNotEqual(tools[0], full)
+            self.assertIn("chars elided", tools[0])
             # …while the event log keeps the full text (item 45).
             records = [f for k, f in log.events if k == "tool_result"]
             self.assertEqual(len(records), 1)
@@ -33207,6 +33594,395 @@ class HeaderFitTests(unittest.TestCase):
 
 
 
+class ProjectNameElisionTests(unittest.TestCase):
+    """Sidebar project-name elision (GUIFX real-PC verdict,
+    2026-11-13): Joshua photographed his Mint PC and the project
+    names in [01] PROJECTS are hard-clipped with no indication
+    there is more. refresh_projects built each row as a plain
+    QPushButton with the full name as text — QPushButton does NOT
+    elide, it clips at the button edge — and the tooltip showed
+    the folder path, not the name, so hovering gave nothing back.
+    The fix elides the NAME part with QFontMetrics.elidedText
+    (Qt.ElideRight) against the button's style contents rect,
+    keeps the active marker out of the elided part, re-elides on
+    the sidebar's own resize (the header-fit event-filter
+    pattern), and puts the full name on the tooltip's first line
+    with the path below it (nothing removed)."""
+
+    # Joshua's real clipped name from the photo, plus a short one
+    # that must render byte-identical to today.
+    _LONG_NAME = "cat game or linux touch screen"
+    _SHORT_NAME = "duo"
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow, STYLE
+        cls.app.setStyleSheet(STYLE)
+        cls.win = ForgeWindow()
+        # Un-collapse the sidebar explicitly (the HeaderFitTests
+        # lesson): a window created and closed without ever being
+        # shown saves layout_sidebar_collapsed=True, and a hidden
+        # sidebar measures at width 0.
+        cls.win.set_sidebar_collapsed(False)
+        # The window's startup model refresh runs on a thread;
+        # drain it before any test runs (the
+        # PrivacyWindowTests pattern).
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.app.processEvents()
+        cls._tmp = tempfile.mkdtemp(prefix="pelide-")
+        cls._LONG_PATH = cls._tmp + "/long-project"
+        cls._SHORT_PATH = cls._tmp + "/short-project"
+        cls._orig_projects = list(cls.win.projects)
+        cls._orig_workspace = cls.win.workspace
+        cls.win.projects = [
+            {"path": cls._LONG_PATH, "name": cls._LONG_NAME},
+            {"path": cls._SHORT_PATH, "name": cls._SHORT_NAME},
+        ]
+        # The long name is the active project, so its marker is
+        # "▣  " and the elision must preserve it.
+        cls.win.workspace = cls._LONG_PATH
+        cls.win.refresh_projects()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.win.projects = cls._orig_projects
+        cls.win.workspace = cls._orig_workspace
+        cls.win.refresh_projects()
+        cls.win.close()
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def _set_sidebar_width(self, width):
+        # Settle the sidebar at an exact width: show at 1366, then
+        # drive the splitter (the HeaderFitTests _settle pattern —
+        # _apply_panel_sizes can leave the sidebar at 0 under load,
+        # so the sizes are set explicitly and pumped).
+        import time
+        self.win.resize(1366, 768)
+        self.win.show()
+        for _ in range(6):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.win.main_splitter.setSizes(
+            [width, 1366 - width - 268 - 12, 268])
+        for _ in range(6):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.assertEqual(self.win.sidebar.width(), width,
+                         f"sidebar did not settle at {width}px "
+                         f"(got {self.win.sidebar.width()}px)")
+
+    def _buttons(self):
+        # Buttons in fixture order, from the layout itself (not
+        # _project_buttons — the fail-proof run on pre-change code
+        # has no such attribute, and the point is to fail on the
+        # BEHAVIOR: unelided text and a path-only tooltip).
+        from PySide6.QtWidgets import QPushButton
+        btns = []
+        lay = self.win.project_list
+        for i in range(lay.count()):
+            w = lay.itemAt(i).widget()
+            if isinstance(w, QPushButton):
+                btns.append(w)
+        self.assertEqual(len(btns), 2, "expected the 2 fixture buttons")
+        return btns[0], btns[1]
+
+    def test_long_name_elides_at_narrow_width(self):
+        self._set_sidebar_width(180)
+        long_btn, _short = self._buttons()
+        text = long_btn.text()
+        self.assertTrue(text.endswith("…"),
+                        f"long name not elided at 180px sidebar: {text!r}")
+        self.assertLess(len(text), len("▣  " + self._LONG_NAME))
+        # The elided text must actually FIT the rect it is drawn in.
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
+        opt = QStyleOptionButton()
+        opt.initFrom(long_btn)
+        avail = long_btn.style().subElementRect(
+            QStyle.SubElement.SE_PushButtonContents, opt, long_btn).width()
+        self.assertLessEqual(
+            long_btn.fontMetrics().horizontalAdvance(text), avail,
+            f"elided text {text!r} still wider than its {avail}px rect")
+
+    def test_full_name_shows_at_wide_width(self):
+        self._set_sidebar_width(400)
+        long_btn, _short = self._buttons()
+        self.assertEqual(long_btn.text(), "▣  " + self._LONG_NAME)
+
+    def test_tooltip_carries_full_name_and_path(self):
+        self._set_sidebar_width(180)
+        long_btn, _short = self._buttons()
+        tip = long_btn.toolTip()
+        self.assertIn(self._LONG_NAME, tip)
+        self.assertIn(self._LONG_PATH, tip)
+        self.assertEqual(tip.split("\n")[0], self._LONG_NAME)
+
+    def test_marker_prefix_survives_elision(self):
+        self._set_sidebar_width(180)
+        long_btn, short_btn = self._buttons()
+        self.assertTrue(long_btn.text().startswith("▣  "),
+                        f"active marker lost in elision: {long_btn.text()!r}")
+        self.assertTrue(short_btn.text().startswith("▢  "),
+                        f"inactive marker lost: {short_btn.text()!r}")
+
+    def test_short_name_renders_unchanged(self):
+        self._set_sidebar_width(180)
+        _long, short_btn = self._buttons()
+        self.assertEqual(short_btn.text(), "▢  duo")
+
+    def test_elision_follows_resize(self):
+        # Narrow -> elided, wide -> full, narrow again -> elided.
+        # No refresh_projects runs between the resizes, so the
+        # middle step proves the sidebar-resize filter re-elides
+        # in place.
+        self._set_sidebar_width(180)
+        long_btn, _short = self._buttons()
+        self.assertTrue(long_btn.text().endswith("…"),
+                        f"not elided at 180px: {long_btn.text()!r}")
+        self._set_sidebar_width(400)
+        self.assertEqual(long_btn.text(), "▣  " + self._LONG_NAME,
+                         "widening did not restore the full name")
+        self._set_sidebar_width(180)
+        self.assertTrue(long_btn.text().endswith("…"),
+                        "narrowing again did not re-elide")
+
+    def test_click_still_selects_project(self):
+        self._set_sidebar_width(400)
+        _long, short_btn = self._buttons()
+        orig = self.win.workspace
+        try:
+            short_btn.click()
+            for _ in range(10):
+                self.app.processEvents()
+            self.assertEqual(self.win.workspace, self._SHORT_PATH)
+        finally:
+            self.win.workspace = orig
+            self.win.refresh_projects()
+            self.app.processEvents()
+
+
+class WindowGeometryTests(unittest.TestCase):
+    """F1 (U5, audit 2026-11-13): the bench opened at 1360x880 on a
+    1366x768 screen (112 px too tall, 148 px against the ~732 px
+    usable height) and never remembered its size — zero QSettings
+    anywhere. Now every window restores its saved geometry on open
+    and saves it on close (QSettings, one key per window class),
+    and a window with nothing saved clamps its default to the
+    available screen instead of asking for more than the screen
+    has. All settings here point at a scratch INI file — the real
+    user settings are never touched."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import STYLE
+        cls.app.setStyleSheet(STYLE)
+
+    def setUp(self):
+        import os
+        import tempfile
+        self._tmp = tempfile.mkdtemp(prefix="f1-geom-")
+        self._path = os.path.join(self._tmp, "geometry.ini")
+        self._windows = []
+
+    def tearDown(self):
+        for win in self._windows:
+            try:
+                win.close()
+            except Exception:
+                pass
+            try:
+                win.deleteLater()
+            except Exception:
+                pass
+        self.app.processEvents()
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _settings(self):
+        from PySide6.QtCore import QSettings
+        return QSettings(self._path, QSettings.IniFormat)
+
+    def _make_window(self):
+        import time
+        from forge.main import ForgeWindow
+        win = ForgeWindow(geometry_settings=self._settings())
+        self._windows.append(win)
+        # The window's startup model refresh runs on a thread;
+        # drain it before any test runs (the PrivacyWindowTests
+        # pattern, also used by HeaderFitTests).
+        deadline = time.time() + 30
+        while (win._models_thread is not None
+               and win._models_thread.isRunning()
+               and time.time() < deadline):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+        return win
+
+    def _screen_avail(self, win):
+        from PySide6.QtGui import QGuiApplication
+        screen = win.screen() or QGuiApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    def test_clamp_math_fits_his_screen(self):
+        from forge.main import _clamped_window_size
+        # His screen: 1366x768 raw, ~1366x732 usable under the Mint
+        # panel. The 1360x880 ask must come back fitting, with room
+        # for the window frame (16 px across, 36 px down).
+        self.assertEqual(
+            _clamped_window_size(1366, 732, 1360, 880, 880, 560),
+            (1350, 696))
+        self.assertEqual(
+            _clamped_window_size(1366, 768, 1360, 880, 880, 560),
+            (1350, 732))
+        # A big screen: the ask stands untouched.
+        self.assertEqual(
+            _clamped_window_size(1920, 1080, 1360, 880, 880, 560),
+            (1360, 880))
+        # A small screen: never below the window's own minimums.
+        self.assertEqual(
+            _clamped_window_size(800, 600, 1360, 880, 880, 560),
+            (880, 564))
+        # No screen to ask: the ask stands untouched.
+        self.assertEqual(
+            _clamped_window_size(0, 0, 1360, 880, 880, 560),
+            (1360, 880))
+
+    def test_default_clamps_to_screen(self):
+        from forge.main import _clamped_window_size
+        win = self._make_window()
+        avail = self._screen_avail(win)
+        exp_w, exp_h = _clamped_window_size(
+            avail.width(), avail.height(), 1360, 880,
+            win.minimumWidth(), win.minimumHeight())
+        self.assertEqual((win.width(), win.height()), (exp_w, exp_h))
+
+    def test_main_window_round_trip(self):
+        # The offscreen screen is 800x800 and the bench's minimum
+        # width is 880, so restoreGeometry clamps the saved 1000 px
+        # width to the 880 minimum (Qt's own constraint, probed) —
+        # the height and the fact of restoration are what this
+        # proves exactly. On his 1366 px screen the width restores
+        # exactly too (it fits); the mode-window test below proves
+        # the width mechanism on a window whose minimum fits.
+        win1 = self._make_window()
+        win1.resize(1000, 650)
+        win1.move(50, 40)
+        win1.show()
+        self.app.processEvents()
+        win1.close()
+        self.app.processEvents()
+        win2 = self._make_window()
+        self.assertEqual((win2.width(), win2.height()), (880, 650))
+        avail = self._screen_avail(win2)
+        self.assertTrue(avail.intersects(win2.frameGeometry()))
+
+    def test_mode_window_round_trip(self):
+        # RunWindow's minimum height is 615 (its layout's
+        # minimumSizeHint — show() enforces it), so the saved size
+        # must clear it, and both dimensions must fit the 800x800
+        # offscreen screen or restoreGeometry clamps them.
+        win1 = self._make_window()
+        room = win1.run_win
+        room.resize(700, 650)
+        room.move(60, 50)
+        room.show()
+        self.app.processEvents()
+        room.close()
+        self.app.processEvents()
+        win2 = self._make_window()
+        room2 = win2.run_win
+        self.assertEqual((room2.width(), room2.height()), (700, 650))
+        # Position within 2 px, not exact: saveGeometry stores the
+        # FRAME rect and the offscreen platform accounts a 2 px
+        # frame, so the restored client position lands 2 px off the
+        # saved one. The centered default would be (50, 75) — far
+        # enough that this still proves the restore happened.
+        self.assertAlmostEqual(room2.x(), 60, delta=2)
+        self.assertAlmostEqual(room2.y(), 50, delta=2)
+
+    def test_saved_geometry_below_minimum_clamps_up(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import _geometry_key, _restore_window_geometry
+        win = self._make_window()
+        small = QWidget()
+        small.resize(400, 300)
+        blob = small.saveGeometry()
+        small.deleteLater()
+        settings = self._settings()
+        settings.setValue(_geometry_key(win), blob)
+        settings.sync()
+        win.resize(1000, 650)
+        restored = _restore_window_geometry(win, settings)
+        self.assertTrue(restored)
+        self.assertEqual((win.width(), win.height()), (880, 560))
+
+    def test_per_window_keys_distinct(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import _geometry_key, _restore_window_geometry
+        win = self._make_window()
+        room = win.run_win
+        self.assertNotEqual(_geometry_key(win), _geometry_key(room))
+        a = QWidget()
+        a.resize(1000, 680)
+        blob_a = a.saveGeometry()
+        a.deleteLater()
+        b = QWidget()
+        b.resize(700, 650)
+        blob_b = b.saveGeometry()
+        b.deleteLater()
+        settings = self._settings()
+        settings.setValue(_geometry_key(win), blob_a)
+        settings.setValue(_geometry_key(room), blob_b)
+        settings.sync()
+        _restore_window_geometry(win, settings)
+        _restore_window_geometry(room, settings)
+        # The bench's 1000 px width clamps to its 880 minimum on
+        # the 800 px offscreen screen (Qt's constraint); the height
+        # proves it got blob A, not blob B.
+        self.assertEqual((win.width(), win.height()), (880, 680))
+        self.assertEqual((room.width(), room.height()), (700, 650))
+
+    def test_offscreen_save_comes_back_on_screen(self):
+        # A save from a monitor that is gone: restoreGeometry
+        # itself pulls the window back inside the available screen
+        # (probed — a (5000, 5000) save restores at (1, 149)), so
+        # the restore succeeds and the window ends up on-screen
+        # with its saved size (width clamped to the 880 minimum on
+        # the 800 px offscreen screen, as in the round-trip test).
+        from PySide6.QtWidgets import QWidget
+        from forge.main import _geometry_key, _restore_window_geometry
+        win = self._make_window()
+        far = QWidget()
+        far.resize(1000, 650)
+        far.move(5000, 5000)
+        blob = far.saveGeometry()
+        far.deleteLater()
+        settings = self._settings()
+        settings.setValue(_geometry_key(win), blob)
+        settings.sync()
+        win.resize(1360, 880)
+        restored = _restore_window_geometry(win, settings)
+        self.assertTrue(restored)
+        self.assertEqual((win.width(), win.height()), (880, 650))
+        avail = self._screen_avail(win)
+        self.assertTrue(avail.intersects(win.frameGeometry()))
+        self.assertNotEqual((win.x(), win.y()), (5000, 5000))
+
+
+
 class StateTokensTests(unittest.TestCase):
     """T7 (GUIFX task list, 2026-11-12): TOKENS held no error /
     danger entry, so state colors drifted in hardcoded per call
@@ -37799,7 +38575,8 @@ class S6ExtensionTrustTests(unittest.TestCase):
         sentinel = base / "ran.txt"
         old_dir = win.app_plugins_dir
         saved = {k: win.settings.get(k) for k in
-                 ("known_plugins", "disabled_plugins")}
+                 ("known_plugins", "disabled_plugins",
+                  "plugin_fingerprints", "fingerprint_changed_plugins")}
         try:
             self._plant_plugin(
                 pdir, "rogue-one", "rogue-one", "Rogue One", "rogue_probe",
@@ -37815,6 +38592,13 @@ class S6ExtensionTrustTests(unittest.TestCase):
             win.app_plugins_dir = pdir
             win.settings.pop("known_plugins", None)
             win.settings["disabled_plugins"] = []
+            # C16: a true first run has no recorded fingerprints —
+            # the window's __init__ baselined the REAL tester, and
+            # the clone above carries different code under the same
+            # pid, which the gate rightly refuses. Pop the recorded
+            # trust so the simulation is a first run in full.
+            win.settings.pop("plugin_fingerprints", None)
+            win.settings.pop("fingerprint_changed_plugins", None)
             win.rescan_extensions()
             # unseeded: code never ran, tools absent, starts disabled
             self.assertFalse(sentinel.exists())
@@ -37871,11 +38655,16 @@ class S6ExtensionTrustTests(unittest.TestCase):
             self.assertIn("flip-plug",
                           win.settings.get("disabled_plugins", []))
             self.assertNotIn("go_now", win.plugin_registry)
-            # and the owner can re-enable it — the new code serves
+            # and the owner can re-enable it — the new code serves.
+            # C16: enabling re-trusts the current content, so the
+            # settings act also re-records the fingerprint, exactly
+            # as open_customize does on a real enable — without it
+            # the v1 baseline would rightly refuse the v2 code.
             win.settings["disabled_plugins"] = [
                 p for p in win.settings.get("disabled_plugins", [])
                 if p != "flip-plug"]
             win.save_settings()
+            win._record_plugin_fingerprint(base / "plugins" / "flip-plug")
             win.rescan_extensions()
             self.assertIn("go_now", win.plugin_registry)
         finally:
@@ -42200,6 +42989,13 @@ class ResizablePanelsTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
         from forge.main import ForgeWindow
         cls.win = ForgeWindow()
+        # F1 (U5): the bench's default size is now screen-dependent
+        # (it clamps to the available screen), so a panel test that
+        # asserts absolute widths must pin its own reference size —
+        # the 1360x880 the defaults were written against. Without
+        # this, the 800x800 offscreen screen squeezes the window to
+        # 880 wide and the splitter cannot honour 244/420 px panels.
+        cls.win.resize(1360, 880)
         cls.win.show()
         cls.app.processEvents()
 
@@ -42321,6 +43117,10 @@ class ResizablePanelsTests(unittest.TestCase):
         self.assertEqual(self.win.settings.get("layout_panel_sizes"), [420, 380])
         win2 = ForgeWindow()
         try:
+            # Same reference size as setUpClass (F1): the fresh
+            # window clamps to the 800 px offscreen screen, and a
+            # 880 px window cannot honour 420/380 px panels.
+            win2.resize(1360, 880)
             win2.show()
             self._settle(win2)
             sizes = win2.main_splitter.sizes()
@@ -56614,3 +57414,1544 @@ class C13RememberedRuleBypassTests(unittest.TestCase):
                                   diff)
         fake = _RecordingApprovalDialog.instances[0]
         self.assertTrue(fake.show_remember)
+
+
+class C15ManualUpdateGateTests(unittest.TestCase):
+    """C15 (audit S1-22/W1): the manual update gate — the dialog
+    branch of apply_update is verified before the updater spawns.
+    Sidecar present + matching → installs; present + mismatched or
+    unreadable → refuses; absent → requires the acknowledgement;
+    unsafe entries refuse (and are named); out-of-allowlist entries
+    are named in the preview but never refuse, because every real
+    release zip carries them."""
+
+    def _root(self, base):
+        import shutil
+        root = Path(base) / "Linux Forge Agent"
+        root.mkdir(parents=True, exist_ok=True)
+        real = Path(__file__).resolve().parent.parent / "forge_updater.py"
+        shutil.copy(real, root / "forge_updater.py")
+        return root
+
+    def _make_zip(self, base, entries, top="Linux Forge Agent"):
+        import zipfile
+        zip_path = Path(base) / "update.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, content in entries.items():
+                zf.writestr(f"{top}/{name}" if top else name, content)
+        return zip_path
+
+    def _sidecar(self, zip_path, digest=None, bare=False):
+        import hashlib
+        digest = digest or hashlib.sha256(
+            zip_path.read_bytes()).hexdigest()
+        text = digest if bare else f"{digest}  {zip_path.name}\n"
+        Path(str(zip_path) + ".sha256").write_text(text)
+        return digest
+
+    def _good_entries(self):
+        return {"forge/main.py": "print('new')\n",
+                "plugins/github/plugin.py": "HANDLERS = {}\n"}
+
+    def test_sidecar_matching_verifies(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            self._sidecar(zip_path)
+            checked = upd.verify_release_sidecar(zip_path)
+            self.assertEqual(checked["status"], "verified")
+            self.assertEqual(len(checked["sha256"]), 64)
+            gate = upd.gate_manual_update(zip_path, root)
+            self.assertTrue(gate["allowed"])
+            self.assertIn("Checksum verified", gate["reason"])
+
+    def test_sidecar_bare_digest_verifies(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            self._sidecar(zip_path, bare=True)
+            self.assertEqual(
+                upd.verify_release_sidecar(zip_path)["status"], "verified")
+            self.assertTrue(upd.gate_manual_update(zip_path, root)["allowed"])
+
+    def test_sidecar_mismatch_refuses(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            self._sidecar(zip_path)
+            with open(zip_path, "ab") as fh:
+                fh.write(b"tampered")
+            checked = upd.verify_release_sidecar(zip_path)
+            self.assertEqual(checked["status"], "mismatch")
+            gate = upd.gate_manual_update(zip_path, root,
+                                          acknowledged=True)
+            self.assertFalse(gate["allowed"])
+            self.assertIn("does not match its checksum", gate["reason"])
+
+    def test_sidecar_unreadable_refuses(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            Path(str(zip_path) + ".sha256").write_text(
+                "not a digest at all\n")
+            checked = upd.verify_release_sidecar(zip_path)
+            self.assertEqual(checked["status"], "unreadable")
+            gate = upd.gate_manual_update(zip_path, root,
+                                          acknowledged=True)
+            self.assertFalse(gate["allowed"])
+            self.assertIn("refused", gate["reason"].lower())
+
+    def test_no_sidecar_requires_acknowledgement(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            self.assertEqual(
+                upd.verify_release_sidecar(zip_path)["status"], "absent")
+            refused = upd.gate_manual_update(zip_path, root,
+                                             acknowledged=False)
+            self.assertFalse(refused["allowed"])
+            self.assertIn("Install unverified", refused["reason"])
+            allowed = upd.gate_manual_update(zip_path, root,
+                                             acknowledged=True)
+            self.assertTrue(allowed["allowed"])
+            self.assertIn("UNVERIFIED", allowed["reason"])
+
+    def test_preview_classifies_entries(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, {
+                "forge/main.py": "print('new')\n",
+                "tests/test_core.py": "# tests\n",
+                "LICENSE": "MIT\n",
+                "README.md": "# Forge\n",
+            })
+            preview = upd.preview_update_zip(zip_path, root)
+            self.assertEqual(preview["error"], "")
+            self.assertEqual(preview["install"],
+                             ["forge/main.py", "README.md"])
+            self.assertEqual(sorted(preview["skipped"]),
+                             ["LICENSE", "tests/test_core.py"])
+            self.assertEqual(preview["refused"], [])
+            self.assertEqual(preview["total_entries"], 4)
+            self.assertEqual(preview["top_folder"], "Linux Forge Agent")
+
+    def test_unsafe_entry_refuses_and_is_named(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            import zipfile
+            with zipfile.ZipFile(zip_path, "a") as zf:
+                zf.writestr("../evil.py", "print('pwned')\n")
+                zf.writestr("/abs/path.py", "print('pwned')\n")
+            preview = upd.preview_update_zip(zip_path, root)
+            self.assertEqual(sorted(preview["refused"]),
+                             ["../evil.py", "/abs/path.py"])
+            gate = upd.gate_manual_update(zip_path, root,
+                                          acknowledged=True)
+            self.assertFalse(gate["allowed"])
+            self.assertIn("../evil.py", gate["reason"])
+            self.assertIn("/abs/path.py", gate["reason"])
+
+    def test_mid_path_traversal_refuses(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            import zipfile
+            with zipfile.ZipFile(zip_path, "a") as zf:
+                zf.writestr("Linux Forge Agent/forge/../../evil.py",
+                            "print('pwned')\n")
+            preview = upd.preview_update_zip(zip_path, root)
+            self.assertIn("Linux Forge Agent/forge/../../evil.py",
+                          preview["refused"])
+            self.assertFalse(upd.gate_manual_update(
+                zip_path, root, acknowledged=True)["allowed"])
+
+    def test_no_code_zip_refuses(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, {
+                "tests/test_core.py": "# tests\n",
+                "LICENSE": "MIT\n",
+            })
+            gate = upd.gate_manual_update(zip_path, root,
+                                          acknowledged=True)
+            self.assertFalse(gate["allowed"])
+            self.assertIn("no Forge code files", gate["reason"])
+
+    def test_unreadable_zip_refuses(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = Path(tmp) / "update.zip"
+            zip_path.write_text("this is not a zip\n")
+            preview = upd.preview_update_zip(zip_path, root)
+            self.assertNotEqual(preview["error"], "")
+            gate = upd.gate_manual_update(zip_path, root,
+                                          acknowledged=True)
+            self.assertFalse(gate["allowed"])
+            self.assertIn("not a readable zip", gate["reason"])
+
+    def test_release_shaped_zip_passes_preview(self):
+        # The newest real release zip carries 43 out-of-allowlist
+        # entries (tests/, templates/, assets/, LICENSE, …) — the
+        # updater skips them by design, so the gate must name them
+        # in the preview and NOT refuse the update for them.
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, {
+                "forge/main.py": "print('new')\n",
+                "plugins/github/plugin.py": "HANDLERS = {}\n",
+                "skills/skribe/SKILL.md": "# skribe\n",
+                "tests/test_core.py": "# tests\n",
+                "templates/blank-page/index.html": "<html>\n",
+                "assets/code-forge.png": "PNG",
+                "bin/forge": "#!/bin/sh\n",
+                "LICENSE": "MIT\n",
+                "SECURITY.md": "# security\n",
+                ".gitignore": "*.pyc\n",
+                "README.md": "# Forge\n",
+                "install.sh": "#!/bin/sh\n",
+                "forge_updater.py": "# updater\n",
+                "requirements.txt": "PySide6\n",
+            })
+            preview = upd.preview_update_zip(zip_path, root)
+            self.assertEqual(preview["refused"], [])
+            self.assertIn("tests/test_core.py", preview["skipped"])
+            self.assertIn("templates/blank-page/index.html",
+                          preview["skipped"])
+            self.assertIn("LICENSE", preview["skipped"])
+            self.assertIn("forge/main.py", preview["install"])
+            self.assertIn("plugins/github/plugin.py", preview["install"])
+            gate = upd.gate_manual_update(zip_path, root,
+                                          acknowledged=True)
+            self.assertTrue(gate["allowed"])
+            text = upd.format_update_preview(preview, gate["sidecar"])
+            self.assertIn("Not installed by the updater", text)
+            self.assertIn("tests/test_core.py", text)
+
+    def test_allowlist_matches_updater(self):
+        # The fallback sets in update.py must never drift from
+        # forge_updater.py's own allowlist.
+        import importlib.util
+        from forge import update as upd
+        real = Path(__file__).resolve().parent.parent / "forge_updater.py"
+        spec = importlib.util.spec_from_file_location(
+            "forge_updater_drift_check", real)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(set(upd._FALLBACK_ALLOWED_TOPS),
+                         set(module.ALLOWED_TOPS))
+        self.assertEqual(set(upd._FALLBACK_ALLOWED_ROOT_FILES),
+                         set(module.ALLOWED_ROOT_FILES))
+
+    def test_format_preview_names_refused_entries(self):
+        from forge import update as upd
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            zip_path = self._make_zip(tmp, self._good_entries())
+            import zipfile
+            with zipfile.ZipFile(zip_path, "a") as zf:
+                zf.writestr("../evil.py", "print('pwned')\n")
+            preview = upd.preview_update_zip(zip_path, root)
+            sidecar = upd.verify_release_sidecar(zip_path)
+            text = upd.format_update_preview(preview, sidecar)
+            self.assertIn("UNSAFE entries", text)
+            self.assertIn("../evil.py", text)
+            self.assertIn("No checksum file", text)
+            self.assertIn("Would install 2 file(s)", text)
+
+
+class _StubUpdateDialog:
+    """UpdateDialog stand-in for the apply_update gate tests: the
+    test presets the picked zip + acknowledgement, exec() accepts,
+    values() returns the preset triple."""
+
+    def __init__(self, zip_path=None, acknowledged=False):
+        self._zip_path = zip_path
+        self._acknowledged = acknowledged
+
+    def exec(self):
+        from PySide6.QtWidgets import QDialog
+        return QDialog.Accepted
+
+    def values(self):
+        return self._zip_path, [], self._acknowledged
+
+
+class C15UpdateDialogTests(unittest.TestCase):
+    """C15, window half: the real UpdateDialog previews the zip and
+    enforces the gate on accept; apply_update re-gates from disk
+    before the updater spawns — the spawn recorder is the
+    pre-spawn point, mirroring S6CandidateInstallWindowTests."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _fresh_window(self):
+        import time
+        from unittest import mock
+        import forge.main as main_mod
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        (root / "settings.json").write_text("{}", encoding="utf-8")
+        patchers = [mock.patch.object(main_mod, "APP_DIR", root),
+                    mock.patch.object(main_mod, "DB_FILE",
+                                      root / "settings.json")]
+        for patcher in patchers:
+            patcher.start()
+        try:
+            win = main_mod.ForgeWindow()
+        except Exception:
+            for patcher in patchers:
+                patcher.stop()
+            raise
+        win.store = ConversationStore(root / "c.db")
+        win.eventlog = EventLog(root / "log")
+        deadline = time.time() + 30
+        while (win._models_thread is not None
+               and win._models_thread.isRunning()
+               and time.time() < deadline):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+        win.worker = None
+        return win, temp, patchers
+
+    @staticmethod
+    def _stop_patchers(patchers):
+        for patcher in patchers:
+            patcher.stop()
+
+    def _make_zip(self, base, entries):
+        import zipfile
+        zip_path = Path(base) / "update.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, content in entries.items():
+                zf.writestr(f"Linux Forge Agent/{name}", content)
+        return zip_path
+
+    def _sidecar(self, zip_path, digest=None):
+        import hashlib
+        digest = digest or hashlib.sha256(
+            zip_path.read_bytes()).hexdigest()
+        Path(str(zip_path) + ".sha256").write_text(
+            f"{digest}  {zip_path.name}\n")
+        return digest
+
+    def _good_entries(self):
+        return {"forge/main.py": "print('new')\n"}
+
+    # -- the real dialog ------------------------------------------
+    def test_preview_shows_verification_and_file_list(self):
+        from forge.main import UpdateDialog
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = self._make_zip(tmp, self._good_entries())
+            self._sidecar(zip_path)
+            dlg = UpdateDialog(None)
+            try:
+                dlg.zip_edit.setText(str(zip_path))
+                self.assertIn("Checksum verified",
+                              dlg.preview.toPlainText())
+                self.assertIn("forge/main.py",
+                              dlg.preview.toPlainText())
+                self.assertTrue(dlg.ack_box.isHidden())
+            finally:
+                dlg.close()
+
+    def test_no_sidecar_shows_acknowledgement_and_blocks_accept(self):
+        from unittest import mock
+        import forge.main as main_mod
+        from PySide6.QtWidgets import QDialog
+        from forge.main import UpdateDialog
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = self._make_zip(tmp, self._good_entries())
+            dlg = UpdateDialog(None)
+            try:
+                dlg.zip_edit.setText(str(zip_path))
+                self.assertIn("No checksum file",
+                              dlg.preview.toPlainText())
+                self.assertFalse(dlg.ack_box.isHidden())
+                _StubMessageBox.warnings = []
+                with mock.patch.object(main_mod, "QMessageBox",
+                                       _StubMessageBox):
+                    dlg.accept()
+                self.assertNotEqual(dlg.result(), QDialog.Accepted)
+                self.assertTrue(any(
+                    "Install unverified" in text
+                    for _title, text in _StubMessageBox.warnings))
+                dlg.ack_box.setChecked(True)
+                with mock.patch.object(main_mod, "QMessageBox",
+                                       _StubMessageBox):
+                    dlg.accept()
+                self.assertEqual(dlg.result(), QDialog.Accepted)
+                self.assertEqual(dlg.values(),
+                                 (str(zip_path), [], True))
+            finally:
+                dlg.close()
+
+    def test_mismatch_blocks_accept(self):
+        from unittest import mock
+        import forge.main as main_mod
+        from PySide6.QtWidgets import QDialog
+        from forge.main import UpdateDialog
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = self._make_zip(tmp, self._good_entries())
+            self._sidecar(zip_path)
+            with open(zip_path, "ab") as fh:
+                fh.write(b"tampered")
+            dlg = UpdateDialog(None)
+            try:
+                dlg.zip_edit.setText(str(zip_path))
+                self.assertIn("MISMATCH", dlg.preview.toPlainText())
+                self.assertTrue(dlg.ack_box.isHidden())
+                _StubMessageBox.warnings = []
+                with mock.patch.object(main_mod, "QMessageBox",
+                                       _StubMessageBox):
+                    dlg.accept()
+                self.assertNotEqual(dlg.result(), QDialog.Accepted)
+                self.assertTrue(any(
+                    "does not match its checksum" in text
+                    for _title, text in _StubMessageBox.warnings))
+            finally:
+                dlg.close()
+
+    def test_unsafe_zip_blocks_accept(self):
+        from unittest import mock
+        import forge.main as main_mod
+        from PySide6.QtWidgets import QDialog
+        from forge.main import UpdateDialog
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = self._make_zip(tmp, self._good_entries())
+            import zipfile
+            with zipfile.ZipFile(zip_path, "a") as zf:
+                zf.writestr("../evil.py", "print('pwned')\n")
+            dlg = UpdateDialog(None)
+            try:
+                dlg.zip_edit.setText(str(zip_path))
+                self.assertIn("UNSAFE entries",
+                              dlg.preview.toPlainText())
+                with mock.patch.object(main_mod, "QMessageBox",
+                                       _StubMessageBox):
+                    dlg.accept()
+                self.assertNotEqual(dlg.result(), QDialog.Accepted)
+            finally:
+                dlg.close()
+
+    # -- apply_update re-gates before the spawn -------------------
+    def _apply(self, win, zip_path, acknowledged):
+        from unittest import mock
+        import forge.main as main_mod
+        import forge.update as upd_mod
+        spawns = []
+        _StubMessageBox.warnings = []
+        _StubTimer.shots = []
+        stub = _StubUpdateDialog(
+            str(zip_path) if zip_path else None, acknowledged)
+        with mock.patch.object(main_mod, "UpdateDialog",
+                               lambda parent: stub), \
+                mock.patch.object(upd_mod, "spawn_updater",
+                                  lambda *a, **k: spawns.append(a)), \
+                mock.patch.object(main_mod, "QMessageBox",
+                                  _StubMessageBox), \
+                mock.patch.object(main_mod, "QTimer", _StubTimer):
+            win.apply_update()
+        return spawns
+
+    def test_verified_zip_reaches_spawn(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            zip_path = self._make_zip(temp.name, self._good_entries())
+            self._sidecar(zip_path)
+            spawns = self._apply(win, zip_path, False)
+            self.assertEqual(len(spawns), 1)
+            self.assertTrue(any(
+                "Checksum verified" in line for line in win._log_lines),
+                win._log_lines[-3:])
+            self.assertEqual(_StubMessageBox.warnings, [])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_mismatched_zip_refused_before_spawn(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            zip_path = self._make_zip(temp.name, self._good_entries())
+            self._sidecar(zip_path)
+            with open(zip_path, "ab") as fh:
+                fh.write(b"tampered")
+            spawns = self._apply(win, zip_path, True)
+            self.assertEqual(spawns, [])
+            self.assertTrue(any(
+                "does not match its checksum" in text
+                for _title, text in _StubMessageBox.warnings),
+                _StubMessageBox.warnings)
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_unacknowledged_unverified_refused_before_spawn(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            zip_path = self._make_zip(temp.name, self._good_entries())
+            spawns = self._apply(win, zip_path, False)
+            self.assertEqual(spawns, [])
+            self.assertTrue(any(
+                "Install unverified" in text
+                for _title, text in _StubMessageBox.warnings),
+                _StubMessageBox.warnings)
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_acknowledged_unverified_reaches_spawn(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            zip_path = self._make_zip(temp.name, self._good_entries())
+            spawns = self._apply(win, zip_path, True)
+            self.assertEqual(len(spawns), 1)
+            self.assertTrue(any(
+                "UNVERIFIED" in line for line in win._log_lines),
+                win._log_lines[-3:])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_unsafe_zip_refused_before_spawn(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            zip_path = self._make_zip(temp.name, self._good_entries())
+            import zipfile
+            with zipfile.ZipFile(zip_path, "a") as zf:
+                zf.writestr("../evil.py", "print('pwned')\n")
+            spawns = self._apply(win, zip_path, True)
+            self.assertEqual(spawns, [])
+            self.assertTrue(any(
+                "../evil.py" in text
+                for _title, text in _StubMessageBox.warnings),
+                _StubMessageBox.warnings)
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_deps_only_refresh_skips_gate(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            spawns = self._apply(win, None, False)
+            self.assertEqual(len(spawns), 1)
+            self.assertIsNone(spawns[0][2])
+            self.assertEqual(_StubMessageBox.warnings, [])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+
+class C16PluginFingerprintTests(unittest.TestCase):
+    """C16 (audit S1-25/W2), loader half: extension trust is
+    content-fingerprinted — a replaced plugin.py (or plugin.json)
+    on disk never executes under the old trust decision, and the
+    change is reported to the caller instead."""
+
+    @staticmethod
+    def _plant_plugin(plugins_dir, folder_name, pid, name, tool, code):
+        folder = Path(plugins_dir) / folder_name
+        folder.mkdir(parents=True)
+        (folder / "plugin.json").write_text(json.dumps({
+            "id": pid, "name": name, "kind": "plugin",
+            "description": "planted",
+            "tools": [{"name": tool, "description": "planted",
+                       "parameters": {"type": "object", "properties": {}},
+                       "requires_approval": True}]}))
+        (folder / "plugin.py").write_text(code)
+        return folder
+
+    def test_baseline_recorded_at_first_load(self):
+        from forge.plugins import plugin_fingerprint
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            self._plant_plugin(pdir, "demo", "demo", "Demo",
+                               "go_now", UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            fingerprints = {}
+            _plugins, registry = load_plugins(
+                pdir, ctx, fingerprints=fingerprints)
+            self.assertIn("go_now", registry)
+            self.assertEqual(len(fingerprints["demo"]), 64)
+            self.assertEqual(fingerprints["demo"],
+                             plugin_fingerprint(pdir / "demo"))
+
+    def test_fingerprint_keyed_by_manifest_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            self._plant_plugin(pdir, "folder-x", "pid-y", "Why",
+                               "go_now", UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            fingerprints = {}
+            load_plugins(pdir, ctx, fingerprints=fingerprints)
+            self.assertIn("pid-y", fingerprints)
+            self.assertNotIn("folder-x", fingerprints)
+
+    def test_unchanged_plugin_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            self._plant_plugin(pdir, "demo", "demo", "Demo",
+                               "go_now", UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            fingerprints, changes = {}, []
+            load_plugins(pdir, ctx, fingerprints=fingerprints,
+                         fingerprint_changes=changes)
+            _plugins, registry = load_plugins(
+                pdir, ctx, fingerprints=fingerprints,
+                fingerprint_changes=changes)
+            self.assertIn("go_now", registry)
+            self.assertEqual(changes, [])
+
+    def test_replaced_code_never_executes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            sentinel = Path(tmp) / "ran.txt"
+            folder = self._plant_plugin(
+                pdir, "demo", "demo", "Demo", "go_now",
+                UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            fingerprints, changes = {}, []
+            load_plugins(pdir, ctx, fingerprints=fingerprints,
+                         fingerprint_changes=changes)
+            (folder / "plugin.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('ran')\n"
+                "def _go(args, ctx):\n    return 'went'\n"
+                "HANDLERS = {'go_now': _go}\n")
+            plugins, registry = load_plugins(
+                pdir, ctx, fingerprints=fingerprints,
+                fingerprint_changes=changes)
+            self.assertEqual(changes, ["demo"])
+            self.assertFalse(sentinel.exists())
+            self.assertNotIn("go_now", registry)
+            self.assertEqual(plugins[0].handlers, {})
+
+    def test_manifest_change_trips_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            folder = self._plant_plugin(
+                pdir, "demo", "demo", "Demo", "go_now",
+                UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            fingerprints, changes = {}, []
+            load_plugins(pdir, ctx, fingerprints=fingerprints,
+                         fingerprint_changes=changes)
+            meta = json.loads((folder / "plugin.json").read_text())
+            meta["description"] = "tampered"
+            (folder / "plugin.json").write_text(json.dumps(meta))
+            _plugins, registry = load_plugins(
+                pdir, ctx, fingerprints=fingerprints,
+                fingerprint_changes=changes)
+            self.assertEqual(changes, ["demo"])
+            self.assertNotIn("go_now", registry)
+
+    def test_no_fingerprints_means_no_gate(self):
+        # Legacy behaviour, exactly as before: no recorded trust
+        # passed in, no gate applied.
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            sentinel = Path(tmp) / "ran.txt"
+            folder = self._plant_plugin(
+                pdir, "demo", "demo", "Demo", "go_now",
+                UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            (folder / "plugin.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('ran')\n"
+                "def _go(args, ctx):\n    return 'went'\n"
+                "HANDLERS = {'go_now': _go}\n")
+            _plugins, registry = load_plugins(pdir, ctx)
+            self.assertTrue(sentinel.exists())
+            self.assertIn("go_now", registry)
+
+    def test_disabled_plugin_not_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            folder = self._plant_plugin(
+                pdir, "demo", "demo", "Demo", "go_now",
+                UpdateExtTests.GOOD_CODE)
+            ctx = PluginContext(workspace=tmp, log=lambda m: None)
+            fingerprints, changes = {}, []
+            load_plugins(pdir, ctx, disabled={"demo"},
+                         fingerprints=fingerprints,
+                         fingerprint_changes=changes)
+            self.assertNotIn("demo", fingerprints)
+            (folder / "plugin.py").write_text("HANDLERS = {}\n")
+            load_plugins(pdir, ctx, disabled={"demo"},
+                         fingerprints=fingerprints,
+                         fingerprint_changes=changes)
+            self.assertEqual(changes, [])
+            self.assertNotIn("demo", fingerprints)
+
+    def test_fingerprint_is_content_bound(self):
+        from forge.plugins import plugin_fingerprint
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "plugins"
+            a = self._plant_plugin(pdir, "a", "a", "A", "a_probe",
+                                   UpdateExtTests.GOOD_CODE)
+            b = self._plant_plugin(pdir, "b", "b", "B", "b_probe",
+                                   UpdateExtTests.GOOD_CODE)
+            # Same code, different manifests (id/name differ) —
+            # the fingerprint covers the manifest too.
+            self.assertNotEqual(plugin_fingerprint(a),
+                                plugin_fingerprint(b))
+            before = plugin_fingerprint(a)
+            (a / "plugin.py").write_text(UpdateExtTests.GOOD_CODE_V2)
+            self.assertNotEqual(before, plugin_fingerprint(a))
+            missing = Path(tmp) / "nope"
+            self.assertIsNone(plugin_fingerprint(missing))
+
+
+class C16ExtensionFingerprintWindowTests(unittest.TestCase):
+    """C16, window half: a changed plugin/skill is returned to
+    DISABLED on rescan (log line + Customize notice list) instead
+    of running the new content; re-enabling re-records the
+    fingerprint; approved skill updates and the owner's own edits
+    never trip the gate; maintenance suspends the skill check."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _fresh_window(self):
+        import time
+        from unittest import mock
+        import forge.main as main_mod
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        (root / "settings.json").write_text("{}", encoding="utf-8")
+        patchers = [mock.patch.object(main_mod, "APP_DIR", root),
+                    mock.patch.object(main_mod, "DB_FILE",
+                                      root / "settings.json")]
+        for patcher in patchers:
+            patcher.start()
+        try:
+            win = main_mod.ForgeWindow()
+        except Exception:
+            for patcher in patchers:
+                patcher.stop()
+            raise
+        win.store = ConversationStore(root / "c.db")
+        win.eventlog = EventLog(root / "log")
+        deadline = time.time() + 30
+        while (win._models_thread is not None
+               and win._models_thread.isRunning()
+               and time.time() < deadline):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+        win.worker = None
+        return win, temp, patchers
+
+    @staticmethod
+    def _stop_patchers(patchers):
+        for patcher in patchers:
+            patcher.stop()
+
+    @staticmethod
+    def _plant_plugin(plugins_dir, folder_name, pid, name, tool, code):
+        folder = Path(plugins_dir) / folder_name
+        folder.mkdir(parents=True)
+        (folder / "plugin.json").write_text(json.dumps({
+            "id": pid, "name": name, "kind": "plugin",
+            "description": "planted",
+            "tools": [{"name": tool, "description": "planted",
+                       "parameters": {"type": "object", "properties": {}},
+                       "requires_approval": True}]}))
+        (folder / "plugin.py").write_text(code)
+        return folder
+
+    @staticmethod
+    def _plant_skill(skills_dir, name, body):
+        folder = Path(skills_dir) / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(
+            f"name: {name}\ndescription: planted\n\n{body}\n")
+        return folder
+
+    def _enabled_plugin(self, win, base):
+        """A planted plugin, enabled the way the owner enables one
+        (the settings act, as in S6ExtensionTrustTests) — returns
+        its folder, with a baseline recorded and the tool live."""
+        pdir = base / "plugins"
+        folder = self._plant_plugin(
+            pdir, "flip-plug", "flip-plug", "Flip Plug", "go_now",
+            UpdateExtTests.GOOD_CODE)
+        win.app_plugins_dir = pdir
+        win.settings.pop("known_plugins", None)
+        win.settings["disabled_plugins"] = []
+        win.rescan_extensions()
+        self.assertIn("flip-plug",
+                      win.settings.get("disabled_plugins", []))
+        win.settings["disabled_plugins"] = []
+        win.save_settings()
+        win.rescan_extensions()
+        self.assertIn("go_now", win.plugin_registry)
+        self.assertIn("flip-plug",
+                      win.settings.get("plugin_fingerprints", {}))
+        return folder
+
+    def _enabled_skill(self, win, base, name="demo-skill"):
+        """A planted skill, enabled with a baseline recorded."""
+        sdir = base / "skills"
+        folder = self._plant_skill(sdir, name, "Do the demo thing.")
+        win.app_skills_dir = sdir
+        win.settings.pop("known_skills", None)
+        win.settings["disabled_skills"] = []
+        win.rescan_extensions()
+        self.assertIn(name, [s.name for s in win.skills])
+        self.assertIn(name, win.settings.get("skill_fingerprints", {}))
+        return folder
+
+    def test_changed_plugin_disabled_on_rescan(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            sentinel = base / "ran.txt"
+            folder = self._enabled_plugin(win, base)
+            (folder / "plugin.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('ran')\n"
+                "def _go(args, ctx):\n    return 'went'\n"
+                "HANDLERS = {'go_now': _go}\n")
+            win.rescan_extensions()
+            self.assertFalse(sentinel.exists())
+            self.assertNotIn("go_now", win.plugin_registry)
+            self.assertIn("flip-plug",
+                          win.settings.get("disabled_plugins", []))
+            self.assertIn("flip-plug", win.settings.get(
+                "fingerprint_changed_plugins", []))
+            self.assertTrue(any(
+                "flip-plug" in line and "changed on disk" in line
+                for line in win._log_lines), win._log_lines[-3:])
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_reenable_rerecords_and_loads(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            sentinel = base / "ran.txt"
+            folder = self._enabled_plugin(win, base)
+            (folder / "plugin.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('ran')\n"
+                "def _go(args, ctx):\n    return 'went'\n"
+                "HANDLERS = {'go_now': _go}\n")
+            win.rescan_extensions()
+            self.assertIn("flip-plug",
+                          win.settings.get("disabled_plugins", []))
+            # The owner re-enables it in Customize: the settings
+            # act plus the same re-record open_customize performs.
+            win.settings["disabled_plugins"] = []
+            win.save_settings()
+            win._record_plugin_fingerprint(folder)
+            self.assertNotIn("flip-plug", win.settings.get(
+                "fingerprint_changed_plugins", []))
+            win.rescan_extensions()
+            self.assertTrue(sentinel.exists())
+            self.assertIn("go_now", win.plugin_registry)
+            self.assertNotIn("flip-plug",
+                             win.settings.get("disabled_plugins", []))
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_changed_skill_disabled_on_rescan(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            folder = self._enabled_skill(win, base)
+            (folder / "SKILL.md").write_text(
+                "name: demo-skill\ndescription: planted\n\n"
+                "Do the EVIL thing.\n")
+            win.rescan_extensions()
+            self.assertNotIn("demo-skill",
+                             [s.name for s in win.skills])
+            self.assertIn("demo-skill",
+                          win.settings.get("disabled_skills", []))
+            self.assertIn("demo-skill", win.settings.get(
+                "fingerprint_changed_skills", []))
+            self.assertTrue(any(
+                "demo-skill" in line and "changed on disk" in line
+                for line in win._log_lines), win._log_lines[-3:])
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_sibling_file_change_trips_skill_gate(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            folder = self._enabled_skill(win, base)
+            (folder / "profiles.md").write_text("# profiles\n")
+            win.rescan_extensions()
+            # A new file in the folder changes the fingerprint —
+            # the skill's content is not what was trusted.
+            self.assertIn("demo-skill",
+                          win.settings.get("disabled_skills", []))
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_approved_skill_update_does_not_trip_gate(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            win.app_skills_dir = base / "skills"
+            win.app_plugins_dir = base / "plugins"
+            win.app_skills_dir.mkdir()
+            win.app_plugins_dir.mkdir()
+            msg = win._create_skill_tool(
+                {"name": "up-skill", "description": "v1",
+                 "body": "Do version one."})
+            self.assertIn("Created", msg)
+            self.assertIn("up-skill",
+                          win.settings.get("disabled_skills", []))
+            win.settings["disabled_skills"] = []
+            win.save_settings()
+            win.rescan_extensions()
+            self.assertIn("up-skill", [s.name for s in win.skills])
+            baseline = win.settings["skill_fingerprints"]["up-skill"]
+            msg = win._update_skill_tool(
+                {"name": "up-skill", "description": "v2",
+                 "body": "Do version two."})
+            self.assertIn("Updated", msg)
+            self.assertIn("up-skill", [s.name for s in win.skills])
+            self.assertNotIn("up-skill",
+                             win.settings.get("disabled_skills", []))
+            self.assertNotEqual(
+                baseline,
+                win.settings["skill_fingerprints"]["up-skill"])
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_maintenance_suspends_skill_gate(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            folder = self._enabled_skill(win, base)
+            (folder / "SKILL.md").write_text(
+                "name: demo-skill\ndescription: planted\n\n"
+                "Candidate edit.\n")
+            win._self_maintenance_active = True
+            try:
+                win.rescan_extensions()
+                self.assertIn("demo-skill",
+                              [s.name for s in win.skills])
+                self.assertNotIn("demo-skill", win.settings.get(
+                    "fingerprint_changed_skills", []))
+            finally:
+                win._self_maintenance_active = False
+            win.rescan_extensions()
+            self.assertIn("demo-skill",
+                          win.settings.get("disabled_skills", []))
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_record_helpers_noop_during_maintenance(self):
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            folder = self._plant_skill(base / "skills", "demo-skill",
+                                       "Do the demo thing.")
+            win.app_skills_dir = base / "skills"
+            win._self_maintenance_active = True
+            try:
+                win._record_skill_fingerprint(folder)
+            finally:
+                win._self_maintenance_active = False
+            self.assertNotIn("demo-skill", win.settings.get(
+                "skill_fingerprints", {}))
+            win._record_skill_fingerprint(folder)
+            self.assertIn("demo-skill", win.settings.get(
+                "skill_fingerprints", {}))
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_customize_notice_names_changed_extensions(self):
+        from PySide6.QtWidgets import QLabel
+        from forge.main import CustomizeDialog
+        win, temp, patchers = self._fresh_window()
+        base = Path(temp.name)
+        old_skills, old_plugins = win.app_skills_dir, win.app_plugins_dir
+        try:
+            self._enabled_skill(win, base)
+            self._enabled_plugin(win, base)
+            dlg = CustomizeDialog(
+                win, win.all_skills, win.all_plugins,
+                set(win.settings.get("disabled_skills", [])),
+                set(win.settings.get("disabled_plugins", [])),
+                {}, fingerprint_changed_skills={"demo-skill"},
+                fingerprint_changed_plugins={"flip-plug"})
+            try:
+                texts = [w.text() for w in dlg.findChildren(QLabel)]
+                joined = "\n".join(texts)
+                self.assertIn("demo-skill", joined)
+                self.assertIn("Flip Plug", joined)
+                self.assertIn("Changed on disk", joined)
+            finally:
+                dlg.close()
+        finally:
+            win.app_skills_dir, win.app_plugins_dir = old_skills, old_plugins
+            win.rescan_extensions()
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+
+class HomeworkBudgetGuardTests(unittest.TestCase):
+    """Context fixes (2026-11-13, F1): the Plan/Research homework
+    pass runs the same fold-or-stop budget guard as the main loop.
+    Before the fix homework had no guard at all — a Plan turn
+    filled an 8k window past 100% while still reading. These tests
+    call _homework_phase directly with a 2,000-token window and a
+    fat history (cycle-0 fill ~0.95: under the cycle-0 stop line of
+    1.0, over the 0.90 fraction from cycle 1). Fill math, measured
+    with the tree's own estimators (CHARS_PER_TOKEN is 3.5, not 4
+    — the first fixture used 4 and tripped at cycle 0): user 11 +
+    fat 1,206 (4,200 chars) + Plan schemas 678 = 1,895 / 2,000 =
+    0.947 at cycle 0; one read adds ~30, so cycle 1 sits at ~0.96
+    and trips."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "src").mkdir()
+        (self.root / "src" / "demo.py").write_text(
+            "def existing_fn():\n    return 1\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _worker(self, client, messages, **kw):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        statuses = []
+        w = AgentWorker(
+            client, "fake-model", messages,
+            {"num_ctx": 2000, "num_predict": 512},
+            str(self.root),
+            permissions={"rules": [], "mode": "plan", "classes": {}},
+            planning=True, eventlog=log, **kw)
+        w.approval_needed.connect(lambda *a: w.resolve_approval(True))
+        w.status.connect(statuses.append)
+        return w, log, statuses
+
+    def _fat_messages(self, chars=4200):
+        return [{"role": "user", "content": "make a cat game"},
+                {"role": "assistant", "content": "A" * chars}]
+
+    def test_budget_stop_ends_homework_with_notes_and_reads(self):
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY"},
+        ])
+        w, log, statuses = self._worker(client, self._fat_messages())
+        # The fold cannot help: the guard must stop the pass.
+        w._try_mid_turn_fold = lambda *a: False
+        w._write_trajectory = lambda *a: None
+        outcome = w._homework_phase("plan")
+        # Only the cycle-0 generation ran; cycle 1 hit the guard.
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertIn("src/demo.py", outcome["reads"])
+        self.assertIn("homework_budget_stop", log.kinds())
+        self.assertIn("context_budget_stop", log.kinds())
+        # The homework record still lands (the caller drafts from it).
+        notes = [m["content"] for m in w.messages
+                 if m.get("role") == "system"
+                 and m["content"].startswith("[Homework")]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("src/demo.py", notes[0])
+        # The owner is told plainly what happened.
+        self.assertTrue(any("Drafting with what I have read" in s
+                            for s in statuses), statuses)
+
+    def test_fold_landing_lets_homework_continue(self):
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY"},
+        ])
+        w, log, statuses = self._worker(client, self._fat_messages())
+        w._try_mid_turn_fold = lambda *a: True
+        outcome = w._homework_phase("plan")
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertNotIn("homework_budget_stop", log.kinds())
+        self.assertNotIn("context_budget_stop", log.kinds())
+
+    def test_under_budget_homework_runs_unguarded(self):
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY"},
+        ])
+        w, log, statuses = self._worker(
+            client, [{"role": "user", "content": "make a cat game"}])
+        outcome = w._homework_phase("plan")
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertIn("src/demo.py", outcome["reads"])
+        self.assertNotIn("homework_budget_stop", log.kinds())
+        self.assertNotIn("context_budget_stop", log.kinds())
+
+
+class TurnTimeoutTests(unittest.TestCase):
+    """Context fixes (2026-11-13, F2): a turn cannot run forever.
+    The cap counts cumulative model-generation time only — approval
+    waits never count — and is enforced mid-generation, because a
+    per-cycle check cannot catch a single generation that runs for
+    an hour (the owner's lfm3 turn)."""
+
+    def _worker(self, client=None, **kw):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        w = AgentWorker(
+            client or _BatchClient([]), "fake",
+            [{"role": "user", "content": "go"}], {},
+            tempfile.mkdtemp(), eventlog=log, **kw)
+        return w, log
+
+    def test_timeout_parsing(self):
+        w, _log = self._worker()
+        self.assertEqual(w._turn_timeout_seconds, 30 * 60)
+        w, _log = self._worker(turn_timeout_minutes=None)
+        self.assertEqual(w._turn_timeout_seconds, 30 * 60)
+        w, _log = self._worker(turn_timeout_minutes=5)
+        self.assertEqual(w._turn_timeout_seconds, 5 * 60)
+        w, _log = self._worker(turn_timeout_minutes=0)
+        self.assertIsNone(w._turn_timeout_seconds)
+        w, _log = self._worker(turn_timeout_minutes="lots")
+        self.assertEqual(w._turn_timeout_seconds, 30 * 60)
+
+    def test_overdue_counts_cumulative_generation_time(self):
+        import time
+        w, _log = self._worker(turn_timeout_minutes=1)
+        now = time.time()
+        # Nothing spent yet: not overdue.
+        self.assertFalse(w._generation_overdue(now))
+        # 50s spent + 20s into this generation > 60s cap: overdue.
+        w._turn_gen_seconds = 50.0
+        self.assertTrue(w._generation_overdue(now - 20))
+        # 50s spent + 5s in: still under.
+        self.assertFalse(w._generation_overdue(now - 5))
+
+    def test_no_cap_never_overdue(self):
+        import time
+        w, _log = self._worker(turn_timeout_minutes=0)
+        w._turn_gen_seconds = 999999.0
+        self.assertFalse(w._generation_overdue(time.time() - 9999))
+
+    def test_runaway_generation_aborts_and_turn_ends_plainly(self):
+        import time
+        import forge.worker as worker_mod
+
+        class _SlowClient:
+            """Yields 100 content events, 0.05s apart — a 5-second
+            generation the 0.5s cap must cut short."""
+
+            def __init__(self):
+                self.events = 0
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None):
+                for _ in range(100):
+                    self.events += 1
+                    time.sleep(0.05)
+                    yield {"message": {"content": "x",
+                                       "tool_calls": []}}
+
+        client = _SlowClient()
+        w, log = self._worker(client)
+        w._turn_timeout_seconds = 0.5
+        finished = []
+        w.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        started = time.time()
+        w.run()
+        elapsed = time.time() - started
+        # Aborted mid-generation, far short of the 5s stream.
+        self.assertTrue(w._timed_out)
+        self.assertTrue(w._cancel)
+        self.assertLess(client.events, 100)
+        self.assertLess(elapsed, 4.0)
+        # The turn ends on the plain timeout line, not a crash.
+        self.assertIn("turn_timeout", log.kinds())
+        answers = [m.get("content", "") for m in w.messages
+                   if m.get("role") == "assistant"]
+        self.assertTrue(any("thinking time" in a for a in answers),
+                        answers)
+        self.assertTrue(any(a.startswith("Stopped here.") for a in answers),
+                        answers)
+        self.assertTrue(finished)
+
+
+class DigestScalingTests(unittest.TestCase):
+    """Context fixes (2026-11-13, F3): when the owner has not set an
+    explicit digest size, the kept digest scales with the driver's
+    resolved window — one result never keeps more than 1/8 of the
+    window in the model's view. An explicit setting still wins
+    outright, and the GoFish read budget keeps its old default."""
+
+    def _worker(self, num_ctx=8192, **kw):
+        from forge.worker import AgentWorker
+        return AgentWorker(
+            _BatchClient([]), "fake",
+            [{"role": "user", "content": "go"}], {"num_ctx": num_ctx},
+            tempfile.mkdtemp(), **kw)
+
+    def test_default_scales_with_window(self):
+        import forge.worker as worker_mod
+        import forge.context as context_mod
+        w = self._worker(8192)
+        # The scaled sizes resolve lazily, on first use during the
+        # turn — _digest_sizes() is the seam. 8192 tokens x 3.5
+        # chars (CHARS_PER_TOKEN) x 1/8 = 3584 chars kept, 80/20.
+        threshold, head, tail = w._digest_sizes()
+        self.assertEqual(threshold, 3584)
+        self.assertEqual(head, 2867)
+        self.assertEqual(tail, 717)
+        self.assertEqual(
+            threshold,
+            int(8192 * context_mod.CHARS_PER_TOKEN
+                * worker_mod._DIGEST_WINDOW_SHARE))
+        # The GoFish budget keeps the old default.
+        self.assertEqual(
+            w.result_digest_chars,
+            worker_mod._TOOL_RESULT_DIGEST_THRESHOLD)
+
+    def test_small_window_floors_at_minimum(self):
+        w = self._worker(1024)
+        threshold, head, tail = w._digest_sizes()
+        self.assertEqual(threshold, 1024)
+        self.assertEqual(head, 819)
+        self.assertEqual(tail, 205)
+
+    def test_explicit_setting_wins_outright(self):
+        w = self._worker(8192, result_digest_chars=40000)
+        self.assertEqual(w._digest_threshold, 40000)
+        self.assertEqual(w._digest_head, 32000)
+        self.assertEqual(w._digest_tail, 8000)
+        self.assertEqual(w.result_digest_chars, 40000)
+
+    def test_scaled_digest_end_to_end(self):
+        import forge.worker as worker_mod
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            full = "H" * 2867 + "M" * 6416 + "T" * 717
+            self.assertEqual(len(full), 10000)
+            client = _BatchClient([("list_directory", {"path": "."})])
+            rules = [{"scope": "global", "tool": "list_directory",
+                      "pattern": "*", "action": "allow"}]
+            log = _FakeEventLog()
+            worker = AgentWorker(
+                client, "fake", [{"role": "user", "content": "go"}],
+                {"num_ctx": 8192}, td, eventlog=log,
+                permissions={"rules": rules, "mode": "code",
+                             "classes": {}})
+            real_execute = worker_mod.execute_tool
+            worker_mod.execute_tool = (
+                lambda name, args, workspace, cancel_event=None: full)
+            try:
+                worker.run()
+            finally:
+                worker_mod.execute_tool = real_execute
+            tools = [m.get("content", "") for m in worker.messages
+                     if m.get("role") == "tool"]
+            self.assertEqual(len(tools), 1)
+            expected = ("H" * 2867
+                        + "\n[… 6416 chars elided — the full output of "
+                          "list_directory is recorded in the event log …]\n"
+                        + "T" * 717)
+            self.assertEqual(tools[0], expected)
+            self.assertLess(len(tools[0]), len(full))
+            records = [f for k, f in log.events if k == "tool_result"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["text"], full)
+
+    def test_small_result_verbatim_under_scaled_threshold(self):
+        import forge.worker as worker_mod
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            client = _BatchClient([("list_directory", {"path": "."})])
+            rules = [{"scope": "global", "tool": "list_directory",
+                      "pattern": "*", "action": "allow"}]
+            log = _FakeEventLog()
+            worker = AgentWorker(
+                client, "fake", [{"role": "user", "content": "go"}],
+                {"num_ctx": 8192}, td, eventlog=log,
+                permissions={"rules": rules, "mode": "code",
+                             "classes": {}})
+            real_execute = worker_mod.execute_tool
+            worker_mod.execute_tool = (
+                lambda name, args, workspace,
+                cancel_event=None: "x" * 2000)
+            try:
+                worker.run()
+            finally:
+                worker_mod.execute_tool = real_execute
+            tools = [m.get("content", "") for m in worker.messages
+                     if m.get("role") == "tool"]
+            self.assertEqual(tools, ["x" * 2000])
+
+
+class GenerationProgressTests(unittest.TestCase):
+    """Context fixes (2026-11-13, F5): while a generation runs long,
+    the status line says what it is doing — phase, elapsed time,
+    tokens so far, tok/s. Short generations stay silent."""
+
+    def _worker(self):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        statuses = []
+        w = AgentWorker(
+            _BatchClient([]), "fake",
+            [{"role": "user", "content": "go"}], {},
+            tempfile.mkdtemp(), eventlog=log)
+        w.status.connect(statuses.append)
+        return w, statuses
+
+    def test_progress_format(self):
+        import time
+        import forge.context as context_mod
+        w, statuses = self._worker()
+        w._emit_generation_progress("homework", time.time() - 125.5, 8000)
+        self.assertEqual(len(statuses), 1)
+        # 8,000 chars at CHARS_PER_TOKEN (3.5) is 2,285 tokens;
+        # 2,285 / 125.5 s is 18.2 tok/s. The token count is an
+        # integer, never a float with a ".0" (fixed 2026-11-13:
+        # floor-division by the float constant returned 2285.0).
+        tokens = int(8000 // context_mod.CHARS_PER_TOKEN)
+        self.assertEqual(tokens, 2285)
+        self.assertEqual(
+            statuses[0],
+            f"Reading the project first … 2:05 · ~{tokens:,} tokens "
+            f"· {tokens / 125.5:.1f} tok/s")
+
+    def test_unknown_phase_reports_working(self):
+        import time
+        w, statuses = self._worker()
+        w._emit_generation_progress("mystery", time.time() - 10, 40)
+        self.assertTrue(statuses[0].startswith("Working …"), statuses)
+
+    def test_fast_generation_emits_no_progress(self):
+        from forge.worker import AgentWorker
+        with tempfile.TemporaryDirectory() as td:
+            log = _FakeEventLog()
+            statuses = []
+            client = _BatchClient([])
+            worker = AgentWorker(
+                client, "fake", [{"role": "user", "content": "go"}], {},
+                td, eventlog=log,
+                permissions={"rules": [], "mode": "code", "classes": {}})
+            worker.status.connect(statuses.append)
+            worker.run()
+            self.assertFalse(any("tok/s" in s for s in statuses),
+                             statuses)
+
+
+class LoadedLabelSwitchTests(unittest.TestCase):
+    """The IN RAM label on a model switch (2026-11-13): while the
+    newly picked model loads, the label reads "Loading…" — never
+    the old model's name, which read as broken. The gauge pass
+    clears it when the model appears in RAM, or after the tick
+    timeout if it never does."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.win._loaded_pending = None
+        self.win._loaded_pending_ticks = 0
+
+    def _snap(self, loaded):
+        return {"total_gb": 8.0, "avail_gb": 4.0, "load_1min": 1.0,
+                "threads": 4, "cpu_busy": False, "ollama_running": True,
+                "ollama_loaded": loaded}
+
+    def test_switch_to_unloaded_model_shows_loading(self):
+        self.win._gauge_snap = self._snap(["old-model:2b"])
+        self.win._note_model_loading("new-model:2b")
+        self.assertEqual(self.win.loaded_label.text(), "Loading…")
+        self.assertEqual(self.win._loaded_pending, "new-model:2b")
+        self.assertIn("One moment", self.win.loaded_label.toolTip())
+
+    def test_switch_to_loaded_model_changes_nothing(self):
+        self.win._gauge_snap = self._snap(["new-model:2b"])
+        self.win.loaded_label.setText("new-model:2b")
+        self.win._note_model_loading("new-model:2b")
+        self.assertIsNone(self.win._loaded_pending)
+        self.assertEqual(self.win.loaded_label.text(), "new-model:2b")
+
+    def test_provider_model_never_touches_label(self):
+        self.win._gauge_snap = self._snap(["old-model:2b"])
+        self.win.loaded_label.setText("old-model:2b")
+        self.win._note_model_loading("groq:openai/gpt-oss-20b")
+        self.assertIsNone(self.win._loaded_pending)
+        self.assertEqual(self.win.loaded_label.text(), "old-model:2b")
+
+    def test_gauge_clears_loading_when_model_arrives(self):
+        self.win._gauge_snap = self._snap(["old-model:2b"])
+        self.win._note_model_loading("new-model:2b")
+        self.assertEqual(self.win.loaded_label.text(), "Loading…")
+        # One tick still on the old list: the label holds.
+        self.win._apply_gauges(self._snap(["old-model:2b"]))
+        self.assertEqual(self.win.loaded_label.text(), "Loading…")
+        # The new model is in RAM: the label shows it, pending clears.
+        self.win._apply_gauges(self._snap(["new-model:2b"]))
+        self.assertEqual(self.win.loaded_label.text(), "new-model:2b")
+        self.assertIsNone(self.win._loaded_pending)
+        self.assertEqual(self.win.loaded_label.toolTip(),
+                         self.win.loaded_stamp.toolTip())
+
+    def test_gauge_timeout_falls_back_to_truthful_list(self):
+        import forge.main as main_mod
+        self.win._gauge_snap = self._snap(["old-model:2b"])
+        self.win._note_model_loading("new-model:2b")
+        for _ in range(main_mod._LOADED_PENDING_MAX_TICKS):
+            self.win._apply_gauges(self._snap(["old-model:2b"]))
+            self.assertEqual(self.win.loaded_label.text(), "Loading…")
+        # One tick past the timeout: the truthful list returns.
+        self.win._apply_gauges(self._snap(["old-model:2b"]))
+        self.assertEqual(self.win.loaded_label.text(), "old-model:2b")
+        self.assertIsNone(self.win._loaded_pending)
+
+
+class DeepAudit47PluginTests(unittest.TestCase):
+    """Deep audit 2026-11-13 (evening): hf_model_info encoded the
+    repo slash as %2F (the HF API rejects it with 400 — every call
+    failed), and a junk `limit` crashed both search handlers with an
+    uncaught ValueError (the int() sat outside the try)."""
+
+    def _plugin_module(self, folder, modname):
+        import importlib.util
+        root = Path(__file__).resolve().parent.parent
+        path = root / "plugins" / folder / "plugin.py"
+        spec = importlib.util.spec_from_file_location(modname, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_hf_model_info_keeps_slash_unencoded(self):
+        from unittest import mock
+        hf = self._plugin_module("huggingface", "hf_plugin_audit47")
+        body = json.dumps({"id": "owner/name", "downloads": 1,
+                           "cardData": {"license": "mit"},
+                           "siblings": []}).encode()
+        seen = []
+
+        def recording(req, timeout=None):
+            seen.append(req.full_url)
+            return _CappedFakeResponse(body)
+
+        ctx = PluginContext(workspace="/tmp")
+        with mock.patch("urllib.request.urlopen", recording):
+            out = hf.hf_model_info({"repo_id": "owner/name"}, ctx)
+        self.assertIn("owner/name", out)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("/models/owner/name?blobs=true", seen[0])
+        self.assertNotIn("%2F", seen[0])
+
+    def test_hf_search_junk_limit_returns_plain_message(self):
+        from unittest import mock
+        hf = self._plugin_module("huggingface", "hf_plugin_audit47b")
+        calls = []
+
+        def recording(req, timeout=None):
+            calls.append(req)
+            return _CappedFakeResponse(b"[]")
+
+        ctx = PluginContext(workspace="/tmp")
+        with mock.patch("urllib.request.urlopen", recording):
+            out = hf.hf_search_models({"query": "forge", "limit": "abc"}, ctx)
+        self.assertEqual(out, "Limit must be a whole number.")
+        self.assertEqual(calls, [])
+
+    def test_github_search_junk_limit_returns_plain_message(self):
+        from unittest import mock
+        gh = self._plugin_module("github", "gh_plugin_audit47")
+        calls = []
+
+        def recording(req, timeout=None):
+            calls.append(req)
+            return _CappedFakeResponse(b'{"items": []}')
+
+        ctx = PluginContext(workspace="/tmp")
+        with mock.patch("urllib.request.urlopen", recording):
+            out = gh.github_search_repos({"query": "forge", "limit": "abc"}, ctx)
+        self.assertEqual(out, "Limit must be a whole number.")
+        self.assertEqual(calls, [])
+
+    def test_search_limit_numeric_string_still_works(self):
+        from unittest import mock
+        hf = self._plugin_module("huggingface", "hf_plugin_audit47c")
+        body = json.dumps([{"id": "a/b", "downloads": 1, "likes": 0,
+                            "pipeline_tag": "text-generation"}]).encode()
+        fake = _CappedFakeResponse(body)
+        ctx = PluginContext(workspace="/tmp")
+        with mock.patch("urllib.request.urlopen",
+                        lambda req, timeout=None: fake):
+            out = hf.hf_search_models({"query": "forge", "limit": "3"}, ctx)
+        self.assertIn("- a/b", out)

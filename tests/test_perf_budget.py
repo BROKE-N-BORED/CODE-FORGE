@@ -4,7 +4,7 @@ The budget lives in forge/perf_budget.py. These tests enforce the
 parts that can be enforced HERE, deterministically:
 
 - the install footprint of the real tree (bytes + files, packaging
-  exclusions) stays under its ceilings;
+  exclusions) is measured and reported — there is no ceiling;
 - the generation-diet / payload caps in the live code still equal
   the values the budget mirrors — a cap that quietly grows fails;
 - every budget line carries a derivation and an honest enforcement
@@ -87,27 +87,13 @@ class FootprintTests(unittest.TestCase):
             total, count = perf_budget.tree_footprint(root)
             self.assertEqual((total, count), (100, 1))
 
-    def test_report_flags_a_bloated_tree(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            fat = root / "fat.bin"
-            with open(fat, "wb") as fh:
-                fh.truncate(perf_budget.BUDGET[
-                    "footprint_bytes_ceiling"]["value"] + 1)
-            report = perf_budget.footprint_report(root)
-            self.assertFalse(report["ok"])
-            self.assertGreater(report["bytes"], report["bytes_ceiling"])
-
-    def test_real_tree_is_inside_the_envelope(self):
+    def test_real_tree_footprint_reports(self):
+        # No ceiling (owner's order, 2026-11-13): the report measures
+        # the tree, it never gates on it. This pins only that the
+        # measurement works on the real tree.
         report = perf_budget.footprint_report(ROOT)
         self.assertGreater(report["bytes"], 0)
-        self.assertLessEqual(report["bytes"], report["bytes_ceiling"],
-                             f"tree is {report['bytes']} bytes — over the "
-                             f"{report['bytes_ceiling']}-byte budget; "
-                             f"something heavy moved in")
-        self.assertLessEqual(report["files"], report["files_ceiling"],
-                             f"tree has {report['files']} files — over "
-                             f"the {report['files_ceiling']}-file budget")
+        self.assertGreater(report["files"], 0)
 
 
 class DocGuardTests(unittest.TestCase):

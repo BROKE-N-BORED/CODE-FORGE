@@ -49,7 +49,10 @@ def github_search_repos(args, ctx):
     query = urllib.parse.quote(str(args.get("query", "")).strip())
     if not query:
         return "No search query given."
-    limit = int(args.get("limit") or 10)
+    try:
+        limit = int(args.get("limit") or 10)
+    except (TypeError, ValueError):
+        return "Limit must be a whole number."
     try:
         data = _get(f"{API}/search/repositories?q={query}&per_page={limit}&sort=stars", ctx)
     except Exception as exc:

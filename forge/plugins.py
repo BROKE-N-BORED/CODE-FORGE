@@ -25,6 +25,7 @@ that declares none sees an empty config.
 """
 from __future__ import annotations
 import contextlib
+import hashlib
 import importlib.util
 import json
 import threading
@@ -180,8 +181,32 @@ class _PluginContextView:
             setattr(self._effective_base(), name, value)
 
 
+def plugin_fingerprint(folder) -> str | None:
+    """C16 (audit S1-25/W2): the content fingerprint of a plugin —
+    sha256 over plugin.json + plugin.py, each file's bytes
+    prefixed by its name so the two files cannot trade contents
+    unnoticed. The fingerprint is recorded at trust time (first
+    load of an enabled plugin, or re-enable in Customize) and
+    re-checked at every load; a changed fingerprint means the code
+    on disk is not the code the owner trusted. Returns None when
+    either file is missing or unreadable — unverifiable content
+    never counts as matching."""
+    folder = Path(folder)
+    digest = hashlib.sha256()
+    try:
+        for name in ("plugin.json", "plugin.py"):
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update((folder / name).read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 def load_plugins(plugins_dir: Path, ctx: PluginContext,
-                 disabled=frozenset(), known=None) -> tuple[list[Plugin], dict]:
+                 disabled=frozenset(), known=None,
+                 fingerprints=None, fingerprint_changes=None) -> tuple[list[Plugin], dict]:
     """Returns (plugins, tool_registry) where tool_registry maps
     tool_name -> (schema, handler, requires_approval, plugin_name).
 
@@ -199,6 +224,22 @@ def load_plugins(plugins_dir: Path, ctx: PluginContext,
     their declared tools and handlers={}. The registry is built from
     executed plugins only; on a tool-name collision the FIRST plugin
     (sorted folder order) keeps the name and the collision is logged.
+
+    C16 (audit S1-25/W2): `fingerprints` is the recorded trust —
+    {pid: plugin_fingerprint} from owner settings — and
+    `fingerprint_changes` an optional list the caller supplies to
+    collect pids whose content changed since they were trusted.
+    When `fingerprints` is None the gate is off and the load is
+    exactly as before. When given, a plugin about to execute is
+    fingerprinted first: no recorded fingerprint means first
+    sight — the current content is recorded as the baseline in
+    place (the enable decision IS the trust decision); a changed
+    fingerprint (or unreadable content) means disk replacement
+    under an old trust decision — the pid is appended to
+    `fingerprint_changes` and the code does NOT execute. The
+    caller disables the pid and surfaces it; this function logs
+    nothing itself, so a load during window startup (no log panel
+    yet) cannot crash on the log call.
     """
     plugins: list[Plugin] = []
     registry: dict = {}
@@ -231,6 +272,20 @@ def load_plugins(plugins_dir: Path, ctx: PluginContext,
         if plugin.pid in disabled or (known_set is not None
                                       and plugin.pid not in known_set):
             continue
+        if fingerprints is not None:
+            # C16: the code about to run must still be the code the
+            # owner trusted. First sight records the baseline;
+            # changed (or unreadable) content does not run — the
+            # caller disables the pid from fingerprint_changes.
+            current = plugin_fingerprint(folder)
+            recorded = fingerprints.get(plugin.pid)
+            if recorded is None:
+                if current is not None:
+                    fingerprints[plugin.pid] = current
+            elif current != recorded:
+                if fingerprint_changes is not None:
+                    fingerprint_changes.append(plugin.pid)
+                continue
         try:
             spec = importlib.util.spec_from_file_location(f"forge_plugin_{folder.name}", code_file)
             module = importlib.util.module_from_spec(spec)

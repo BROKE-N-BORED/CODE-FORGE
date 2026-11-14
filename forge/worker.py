@@ -285,6 +285,41 @@ _COMMAND_TEXT_PROBE_BYTES = 8192       # UTF-8 plausibility probe window
 _TOOL_RESULT_DIGEST_THRESHOLD = 24_000
 _TOOL_RESULT_HEAD = 16_000
 _TOOL_RESULT_TAIL = 4_000
+# Context fixes (2026-11-13, the owner's hour-long lfm3 turn): the
+# digest above was sized for a big window — at 8,192 tokens one kept
+# result (20,000 chars) is 61% of the window. When the owner has not
+# set an explicit digest size, the kept digest scales with the
+# driver's resolved window instead: one result never keeps more than
+# this share of the window in the model's view. The event log still
+# keeps the full text, and an explicit setting still wins outright.
+_DIGEST_WINDOW_SHARE = 0.125
+_DIGEST_KEPT_MIN_CHARS = 1024
+# Turn timeout (2026-11-13, same incident): the default cap on one
+# turn's cumulative model-generation time, in minutes — 0 turns the
+# cap off. The cap counts GENERATION time only, never the owner's
+# approval waits: a turn may wait on its owner as long as it takes.
+DEFAULT_TURN_TIMEOUT_MINUTES = 30
+# Live progress (2026-11-13, same incident): how often a streaming
+# generation re-emits its status with elapsed time, tokens so far
+# and tok/s — often enough to see a stuck turn moving, seldom
+# enough to stay cheap.
+PROGRESS_EMIT_SECONDS = 2.0
+# Live progress (2026-11-13): what a streaming generation calls
+# itself in the status line, per _generate phase. Unmapped phases
+# report as "Working" — the label is a courtesy, never a gate.
+_PHASE_STATUS_LABELS = {
+    "homework": "Reading the project first",
+    "main": "Generating response",
+    "grading": "Grading",
+    "plan-clarify": "Clarifying",
+    "clarify": "Clarifying",
+    "plan-section": "Drafting the plan",
+    "plan-section-retry": "Drafting the plan",
+    "research-section": "Drafting the research plan",
+    "research-section-retry": "Drafting the research plan",
+    "gofish-revision": "Revising",
+    "owner-revision": "Revising",
+}
 _TOOL_RESULT_LOG_CAP = 200_000
 _TOOL_CALL_ARGS_LOG_CAP = 20_000
 BUDGET_STOP_FRACTION = 0.90
@@ -323,17 +358,21 @@ def _untrusted_frame(name: str, content):
     return UNTRUSTED_PREFIX + content
 
 
-def _digest_tool_result(name: str, result: str) -> str:
+def _digest_tool_result(name: str, result: str,
+                        head: int = _TOOL_RESULT_HEAD,
+                        tail: int = _TOOL_RESULT_TAIL) -> str:
     """The message copy of an oversized tool result (audit B18):
-    the first _TOOL_RESULT_HEAD chars and the last _TOOL_RESULT_TAIL,
-    with the elision stated between them. Only the copy the model
-    re-reads every cycle is digested — loop detection, receipts,
-    SKRIBE and the event log all keep the full text."""
-    elided = len(result) - _TOOL_RESULT_HEAD - _TOOL_RESULT_TAIL
-    return (result[:_TOOL_RESULT_HEAD]
+    the first `head` chars and the last `tail`, with the elision
+    stated between them. Only the copy the model re-reads every
+    cycle is digested — loop detection, receipts, SKRIBE and the
+    event log all keep the full text. The head/tail default to the
+    module constants (the pre-scaling shape); the worker passes its
+    window-scaled sizes (see _DIGEST_WINDOW_SHARE)."""
+    elided = len(result) - head - tail
+    return (result[:head]
             + f"\n[… {elided} chars elided — the full output of {name} "
               f"is recorded in the event log …]\n"
-            + result[-_TOOL_RESULT_TAIL:])
+            + result[-tail:])
 
 # Item 14: the built-in write tools. The turn's FIRST execution of
 # either one opens the edit window the pre-edit snapshot protects;
@@ -1205,6 +1244,7 @@ class AgentWorker(QThread):
                  checkpoint_app_dir=None,
                  disabled_tools=None,
                  result_digest_chars=None,
+                 turn_timeout_minutes=None,
                  contained_run: bool = False,
                  contained_docker: bool = False,
                  contained_docker_image: str = "",
@@ -1307,13 +1347,54 @@ class AgentWorker(QThread):
         # unparseable keeps the module default, so a settings dict
         # without the key behaves exactly as before. The event log
         # keeps the full text regardless (item 45).
+        # Context fixes (2026-11-13): when the owner has NOT set a
+        # size, the digest scales with the driver's resolved window
+        # instead of the fixed 24,000 chars — at 8,192 tokens the
+        # old shape let one result keep 61% of the window. The
+        # threshold (when to digest) and the kept head/tail both
+        # scale; the kept size is DIGEST_WINDOW_SHARE of the window
+        # in chars, split 80/20 head/tail like the old constants.
+        # The scaled sizes resolve LAZILY, on first use during the
+        # turn (_digest_sizes) — NOT here. Resolving here would
+        # call _driver_budget() at construction and cache the
+        # budget, and a worker whose options change between
+        # construction and run would then budget against a stale
+        # window (the SweepWorkerBatchTests R5 test sets num_ctx
+        # after construction; the fix landed 2026-11-13 after it
+        # caught exactly that). result_digest_chars itself keeps
+        # its second job unchanged (the GoFish read budget, a total
+        # across files in fresh contexts — it never competed with
+        # this turn's window).
         try:
             _digest_cap = int(result_digest_chars)
         except (TypeError, ValueError):
             _digest_cap = 0
-        self.result_digest_chars = (
-            _digest_cap if _digest_cap > 0
-            else _TOOL_RESULT_DIGEST_THRESHOLD)
+        if _digest_cap > 0:
+            self.result_digest_chars = _digest_cap
+            self._digest_threshold = _digest_cap
+            self._digest_head = _digest_cap * 4 // 5
+            self._digest_tail = _digest_cap - self._digest_head
+        else:
+            self.result_digest_chars = _TOOL_RESULT_DIGEST_THRESHOLD
+            self._digest_threshold = None
+            self._digest_head = None
+            self._digest_tail = None
+        # Turn timeout (2026-11-13): the cap on one turn's
+        # cumulative model-generation time, in seconds. None /
+        # unset / unparseable takes the default (30 minutes); 0
+        # turns the cap off. Minutes in, seconds stored — the
+        # setting speaks the owner's unit, the checks speak the
+        # clock's.
+        try:
+            _timeout_min = int(turn_timeout_minutes) \
+                if turn_timeout_minutes is not None \
+                else DEFAULT_TURN_TIMEOUT_MINUTES
+        except (TypeError, ValueError):
+            _timeout_min = DEFAULT_TURN_TIMEOUT_MINUTES
+        self._turn_timeout_seconds = (_timeout_min * 60
+                                      if _timeout_min > 0 else None)
+        self._timed_out = False
+        self._turn_gen_seconds = 0.0
         self.hooks = hooks or []
         self.verify_commands = verify_commands or []
         self.permissions = permissions or {}
@@ -2173,6 +2254,33 @@ class AgentWorker(QThread):
         return light_mod.seat_keep_alive(model, default,
                                          self._light_on())
 
+    def _generation_overdue(self, gen_started) -> bool:
+        """Turn timeout (2026-11-13): True when this turn's
+        cumulative generation time — earlier generations plus this
+        one so far — has passed the owner's cap. None (0 minutes)
+        means no cap. Approval waits never count: the clock runs
+        only while the model is generating."""
+        limit = self._turn_timeout_seconds
+        if limit is None:
+            return False
+        spent = getattr(self, "_turn_gen_seconds", 0.0)
+        return spent + (time.time() - gen_started) > limit
+
+    def _emit_generation_progress(self, phase, gen_started, gen_chars):
+        """Live progress for a streaming generation (2026-11-13,
+        U16): the phase label, elapsed time, tokens so far (estimated
+        from streamed chars on the context module's own rule) and
+        tok/s. Called throttled from the stream loop — never per
+        chunk."""
+        elapsed = time.time() - gen_started
+        tokens = int(gen_chars // context_mod.CHARS_PER_TOKEN)
+        tps = tokens / elapsed if elapsed > 0 else 0.0
+        mins, secs = divmod(int(elapsed), 60)
+        label = _PHASE_STATUS_LABELS.get(phase, "Working")
+        self.status.emit(
+            f"{label} … {mins}:{secs:02d} · ~{tokens:,} tokens · "
+            f"{tps:.1f} tok/s")
+
     def _generate(self, schemas, num_predict=None, phase="main",
                   cycle=None, recite_plan=False) -> tuple[str, list]:
         """One streamed generation against the given tool schemas.
@@ -2215,6 +2323,12 @@ class AgentWorker(QThread):
         the record fires without token fields and the generation
         still counts."""
         gen_started = time.time()
+        # Live progress (2026-11-13): chars streamed so far (tokens
+        # are estimated from these) and the last progress emit —
+        # the first emit waits out the throttle, so a short
+        # generation stays silent.
+        gen_chars = 0
+        last_progress = gen_started
         options = self.options
         if num_predict is not None:
             options = {**self.options,
@@ -2265,6 +2379,20 @@ class AgentWorker(QThread):
                 **self._stream_cancel_kwargs(_keep_alive)):
             if self._cancel:
                 break
+            # Turn timeout (2026-11-13): the cap is enforced HERE,
+            # mid-generation — a per-cycle check alone cannot catch
+            # a single generation that runs for an hour, which is
+            # exactly what the owner's lfm3 turn did. Tripping sets
+            # the same cancel the owner's Stop button sets, so the
+            # stream aborts (the cancel watch) and every loop's
+            # existing _cancel check unwinds the turn; _timed_out
+            # marks it so the turn ends on the timeout message,
+            # not on a bare stop.
+            if self._generation_overdue(gen_started):
+                self._timed_out = True
+                self._cancel = True
+                self._cancel_event.set()
+                break
             if not isinstance(event, dict):
                 # Sweep R22: one malformed stream event (a provider
                 # quirk, a proxy's keep-alive line) must not kill
@@ -2276,11 +2404,22 @@ class AgentWorker(QThread):
             content = message.get("content", "")
             if content:
                 chunks.append(content)
+                gen_chars += len(content)
                 safe = stream_filter.feed(content)
                 if safe:
                     self.token.emit(safe)
             if message.get("tool_calls"):
                 tool_calls.extend(message["tool_calls"])
+            # Live progress (2026-11-13, U16): while a generation
+            # runs long, say so — elapsed time, tokens so far and
+            # tok/s, throttled so the status line updates instead
+            # of flooding. Short generations never reach the first
+            # emit and stay exactly as quiet as before.
+            _now = time.time()
+            if _now - last_progress >= PROGRESS_EMIT_SECONDS:
+                last_progress = _now
+                self._emit_generation_progress(phase, gen_started,
+                                               gen_chars)
         tail = stream_filter.finish()
         if tail:
             self.token.emit(tail)
@@ -2344,6 +2483,12 @@ class AgentWorker(QThread):
                 fields["tok_per_s"] = round(
                     int(eval_tokens) / eval_seconds, 1)
         self._turn_generations = getattr(self, "_turn_generations", 0) + 1
+        # Turn timeout (2026-11-13): this generation's wall seconds
+        # join the turn's cumulative generation time — the cap counts
+        # _generate time only (driver, homework, plan, grading), never
+        # the owner's approval waits or the seat generations.
+        self._turn_gen_seconds = getattr(
+            self, "_turn_gen_seconds", 0.0) + (time.time() - gen_started)
         if prompt_tokens is not None:
             self._turn_prompt_tokens = getattr(
                 self, "_turn_prompt_tokens", 0) + int(prompt_tokens)
@@ -2421,6 +2566,21 @@ class AgentWorker(QThread):
                    "questions": None, "reads": reads}
         for cycle in range(HOMEWORK_MAX_CYCLES):
             if self._cancel:
+                break
+            # Context fixes (2026-11-13): homework used to run this
+            # loop with NO budget guard at all — the main loop's
+            # fold-or-stop never ran here, and a Plan turn filled
+            # an 8k window past 100% while still reading. The guard
+            # is the same one the main loop uses: fold and continue
+            # while a fold can free room; when none can, stop
+            # reading and draft with what was gathered (the outcome
+            # stays "notes", the reads stay recorded, the caller
+            # drafts as before). The draft phase carries its own
+            # guard from here on.
+            if not self._budget_check(schemas, cycle):
+                self._log("homework_budget_stop", reads=len(reads))
+                self.status.emit(
+                    "Context nearly full. Drafting with what I have read so far…")
                 break
             text, tool_calls = self._generate(schemas, phase="homework")
             stripped = text.strip()
@@ -3300,6 +3460,82 @@ class AgentWorker(QThread):
             self._resolved_driver_budget = cached
         return cached
 
+    def _digest_sizes(self):
+        """(threshold, head, tail) for the message-copy digest.
+        An explicit setting resolved at construction; the scaled
+        default resolves HERE, on first use during the turn, from
+        the driver's resolved window — lazy on purpose, so a
+        worker whose options change between construction and run
+        still digests against the turn's real budget (2026-11-13:
+        resolving at construction cached a stale budget and broke
+        the SweepWorkerBatchTests R5 budget-stop test)."""
+        if self._digest_threshold is None:
+            kept = max(
+                _DIGEST_KEPT_MIN_CHARS,
+                int(self._driver_budget()
+                    * context_mod.CHARS_PER_TOKEN
+                    * _DIGEST_WINDOW_SHARE))
+            self._digest_threshold = kept
+            self._digest_head = kept * 4 // 5
+            self._digest_tail = kept - self._digest_head
+        return (self._digest_threshold, self._digest_head,
+                self._digest_tail)
+
+    def _budget_check(self, schemas, cycle) -> bool:
+        """The mid-turn budget guard (audit B18), shared by the main
+        loop and the homework pass (2026-11-13: homework ran its own
+        loop with no guard at all, and a Plan turn filled an 8k
+        window past 100% with nothing ever folding or stopping it).
+        When the estimated payload reaches the stop fraction of the
+        window, the turn FOLDS AND CONTINUES first (context
+        continuity, 2026-11-09 — see _try_mid_turn_fold); only when
+        no fold can free it does this return False, and the caller
+        ends the tool phase its own way: the main loop wraps up
+        without tools, homework drafts with what it has read. The
+        fold-failure path writes a program-built trajectory summary
+        first (study item M8), so the settling generation starts
+        oriented. Returns True when the turn keeps its tools.
+
+        The budget is the DRIVER's resolved window, not the bare
+        num_ctx setting — a provider model folds at its own stated
+        window, a local at min(its trained max, the setting).
+        Cycle 0 is exempt from the fraction (stop_at 1.0): at cycle
+        0 nothing has grown yet — the payload is the fixed surface
+        plus the opening history — and on a long conversation that
+        opening history alone can already sit near the fraction, so
+        stopping there would end the turn before it does any work
+        (the gate tests pin "the first generation had its tools").
+        The first generation closes the offer only when the request
+        does not fit the window at all; from cycle 1 the fraction
+        applies. (CORRECTED 2026-11-13: the old comment claimed the
+        tool surface alone had passed 90% of an 8k window — measured
+        that day at 22% in Plan mode with the tree's own estimator.
+        The opening history, not the tool surface, is what can fill
+        cycle 0.)
+        """
+        num_ctx = self._driver_budget()
+        fill = context_mod.fill_fraction(
+            self.messages, num_ctx, schemas)
+        stop_at = (1.0 if cycle == 0
+                   else BUDGET_STOP_FRACTION)
+        if fill < stop_at:
+            return True
+        if self._try_mid_turn_fold(num_ctx, schemas):
+            return True
+        # Study item M8: the fold could not land (cap spent,
+        # non-shrinking, or no summary) — the compression has
+        # saturated. Before the caller ends the tool phase, replace
+        # the stale bulk with a program-built trajectory summary so
+        # the settling generation starts oriented. A history with
+        # nothing foldable gets no trajectory (there is nothing to
+        # replace) and wraps up exactly as before.
+        self._write_trajectory(num_ctx, schemas)
+        self._log("context_budget_stop",
+                  estimate=context_mod.total_estimate(
+                      self.messages, schemas),
+                  num_ctx=num_ctx)
+        return False
+
     def _try_mid_turn_fold(self, num_ctx, schemas) -> bool:
         """Context continuity (the owner's order, 2026-11-09): when a
         turn's payload reaches the budget-stop fraction, FOLD AND
@@ -4052,9 +4288,9 @@ class AgentWorker(QThread):
             # already seen the full text, and the event log
             # keeps it too.
             content = result
-            if isinstance(result, str) and \
-                    len(result) > self.result_digest_chars:
-                content = _digest_tool_result(name, result)
+            threshold, head, tail = self._digest_sizes()
+            if isinstance(result, str) and len(result) > threshold:
+                content = _digest_tool_result(name, result, head, tail)
             # S5 (audit S1-10): Browse/MCP results enter the
             # conversation framed as untrusted data. ONLY the
             # message copy is framed — every consumer above (loop
@@ -4123,6 +4359,10 @@ class AgentWorker(QThread):
             self._turn_eval_tokens = 0
             self._budget_stopped = False
             self._mid_turn_folds = 0
+            # Turn timeout (2026-11-13): a fresh turn carries no
+            # timed-out flag and no spent generation time.
+            self._timed_out = False
+            self._turn_gen_seconds = 0.0
             self._council_done = False
             # Study item M7: a fresh turn has no handoffs yet.
             self._council_handoff = None
@@ -4235,65 +4475,11 @@ class AgentWorker(QThread):
                         schemas = []
                 elif self._budget_stopped:
                     schemas = []
-                else:
-                    # Audit B18: the fold guards a turn's START;
-                    # this guards its middle. When the estimated
-                    # payload reaches the stop fraction of the
-                    # window, the turn FOLDS AND CONTINUES first
-                    # (context continuity, 2026-11-09 — see
-                    # _try_mid_turn_fold); only when no fold can
-                    # free it does the turn wrap up for good: no
-                    # tools are offered again, so the model settles
-                    # in text with what it already has instead of
-                    # growing the request into silent truncation.
-                    # Dynamic context windows (2026-11-10): the
-                    # budget is the DRIVER's resolved window, not
-                    # the bare num_ctx setting — a provider model
-                    # folds at its own stated window, a local at
-                    # min(its trained max, the setting).
-                    # B18 is a MID-TURN guard — its own tests pin
-                    # "the first generation had its tools": the
-                    # stop fires when the turn's payload GROWS
-                    # past the fraction. At cycle 0 nothing has
-                    # grown — the payload is the fixed surface
-                    # (schemas + system prompt) plus the opening
-                    # history — so the fraction does not apply:
-                    # the tool surface alone has grown past 90%
-                    # of an 8k window, and stopping here made
-                    # every turn text-only before it did any work
-                    # (the gate tests caught it: the R5 guard
-                    # dropped every first-generation tool call).
-                    # The first generation closes the offer only
-                    # when the request does not fit the window
-                    # at all; from cycle 1 the fraction applies
-                    # exactly as before.
-                    num_ctx = self._driver_budget()
-                    fill = context_mod.fill_fraction(
-                        self.messages, num_ctx, schemas)
-                    stop_at = (1.0 if cycle == 0
-                               else BUDGET_STOP_FRACTION)
-                    if fill >= stop_at:
-                        if not self._try_mid_turn_fold(num_ctx, schemas):
-                            # Study item M8: the fold could not land
-                            # (cap spent, non-shrinking, or no
-                            # summary) — the compression has
-                            # saturated. Before the classic wrap-up,
-                            # replace the stale bulk with a
-                            # program-built trajectory summary so the
-                            # settling generation starts oriented.
-                            # A history with nothing foldable gets
-                            # no trajectory (there is nothing to
-                            # replace) and wraps up exactly as
-                            # before.
-                            self._write_trajectory(num_ctx, schemas)
-                            self._budget_stopped = True
-                            self._log("context_budget_stop",
-                                      estimate=context_mod.total_estimate(
-                                          self.messages, schemas),
-                                      num_ctx=num_ctx)
-                            schemas = []
-                            self.status.emit(
-                                "Context nearly full — wrapping up without tools…")
+                elif not self._budget_check(schemas, cycle):
+                    self._budget_stopped = True
+                    schemas = []
+                    self.status.emit(
+                        "Context nearly full. Wrapping up without tools…")
                 # Fix F3: no stored plan-progress reminder
                 # any more — the D39 re-injection is retired. The
                 # plan stays in attention through M3 recitation
@@ -4462,6 +4648,24 @@ class AgentWorker(QThread):
                     and not self._cancel and self._plan_steps
                     and len(self._plan_done) == len(self._plan_steps)):
                 self._maybe_offer_save_run_as_skill(handoffs)
+            # Turn timeout (2026-11-13): a turn the cap stopped ends
+            # on a plain-words line in the conversation — never a
+            # bare stop, never a crash. The line is the turn's
+            # answer, so it rides finished_text like any other.
+            if self._timed_out:
+                _mins = (self._turn_timeout_seconds or 0) // 60
+                self._log("turn_timeout", minutes=_mins,
+                          gen_seconds=round(self._turn_gen_seconds, 1))
+                self.status.emit(
+                    "Stopped. This turn used its "
+                    f"{_mins} minutes of thinking time.")
+                self.messages.append({
+                    "role": "assistant",
+                    "content": (
+                        f"Stopped here. This turn used its {_mins} "
+                        "minutes of thinking time. Nothing was lost: "
+                        "your work is saved, and you can ask me to "
+                        "continue from where it stopped.")})
             self._log("turn_complete", seconds=round(time.time() - turn_started, 2),
                       generations=self._turn_generations,
                       prompt_tokens=self._turn_prompt_tokens,

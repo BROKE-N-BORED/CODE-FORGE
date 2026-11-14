@@ -61,35 +61,12 @@ BUDGET = {
             "the models, not the shell. Measured on the PC (BENCH.md); "
             "nothing here weighs the live process."),
     },
-    # --- Install footprint (enforced HERE, deterministically) ---
-    "footprint_bytes_ceiling": {
-        "value": 6 * 1024 * 1024,
-        "unit": "bytes",
-        "enforcement": "suite",
-        "derivation": (
-            "Originally 4 MiB against the 1,923,259-byte tree of "
-            "2026-11-09. Raised 2026-11-11 on the owner's decision: "
-            "the tree measured 4,455,870 bytes across 140 files that "
-            "day after the browser package, Research/Write rooms, "
-            "parallel agents, project knowledge, export/convert and "
-            "the Light Machine profile landed. 6 MiB is ~1.4x that — "
-            "room for near-term features, while a single vendored "
-            "dependency, venv, or stray binary (tens of MB) still "
-            "trips it by an order of magnitude. Enforced by "
-            "tests/test_perf_budget.py."),
-    },
-    "footprint_files_ceiling": {
-        "value": 200,
-        "unit": "files",
-        "enforcement": "suite",
-        "derivation": (
-            "Originally 150 against 68 files (2026-11-09); raised to "
-            "200 on 2026-11-11 with the byte ceiling (140 files "
-            "measured that day, same exclusions). A vendored "
-            "dependency tree trips this by the hundreds even if its "
-            "bytes were somehow small. Enforced by "
-            "tests/test_perf_budget.py."),
-    },
+    # --- Install footprint: measured, never capped ---
+    # The footprint used to carry suite-enforced ceilings (4 MiB,
+    # then 6 MiB / 200 files). Removed 2026-11-13 on the owner's
+    # order: there is no size cap on the tree. tree_footprint() and
+    # footprint_report() still measure it — the numbers are reported,
+    # never gated.
     # --- Cold start (target; stopwatch on the PC) ---
     "cold_start_ceiling_s": {
         "value": 30,
@@ -142,7 +119,7 @@ CAPS = {
 }
 
 # Directories / files the footprint count ignores — the same set the
-# release packaging excludes, so the gate weighs what actually ships.
+# release packaging excludes, so the count weighs what actually ships.
 _FOOTPRINT_SKIP_DIRS = frozenset({".venv", "__pycache__", ".git", ".forge"})
 _FOOTPRINT_SKIP_SUFFIXES = frozenset({".pyc"})
 
@@ -150,7 +127,7 @@ _FOOTPRINT_SKIP_SUFFIXES = frozenset({".pyc"})
 def tree_footprint(root) -> tuple[int, int]:
     """(total_bytes, file_count) for the tree at root, packaging
     exclusions applied. Deterministic: file sizes only, no timing,
-    no process state — safe to gate a test suite on."""
+    no process state."""
     total = 0
     count = 0
     for dirpath, dirnames, filenames in os.walk(root):
@@ -164,13 +141,11 @@ def tree_footprint(root) -> tuple[int, int]:
 
 
 def footprint_report(root) -> dict:
-    """The footprint lines of the budget, checked against root."""
+    """The tree's footprint at root: bytes + files, measured only.
+    There is no ceiling — the numbers are reported, never gated
+    (owner's order, 2026-11-13)."""
     total, count = tree_footprint(root)
     return {
         "bytes": total,
         "files": count,
-        "bytes_ceiling": BUDGET["footprint_bytes_ceiling"]["value"],
-        "files_ceiling": BUDGET["footprint_files_ceiling"]["value"],
-        "ok": (total <= BUDGET["footprint_bytes_ceiling"]["value"]
-               and count <= BUDGET["footprint_files_ceiling"]["value"]),
     }

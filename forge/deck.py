@@ -223,6 +223,8 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 .attachitem img{width:54px;height:54px;object-fit:cover;border-radius:8px;border:1px solid @{rim}@;display:block}
 .attachitem .aname{font-size:11px;color:@{text_muted}@;max-width:76px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
 .attachitem .ax{position:absolute;top:-7px;right:-7px;width:22px;height:22px;padding:0;border-radius:11px;background:@{surface_danger}@;border:1px solid @{state_error}@;color:@{text_white}@;font-size:13px;line-height:1}
+/* T13 (2026-11-13): the × is a 22px button (24px border box) — too small a touch target. This transparent ::after extends its hit area to 44x44 (24 + 10 each side) without touching the button: literal padding would paint the red disc and border over the full 44px box, a visual change, so the hit area grows here, invisibly. */
+.attachitem .ax::after{content:'';position:absolute;top:-10px;right:-10px;bottom:-10px;left:-10px}
 .afile{display:inline-flex;align-items:center;background:@{surface_input}@;border:1px solid @{rim}@;border-radius:8px;padding:9px 10px;font-size:13px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style></head><body>
 <header id="appbar">

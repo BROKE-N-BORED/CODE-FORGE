@@ -26,7 +26,10 @@ def hf_search_models(args, ctx):
     query = urllib.parse.quote(str(args.get("query", "")).strip())
     if not query:
         return "No search query given."
-    limit = int(args.get("limit") or 10)
+    try:
+        limit = int(args.get("limit") or 10)
+    except (TypeError, ValueError):
+        return "Limit must be a whole number."
     try:
         data = _get(f"{API}/models?search={query}&limit={limit}&sort=downloads&direction=-1", ctx)
     except Exception as exc:
@@ -45,7 +48,7 @@ def hf_model_info(args, ctx):
     if "/" not in repo:
         return "Give a repo id like owner/name."
     try:
-        data = _get(f"{API}/models/{urllib.parse.quote(repo, safe='')}?blobs=true", ctx)
+        data = _get(f"{API}/models/{urllib.parse.quote(repo, safe='/')}?blobs=true", ctx)
     except Exception as exc:
         return f"Hugging Face lookup failed: {exc}"
     lines = [f"{data.get('id')} · downloads {data.get('downloads', 0)} · "

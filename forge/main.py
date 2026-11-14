@@ -16,6 +16,7 @@ import difflib
 import filecmp
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -28,13 +29,13 @@ from datetime import datetime
 from pathlib import Path
 from string import Template
 
-from PySide6.QtCore import Qt, QByteArray, QEvent, QRectF, QStringListModel, QThread, QTime, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
+from PySide6.QtCore import Qt, QByteArray, QEvent, QObject, QRectF, QStringListModel, QSettings, QThread, QTime, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QInputDialog, QListWidget, QListWidgetItem,
     QButtonGroup, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QRadioButton, QScrollArea, QSlider, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QTabBar, QTableWidget, QTableWidgetItem, QToolButton,
+    QPushButton, QRadioButton, QScrollArea, QSlider, QSizePolicy, QSpinBox, QSplitter, QStatusBar, QStyle, QStyleOptionButton, QTabBar, QTableWidget, QTableWidgetItem, QToolButton,
     QTabWidget, QTextBrowser, QTextEdit,
     QTimeEdit, QVBoxLayout, QWidget)
 try:
@@ -110,9 +111,11 @@ from .eventlog import EventLog
 from .ollama_client import (OllamaClient, OllamaError, client_accepts_cancel,
                             normalize_history, ollama_url_warning)
 from .plugins import (BUNDLED_PLUGIN_IDS, PluginContext,
-                      load_connector_config, load_plugins)
+                      load_connector_config, load_plugins,
+                      plugin_fingerprint)
 from .skills import LOAD_SKILL_SCHEMA, index_text as skills_index_text
-from .skills import make_load_skill_handler, scan_skills
+from .skills import (make_load_skill_handler, scan_skills,
+                     skill_fingerprint)
 from .storage import ConversationStore
 from .tools import describe_tool_full, describe_tool_short, TOOL_SCHEMAS
 from .worker import LONG_TURN_TOOL, AgentWorker
@@ -578,6 +581,100 @@ def _brand_spark_pixmap():
         p.fillRect(x * 3, y * 3, 3, 3, QColor(hexcol))
     p.end()
     return pix
+
+
+def _breathing_intensity(phase):
+    """Glow intensity (0..1) at a point in the brand spark's breath.
+
+    One smooth breath per cycle: the glow rises gently from a low
+    floor to full at mid-cycle (the breath in) and falls gently
+    back (the breath out). A raised cosine — a single smooth peak,
+    no second bump, no sharp edges — so the light feels like it is
+    breathing. The floor keeps the glow from ever fully dying
+    between breaths. Pure function of phase (0..1 within one cycle)
+    — no Qt, no clock.
+    """
+    return 0.12 + 0.88 * (0.5 - 0.5 * math.cos(2.0 * math.pi * phase))
+
+
+class BrandSparkWidget(QLabel):
+    """The wordmark spark, glowing from the inside on a slow breath.
+
+    A QLabel subclass, deliberately: the old spark WAS a QLabel holding
+    this pixmap, and QLabel's pixmap placement is what puts the spark
+    at exactly the right spot in the brand row (a 15x15 QWidget in the
+    same layout sits 1 px higher — QLabel rounds the 6.5 px centering
+    up, the layout rounds it down). Subclassing keeps the pixmap, its
+    placement, the sizeHint, and the layout behavior identical by
+    construction — the only thing added is the pulse. The pulse is two
+    radial-gradient light layers: a warm amber halo drawn UNDER the
+    pixmap, so it shows only through the pixmap's transparent cells
+    (light spilling out from between the pixels), and a hot core drawn
+    OVER it that brightens the center cell as each breath peaks. Both
+    layers' alpha follows _breathing_intensity, driven by a 50 ms timer
+    that repaints only this widget — nothing else in the window is
+    touched. Independent of EmberWidget: a breath doesn't stop
+    at rest. (The stylesheet background is painted by the framework
+    before paintEvent runs, so the halo goes on top of it as drawn.)
+    """
+
+    PERIOD = 4.0      # seconds per breath cycle (~2 s in, ~2 s out)
+    INTERVAL = 50     # ms between ticks (20 fps on a 15x28 widget)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("brandSpark")
+        self._pixmap = _brand_spark_pixmap()
+        self.setPixmap(self._pixmap)
+        self._started = time.monotonic()
+        self._intensity = _breathing_intensity(0.0)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(self.INTERVAL)
+
+    def glow_intensity(self):
+        """Current glow intensity (0..1) from the breathing clock."""
+        elapsed = time.monotonic() - self._started
+        return _breathing_intensity((elapsed % self.PERIOD) / self.PERIOD)
+
+    def _tick(self):
+        self._intensity = self.glow_intensity()
+        self.update()
+
+    def paintEvent(self, event):
+        # The glow is centered on the middle PIXEL of the widget, not
+        # its geometric center: for the 28 px tall label the geometric
+        # center y=14.0 falls exactly on a pixel-row boundary, so rows
+        # above sample half a pixel closer than rows below and the halo
+        # comes out visibly stronger on top (measured: +10 red at the
+        # top gap vs the bottom gap). floor(h/2)+0.5 is the center of
+        # the middle pixel row — the same row QLabel centers the pixmap
+        # on (its pixmap top is row 7, center row 14).
+        cx = self.width() // 2 + 0.5
+        cy = self.height() // 2 + 0.5
+        p = QPainter(self)
+        # Halo: warm amber light spilling out from inside the spark.
+        # Radius 10 (past the pixmap edge) with a gentle falloff, so
+        # the light is still visible in the transparent cells near the
+        # edge; a radius-7.5 gradient would fade to nothing exactly
+        # where the gaps are.
+        halo = QRadialGradient(cx, cy, 10.0)
+        halo.setColorAt(0.0, QColor(255, 201, 46, int(110 * self._intensity)))
+        halo.setColorAt(0.55, QColor(255, 201, 46, int(55 * self._intensity)))
+        halo.setColorAt(1.0, QColor(255, 201, 46, 0))
+        p.fillRect(self.rect(), halo)
+        p.end()
+        # The pixmap itself, painted by QLabel exactly as before.
+        super().paintEvent(event)
+        # Hot core: the center cell brightens as the breath peaks. White,
+        # not the core's own #fff0a8 — an overlay in the core's own color
+        # would be invisible; white lifts it toward a hot glow.
+        p = QPainter(self)
+        core = QRadialGradient(cx, cy, 4.5)
+        core.setColorAt(0.0, QColor(255, 255, 255, int(120 * self._intensity)))
+        core.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.fillRect(self.rect(), core)
+        p.end()
 
 
 class EmberWidget(QWidget):
@@ -1821,7 +1918,9 @@ class CustomizeDialog(QDialog):
     def __init__(self, parent, skills, plugins, disabled_skills, disabled_plugins, config, rules=None,
                  skribe_writes=True, project_local=None, on_house=None,
                  tools=None, disabled_tools=None, gofish_review=True,
-                 offer_save_run_as_skill=False, skribe_decisions=False):
+                 offer_save_run_as_skill=False, skribe_decisions=False,
+                 fingerprint_changed_skills=None,
+                 fingerprint_changed_plugins=None):
         super().__init__(parent)
         self.setWindowTitle("Customize — skills · plugins · connectors")
         self.setMinimumWidth(600)
@@ -1875,6 +1974,16 @@ class CustomizeDialog(QDialog):
             self._skill_edit_btns[s.name] = edit_btn
             row.addWidget(edit_btn)
             sk_lay.addLayout(row)
+        # C16: skills the fingerprint gate disabled — their content
+        # changed on disk since the owner trusted it. Named here so
+        # the unchecked box reads as "needs review", not as a choice
+        # the owner forgot making.
+        if fingerprint_changed_skills:
+            changed = ", ".join(sorted(fingerprint_changed_skills))
+            sk_notice = QLabel("⚠ Changed on disk since you enabled them. Left OFF "
+                               f"until you re-enable them here: {changed}.")
+            sk_notice.setWordWrap(True)
+            sk_lay.addWidget(sk_notice)
         new_skill_row = QHBoxLayout()
         self._new_skill_btn = QPushButton("New skill…")
         self._new_skill_btn.setToolTip("Open the New Skill window — a roomy editor "
@@ -1982,6 +2091,17 @@ class CustomizeDialog(QDialog):
                     row.addWidget(status)
                     row.addWidget(clear_btn)
                     lay.addLayout(row)
+            # C16: plugins/connectors the fingerprint gate disabled
+            # (same notice as the Skills tab, this page's kind).
+            if fingerprint_changed_plugins:
+                changed = sorted(p.name for p in plugins
+                                 if p.kind == kind
+                                 and p.pid in fingerprint_changed_plugins)
+                if changed:
+                    pl_notice = QLabel("⚠ Changed on disk since you enabled them. Left OFF "
+                                       f"until you re-enable them here: {', '.join(changed)}.")
+                    pl_notice.setWordWrap(True)
+                    lay.addWidget(pl_notice)
             if kind == "plugin":
                 new_plugin_row = QHBoxLayout()
                 self._new_plugin_btn = QPushButton("New plugin…")
@@ -2675,6 +2795,23 @@ class UpdateDialog(QDialog):
             QFileDialog.getOpenFileName(self, "Update overlay", "", "Zip files (*.zip)")[0] or self.zip_edit.text()))
         row.addWidget(self.zip_edit); row.addWidget(browse)
         lay.addLayout(row)
+        # C15 (audit S1-22/W1): the pre-install preview — what the
+        # zip would change, against the updater's own allowlist,
+        # plus its verification state. Refreshed whenever the
+        # picked path changes.
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setMaximumBlockCount(200)
+        self.preview.setMinimumHeight(120)
+        self.preview.setPlaceholderText("Pick an update zip to preview what it would install.")
+        lay.addWidget(self.preview)
+        self.ack_box = QCheckBox("Install unverified. I trust this file")
+        self.ack_box.setToolTip("Only shown when no checksum file sits beside the zip: "
+                                "nothing has verified this file, and ticking this is what "
+                                "lets it install anyway.")
+        self.ack_box.setVisible(False)
+        lay.addWidget(self.ack_box)
+        self.zip_edit.textChanged.connect(self._refresh_preview)
         form = QFormLayout()
         self.pip_edit = QLineEdit(); self.pip_edit.setPlaceholderText("e.g. somepackage another-package")
         form.addRow("Extra pip packages", self.pip_edit)
@@ -2683,10 +2820,49 @@ class UpdateDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
 
+    def _refresh_preview(self):
+        """Recompute the preview + verification state for the picked
+        zip. Display only — apply_update re-runs the gate at accept
+        time, so a zip swapped after the preview is still caught."""
+        zip_path = self.zip_edit.text().strip()
+        if not zip_path:
+            self.preview.setPlainText("")
+            self.ack_box.setVisible(False)
+            self.ack_box.setChecked(False)
+            return
+        gate = upd.gate_manual_update(zip_path, ROOT_DIR,
+                                      self.ack_box.isChecked())
+        self.preview.setPlainText(
+            upd.format_update_preview(gate["preview"], gate["sidecar"]))
+        # The acknowledgement exists only on the unverified path: a
+        # sidecar-verified zip needs no tick, and a refused zip
+        # cannot be acknowledged into installing.
+        show_ack = (gate["sidecar"]["status"] == "absent"
+                    and not gate["preview"]["error"]
+                    and not gate["preview"]["refused"]
+                    and bool(gate["preview"]["install"]))
+        self.ack_box.setVisible(show_ack)
+        if not show_ack:
+            self.ack_box.setChecked(False)
+
+    def accept(self):
+        # C15: the dialog enforces the gate too, so a refused zip
+        # never closes the dialog with a surprise warning after it.
+        # apply_update re-runs the same gate — this is the display
+        # half, that is the enforcement.
+        zip_path = self.zip_edit.text().strip()
+        if zip_path:
+            gate = upd.gate_manual_update(zip_path, ROOT_DIR,
+                                          self.ack_box.isChecked())
+            if not gate["allowed"]:
+                QMessageBox.warning(self, "Update", gate["reason"])
+                return
+        super().accept()
+
     def values(self):
         zip_path = self.zip_edit.text().strip() or None
         extras = [t for t in self.pip_edit.text().replace(",", " ").split() if t]
-        return zip_path, extras
+        return zip_path, extras, self.ack_box.isChecked()
 
 
 class SettingsDialog(QDialog):
@@ -2883,6 +3059,19 @@ class SettingsDialog(QDialog):
                     self.tool_result_digest_chars)
         form.addRow("", caption("A tool result longer than this is kept in the model's view as a "
                                 "head + tail digest; the event log always keeps the full text."))
+        # Turn timeout (2026-11-13): the cap on one turn's thinking
+        # time. 0 turns the cap off. Approval waits never count —
+        # the clock runs only while the model is generating.
+        self.turn_timeout_minutes = QSpinBox()
+        self.turn_timeout_minutes.setRange(0, 240)
+        self.turn_timeout_minutes.setSingleStep(5)
+        self.turn_timeout_minutes.setValue(
+            _int("turn_timeout_minutes", 30, 0, 240))
+        form.addRow("Turn time limit (minutes, 0 = no limit)",
+                    self.turn_timeout_minutes)
+        form.addRow("", caption("How long one turn may keep the model thinking before it stops "
+                                "itself with a plain message. Waiting on you for an approval "
+                                "never counts against it."))
         # Item #64: the parallel-turn cap lives with the other
         # limits. 1 (the default) is the Forge's classic shape —
         # one main turn, conversation switches refuse mid-turn.
@@ -3336,6 +3525,7 @@ class SettingsDialog(QDialog):
                 "test_cadence_files": self.test_cadence_files.value(),
                 "test_cadence_lines": self.test_cadence_lines.value(),
                 "tool_result_digest_chars": self.tool_result_digest_chars.value(),
+                "turn_timeout_minutes": self.turn_timeout_minutes.value(),
                 "max_parallel_turns": self.max_parallel_turns.value(),
                 "soft_token_budget": self.soft_token_budget.value(),
                 "archive_auto_prune": self.archive_auto_prune.isChecked(),
@@ -12369,7 +12559,8 @@ class SkillEditorWindow(QWidget):
         (ok, message); the message lands on the status line either
         way, so a refusal reads in place."""
         name = self._folder_name or self.name_edit.text().strip()
-        if self._folder_name is not None:
+        was_update = self._folder_name is not None
+        if was_update:
             ok, message = create_mod.update_skill(
                 self._skills_dir, name, self.desc_edit.text(),
                 self.body_edit.toPlainText())
@@ -12384,6 +12575,15 @@ class SkillEditorWindow(QWidget):
                 self.name_edit.setText(name)
                 self._lock_name()
                 self._retitle()
+            if was_update:
+                # C16: the owner just wrote this content themselves
+                # — it becomes the trusted baseline BEFORE the
+                # rescan the save triggers, so the owner's own edit
+                # never trips the fingerprint gate.
+                record = getattr(self._owner,
+                                 "_record_skill_fingerprint", None)
+                if record is not None:
+                    record(Path(self._skills_dir) / name)
             if self._on_saved is not None:
                 self._on_saved(message.split(" — ")[0])
         return ok, message
@@ -12499,7 +12699,8 @@ class PluginEditorWindow(QWidget):
         (ok, message); a refused update leaves the plugin on disk
         untouched, and the refusal reads on the status line."""
         name = self._folder_name or self.name_edit.text().strip()
-        if self._folder_name is not None:
+        was_update = self._folder_name is not None
+        if was_update:
             ok, message = create_mod.update_plugin(
                 self._plugins_dir, name, self.desc_edit.text(),
                 self.code_edit.toPlainText())
@@ -12514,6 +12715,14 @@ class PluginEditorWindow(QWidget):
                 self.name_edit.setText(name)
                 self._lock_name()
                 self._retitle()
+            if was_update:
+                # C16: the owner's own edit becomes the trusted
+                # baseline BEFORE the rescan the save triggers (the
+                # skill editor's mirror image).
+                record = getattr(self._owner,
+                                 "_record_plugin_fingerprint", None)
+                if record is not None:
+                    record(Path(self._plugins_dir) / name)
             if self._on_saved is not None:
                 self._on_saved(message.split(" — ")[0])
         return ok, message
@@ -15449,6 +15658,153 @@ def _chat_inline_html(line):
     return "".join(out)
 
 
+# Loaded-label switch (2026-11-13): gauge ticks (~3 s apart) the IN
+# RAM label waits for a newly picked model to appear in RAM before
+# giving up on "Loading…" and showing the truthful list again — 20
+# ticks is about a minute, long enough for a cold load off a
+# spinning disk, short enough that a failed load never sticks.
+_LOADED_PENDING_MAX_TICKS = 20
+
+
+# F1 (U5, 2026-11-13): window geometry memory. The bench used to
+# open at 1360x880 on a 1366x768 screen (112 px too tall — 148 px
+# against the ~732 px usable height) and never remembered its size:
+# zero QSettings anywhere, no geometry saved on close. Now every
+# window (the bench + every room) restores its saved geometry on
+# open and saves it on close, through one helper with one QSettings
+# key per window class. QSettings, not settings.json: saveGeometry()
+# / restoreGeometry() round-trip position + size + maximized state
+# as one QByteArray in a single call, and a Qt blob has no business
+# base64-encoded into a hand-editable JSON file. The default clamps
+# to the available screen (G3 precedent, ApprovalDialog): the
+# window-manager frame sits OUTSIDE the client size Qt resizes, so
+# the clamp leaves room for it — a literal min(880, avail_h) would
+# still put the title bar's ~30 px under the Mint panel.
+_GEOMETRY_ORG = "BrokeNBored"
+_GEOMETRY_APP = "CodeForge"
+_GEOMETRY_GROUP = "geometry"
+# Slack left around a clamped default: the frame (title bar +
+# borders) is drawn outside the client rect, ~30 px tall on
+# Mint/Cinnamon — 36 px keeps the whole window on screen.
+_SCREEN_MARGIN_W = 16
+_SCREEN_MARGIN_H = 36
+
+
+def _geometry_settings():
+    """The geometry store: QSettings with explicit org/app names,
+    independent of QApplication's application name."""
+    return QSettings(_GEOMETRY_ORG, _GEOMETRY_APP)
+
+
+def _geometry_key(widget):
+    """One key per window class — a room restores its own geometry,
+    never another room's."""
+    return f"{_GEOMETRY_GROUP}/{type(widget).__name__}"
+
+
+def _clamped_window_size(avail_w, avail_h, want_w, want_h, min_w, min_h):
+    """Pure clamp math: the default size for a window on a screen
+    with avail_w x avail_h usable pixels. Never larger than the
+    screen minus the frame slack, never smaller than the window's
+    own minimums. A zero/negative available size (no screen to ask)
+    returns the wanted size untouched."""
+    if avail_w <= 0 or avail_h <= 0:
+        return (want_w, want_h)
+    w = max(min_w, min(want_w, avail_w - _SCREEN_MARGIN_W))
+    h = max(min_h, min(want_h, avail_h - _SCREEN_MARGIN_H))
+    return (w, h)
+
+
+def _restore_window_geometry(widget, settings=None):
+    """Restore a window's saved geometry; with nothing saved,
+    clamp its default size to the screen and center it there
+    instead. The default is the size the window already has —
+    its own resize() call in __init__ — so the caller never has
+    to know a window's numbers. Returns True when a save was
+    restored, False when the clamped default was applied. A save
+    from a monitor that is gone needs no special handling here:
+    restoreGeometry itself pulls the window back inside the
+    available screen (probed 2026-11-13 — a (5000, 5000) save
+    restores at (1, 149) on the 800x800 offscreen screen)."""
+    settings = settings or _geometry_settings()
+    blob = None
+    try:
+        blob = settings.value(_geometry_key(widget))
+    except Exception:
+        blob = None
+    if blob is not None:
+        try:
+            restored = widget.restoreGeometry(blob)
+        except Exception:
+            restored = False
+        if restored:
+            # A save from a smaller minimum must not shrink the
+            # window below the minimum it has now.
+            widget.resize(max(widget.width(), widget.minimumWidth()),
+                          max(widget.height(), widget.minimumHeight()))
+            return True
+    avail = None
+    try:
+        screen = widget.screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+    except Exception:
+        avail = None
+    if avail is not None:
+        w, h = _clamped_window_size(avail.width(), avail.height(),
+                                    widget.width(), widget.height(),
+                                    widget.minimumWidth(),
+                                    widget.minimumHeight())
+        widget.resize(w, h)
+        # Center on the available screen: a save from a monitor
+        # that is gone must not leave the window stranded
+        # off-screen, and a first launch belongs in the middle of
+        # the screen, not wherever the window manager feels like.
+        widget.move(avail.x() + max(0, (avail.width() - w) // 2),
+                    avail.y() + max(0, (avail.height() - h) // 2))
+    return False
+
+
+def _save_window_geometry(widget, settings=None):
+    """Persist a window's current geometry under its class key."""
+    settings = settings or _geometry_settings()
+    try:
+        settings.setValue(_geometry_key(widget), widget.saveGeometry())
+        settings.sync()
+    except Exception:
+        pass
+
+
+class _GeometryMemoryFilter(QObject):
+    """Saves a window's geometry when it closes. One filter per
+    window, installed by _install_geometry_memory; parented to the
+    window so it dies with it."""
+
+    def __init__(self, widget, settings=None):
+        super().__init__(widget)
+        self._widget = widget
+        self._settings = settings
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Close:
+            _save_window_geometry(self._widget, self._settings)
+        return super().eventFilter(obj, event)
+
+
+def _install_geometry_memory(widget, settings=None):
+    """Give a window geometry memory: restore its saved geometry
+    (or a screen-clamped default) now, save it on close. Safe to
+    call twice — the second call restores again but installs no
+    second filter."""
+    _restore_window_geometry(widget, settings)
+    if getattr(widget, "_geometry_memory_installed", False):
+        return
+    widget._geometry_memory_installed = True
+    widget.installEventFilter(_GeometryMemoryFilter(widget, settings))
+
+
 class ForgeWindow(QMainWindow):
     gauge_ready = Signal(dict)
     resident_ready = Signal(object)
@@ -15457,14 +15813,21 @@ class ForgeWindow(QMainWindow):
     # is loadable in this same session.
     extension_created = Signal(str)
 
-    def __init__(self):
+    def __init__(self, geometry_settings=None):
         # Audit B21: startup timing starts at the very top of
         # construction; the app_start record below reports it as
         # startup_ms so a slow launch is measurable, not a feeling.
         _startup_t0 = time.time()
         super().__init__()
         self.setWindowTitle(f"CODE FORGE v{APP_VERSION} — Linux Forge Agent")
-        self.resize(1360, 880); self.setMinimumSize(880, 560)
+        # F1 (U5): the bench remembers its geometry. The settings
+        # object is injectable so tests can point at a scratch
+        # store instead of the real user settings; production
+        # passes nothing and gets the real CodeForge store.
+        self._geometry_settings = geometry_settings
+        self.setMinimumSize(880, 560)
+        self.resize(1360, 880)
+        _install_geometry_memory(self, geometry_settings)
         self.settings = self.load_settings()
         # Light Machine: sync the vision seat's env bridge with the
         # loaded setting (save_settings keeps it in sync after).
@@ -15623,10 +15986,8 @@ class ForgeWindow(QMainWindow):
             workspace=self.workspace, base_url=self.client.base_url,
             config=self._connector_config, log=lambda m: self.log(m),
             governing_roster=self.settings.get("governing_roster", ""))
-        self.all_plugins, self._full_registry = load_plugins(
-            self.app_plugins_dir, self.plugin_ctx,
-            disabled=set(self.settings.get("disabled_plugins", [])),
-            known=self._known_plugins_for_load())
+        self.all_plugins, self._full_registry = (
+            self._load_plugins_with_fingerprints())
         self.skills, self.plugins, self.plugin_registry = [], [], {}
         self.reload_extensions()
         self.extension_created.connect(self._on_extension_created)
@@ -15643,6 +16004,15 @@ class ForgeWindow(QMainWindow):
         self.deck.attachment_remove_requested.connect(self._deck_attachment_remove)
         self.deck.attachment_upload_requested.connect(self._deck_attachment_upload)
         self._gauge_snap = None
+        # Loaded-label switch (2026-11-13): while a newly picked
+        # model loads into RAM, the IN RAM label reads "Loading…"
+        # instead of the old model's name — the stale name read as
+        # broken. _loaded_pending names the model being waited on
+        # (short form); the gauge pass clears it when the model
+        # appears, or after _LOADED_PENDING_MAX_TICKS ticks if it
+        # never does.
+        self._loaded_pending = None
+        self._loaded_pending_ticks = 0
         self._turn_started = 0.0
         self._deck_last_push = 0.0
         self._phone_queue = []
@@ -15809,6 +16179,117 @@ class ForgeWindow(QMainWindow):
             return sorted(BUNDLED_PLUGIN_IDS)
         return known
 
+    @staticmethod
+    def _settings_dict(settings, key):
+        """A settings value as a dict, or {} when it is absent or
+        the wrong type — settings.json is owner-editable JSON, and
+        a mistyped fingerprint map must never crash a load."""
+        value = settings.get(key)
+        return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _settings_list(settings, key):
+        """A settings value as a list, or [] when it is absent or
+        the wrong type (the _settings_dict guard, for lists)."""
+        value = settings.get(key)
+        return list(value) if isinstance(value, list) else []
+
+    def _load_plugins_with_fingerprints(self):
+        """C16 (audit S1-25/W2): the single plugin load path
+        (__init__ + rescan) — load_plugins with the
+        content-fingerprint gate wired in. Baselines for first-seen
+        enabled plugins are recorded; a plugin whose content
+        changed since it was trusted is returned to DISABLED
+        (settings + event log + the Customize notice list) instead
+        of running the new code. The log line follows the
+        new-plugin guard — no log panel exists yet at startup, so
+        the event log + Customize notice carry it there; rescans
+        log it in the panel too."""
+        fingerprints = self._settings_dict(self.settings,
+                                           "plugin_fingerprints")
+        before = dict(fingerprints)
+        changes = []
+        plugins, registry = load_plugins(
+            self.app_plugins_dir, self.plugin_ctx,
+            disabled=set(self.settings.get("disabled_plugins", [])),
+            known=self._known_plugins_for_load(),
+            fingerprints=fingerprints, fingerprint_changes=changes)
+        if fingerprints != before:
+            self.settings["plugin_fingerprints"] = fingerprints
+            self.save_settings()
+        if changes:
+            disabled = set(self.settings.get("disabled_plugins", []))
+            disabled.update(changes)
+            self.settings["disabled_plugins"] = sorted(disabled)
+            changed = sorted(set(self._settings_list(
+                self.settings, "fingerprint_changed_plugins")) | set(changes))
+            self.settings["fingerprint_changed_plugins"] = changed
+            self.save_settings()
+            eventlog = getattr(self, "eventlog", None)
+            for pid in changes:
+                if eventlog is not None:
+                    eventlog.record("plugin_fingerprint_changed",
+                                    plugin=pid)
+                if hasattr(self, "activity"):
+                    self.log(f"Plugin '{pid}' changed on disk since you enabled it. "
+                             "Left DISABLED until you re-enable it in Customize.")
+        return plugins, registry
+
+    def _record_plugin_fingerprint(self, folder):
+        """C16: trust a plugin's CURRENT content — record its
+        fingerprint as the baseline the load gate compares against,
+        and clear any fingerprint-changed notice for it. Called
+        when the owner enables a plugin or edits one (the enable /
+        the edit IS the trust decision). A no-op during maintenance
+        — the work copy's content must never become the live
+        baseline — and when the folder cannot be fingerprinted."""
+        if getattr(self, "_self_maintenance_active", False):
+            return
+        folder = Path(folder)
+        pid = folder.name
+        for plugin in getattr(self, "all_plugins", []):
+            if plugin.folder == folder:
+                pid = plugin.pid
+                break
+        current = plugin_fingerprint(folder)
+        if current is None:
+            return
+        fingerprints = self._settings_dict(self.settings,
+                                           "plugin_fingerprints")
+        fingerprints[pid] = current
+        self.settings["plugin_fingerprints"] = fingerprints
+        changed = [p for p in self._settings_list(
+            self.settings, "fingerprint_changed_plugins") if p != pid]
+        self.settings["fingerprint_changed_plugins"] = changed
+        self.save_settings()
+
+    def _record_skill_fingerprint(self, folder):
+        """C16: the skill mirror of _record_plugin_fingerprint —
+        trust a skill's CURRENT content. Called when the owner
+        enables a skill, edits one, or an approved agent update
+        lands (the S7 diff gate approved that exact content, so it
+        becomes the baseline — without this, every approved skill
+        update would trip the gate on the next rescan)."""
+        if getattr(self, "_self_maintenance_active", False):
+            return
+        folder = Path(folder)
+        name = folder.name
+        for skill in getattr(self, "all_skills", []):
+            if skill.folder == folder:
+                name = skill.name
+                break
+        current = skill_fingerprint(folder)
+        if current is None:
+            return
+        fingerprints = self._settings_dict(self.settings,
+                                           "skill_fingerprints")
+        fingerprints[name] = current
+        self.settings["skill_fingerprints"] = fingerprints
+        changed = [n for n in self._settings_list(
+            self.settings, "fingerprint_changed_skills") if n != name]
+        self.settings["fingerprint_changed_skills"] = changed
+        self.save_settings()
+
     def reload_extensions(self):
         disabled_skills = set(self.settings.get("disabled_skills", []))
         disabled_plugins = set(self.settings.get("disabled_plugins", []))
@@ -15869,6 +16350,50 @@ class ForgeWindow(QMainWindow):
                 if hasattr(self, "activity"):
                     for name in new_skills:
                         self.log(f"New skill '{name}' appeared — left DISABLED until you enable it in Customize.")
+        # C16 (audit S1-25/W2): content-fingerprint trust for
+        # skills — the mirror of the plugin gate in load_plugins,
+        # placed here because skills are READ, not executed: the
+        # check runs before self.skills is built, so a changed
+        # skill's new content never reaches the index or load_skill.
+        # Skipped during maintenance — the work copy is the owner's
+        # editing sandbox, and a candidate edit must never disable
+        # the live skill (the live tree is re-checked on the
+        # deactivate rescan).
+        if not getattr(self, "_self_maintenance_active", False):
+            known_now = set(self.settings.get("known_skills") or [])
+            skill_fps = self._settings_dict(self.settings,
+                                            "skill_fingerprints")
+            skill_before = dict(skill_fps)
+            skill_changes = []
+            for skill in self.all_skills:
+                if skill.name in disabled_skills or skill.name not in known_now:
+                    continue
+                current = skill_fingerprint(skill.folder)
+                recorded = skill_fps.get(skill.name)
+                if recorded is None:
+                    if current is not None:
+                        skill_fps[skill.name] = current
+                elif current != recorded:
+                    skill_changes.append(skill.name)
+            if skill_fps != skill_before:
+                self.settings["skill_fingerprints"] = skill_fps
+            if skill_changes:
+                disabled_skills.update(skill_changes)
+                self.settings["disabled_skills"] = sorted(disabled_skills)
+                changed = sorted(set(self._settings_list(
+                    self.settings, "fingerprint_changed_skills"))
+                    | set(skill_changes))
+                self.settings["fingerprint_changed_skills"] = changed
+                eventlog = getattr(self, "eventlog", None)
+                for name in skill_changes:
+                    if eventlog is not None:
+                        eventlog.record("skill_fingerprint_changed",
+                                        skill=name)
+                    if hasattr(self, "activity"):
+                        self.log(f"Skill '{name}' changed on disk since you enabled it. "
+                                 "Left DISABLED until you re-enable it in Customize.")
+            if skill_fps != skill_before or skill_changes:
+                self.save_settings()
         self.skills = [s for s in self.all_skills if s.name not in disabled_skills]
         self.plugins = [p for p in self.all_plugins if p.pid not in disabled_plugins]
         # Owner-based filter: a tool leaves the registry only when its
@@ -15885,10 +16410,8 @@ class ForgeWindow(QMainWindow):
     def rescan_extensions(self):
         self.all_skills = scan_skills(self.app_skills_dir)
         self.macros = macros_mod.scan_macros(COMMANDS_DIR)
-        self.all_plugins, self._full_registry = load_plugins(
-            self.app_plugins_dir, self.plugin_ctx,
-            disabled=set(self.settings.get("disabled_plugins", [])),
-            known=self._known_plugins_for_load())
+        self.all_plugins, self._full_registry = (
+            self._load_plugins_with_fingerprints())
         self.reload_extensions()
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = self.build_system_prompt()
@@ -16203,6 +16726,7 @@ class ForgeWindow(QMainWindow):
         if win is None:
             win = MaintenanceWindow(self)
             self.maintenance_win = win
+            _install_geometry_memory(win, self._geometry_settings)
         else:
             win.refresh_models()
             win.refresh_transcript()
@@ -16238,6 +16762,14 @@ class ForgeWindow(QMainWindow):
             self.app_skills_dir, str(args.get("name", "")),
             str(args.get("description", "")), str(args.get("body", "")))
         if ok:
+            # C16: the S7 diff gate approved this exact content —
+            # it becomes the trusted baseline, so the approved
+            # update does not trip the fingerprint gate on the
+            # rescan below. (Plugins need no equivalent: an update
+            # of an enabled plugin returns it to DISABLED, and
+            # re-enabling re-records.)
+            self._record_skill_fingerprint(
+                Path(self.app_skills_dir) / str(args.get("name", "")).strip())
             self.extension_created.emit(message.split(" — ")[0])
         return message
 
@@ -16292,6 +16824,7 @@ class ForgeWindow(QMainWindow):
 
     def open_customize(self):
         was_disabled_plugins = set(self.settings.get("disabled_plugins", []))
+        was_disabled_skills = set(self.settings.get("disabled_skills", []))
         dialog = CustomizeDialog(self, self.all_skills, self.all_plugins,
                                  set(self.settings.get("disabled_skills", [])),
                                  set(self.settings.get("disabled_plugins", [])),
@@ -16305,7 +16838,11 @@ class ForgeWindow(QMainWindow):
                                  disabled_tools=set(self.settings.get("disabled_tools", [])),
                                  gofish_review=self._gofish_toggle(),
                                  offer_save_run_as_skill=bool(self.settings.get("offer_save_run_as_skill", False)),
-                                 skribe_decisions=bool(self.settings.get("skribe_decisions", False)))
+                                 skribe_decisions=bool(self.settings.get("skribe_decisions", False)),
+                                 fingerprint_changed_skills=set(self._settings_list(
+                                     self.settings, "fingerprint_changed_skills")),
+                                 fingerprint_changed_plugins=set(self._settings_list(
+                                     self.settings, "fingerprint_changed_plugins")))
         if dialog.exec() == QDialog.Accepted:
             disabled_skills, disabled_plugins, config, rules, skribe_on, disabled_tools = dialog.values()
             self.settings["permission_rules"] = rules
@@ -16368,6 +16905,22 @@ class ForgeWindow(QMainWindow):
             # local + cloud catalog.
             self._rebuild_provider_client(config)
             self.refresh_models_async()
+            # C16: a plugin/skill just ENABLED trusts its current
+            # content — record the fingerprint BEFORE the rescan,
+            # so the gate compares against what the owner just
+            # chose to run. (Re-enabling a fingerprint-changed
+            # extension clears its notice; the record helper does
+            # both.)
+            for pid in was_disabled_plugins - set(disabled_plugins):
+                folder = next((p.folder for p in self.all_plugins
+                               if p.pid == pid), None)
+                if folder is not None:
+                    self._record_plugin_fingerprint(folder)
+            for name in was_disabled_skills - set(disabled_skills):
+                folder = next((s.folder for s in self.all_skills
+                               if s.name == name), None)
+                if folder is not None:
+                    self._record_skill_fingerprint(folder)
             if was_disabled_plugins - set(disabled_plugins):
                 # A plugin was just ENABLED: its code may never have run
                 # (disabled / brand-new plugins are not executed at
@@ -16773,7 +17326,7 @@ class ForgeWindow(QMainWindow):
         self.sidebar = sidebar
         sl = QVBoxLayout(sidebar); sl.setContentsMargins(14, 18, 14, 14); sl.setSpacing(9)
         brand = QLabel("CODE FORGE"); brand.setObjectName("brand")
-        spark = QLabel(); spark.setPixmap(_brand_spark_pixmap())
+        spark = BrandSparkWidget()
         brand_row = QWidget()
         brand_lay = QHBoxLayout(brand_row)
         brand_lay.setContentsMargins(0, 0, 0, 0); brand_lay.setSpacing(8)
@@ -16994,6 +17547,9 @@ class ForgeWindow(QMainWindow):
         self._header_row2 = row2
         self._header_mode = "single"
         header.installEventFilter(self)
+        # ProjectElision: the sidebar's own resize re-elides the
+        # project names — same trigger pattern as the header flip.
+        sidebar.installEventFilter(self)
         cl.addWidget(header)
         self._sync_header_mode()
         # Chat tabs (owner directive, 2026-11-08 — Antigravity-style
@@ -17197,6 +17753,21 @@ class ForgeWindow(QMainWindow):
         # beside the run machinery), and both the room and the
         # agent's debug_* tools drive it.
         self.debug_win = DebugWindow(self)
+        # F1 (U5): every room remembers its geometry — one helper,
+        # one key per window class, restored here (all rooms are
+        # constructed above) and saved when each closes. Lazy rooms
+        # (proposals, maintenance, skill/plugin editors) install at
+        # their own creation sites.
+        for _room in (self.plan_win, *self.mode_windows.values(),
+                      self.artifacts_win, self.converter_win,
+                      self.sessions_win, self.privacy_win,
+                      self.notes_win, self.sees_win, self.models_win,
+                      self.inbox_win, self.mission_win,
+                      self.templates_win, self.testing_win,
+                      self.provider_chat_win, self.timeline_win,
+                      self.design_canvas_win, self.run_win,
+                      self.debug_win):
+            _install_geometry_memory(_room, self._geometry_settings)
         compose = QFrame(); compose.setStyleSheet(f"QFrame{{background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {TOKENS['surface_compose_top']}, stop:1 {TOKENS['surface_compose_bottom']});border:1px solid {TOKENS['rim']};border-radius:{TOKENS['radius_compose']};}}")
         compose_layout = QVBoxLayout(compose); compose_layout.setContentsMargins(16, 10, 16, 12); compose_layout.setSpacing(6)
         self.image_label = QLabel(""); self.image_label.setObjectName("muted"); compose_layout.addWidget(self.image_label)
@@ -17891,10 +18462,12 @@ class ForgeWindow(QMainWindow):
                 win = SkillEditorWindow(self, self.app_skills_dir, skill,
                                         on_saved=self._on_extension_created)
                 self._skill_editors[skill.folder.name] = win
+                _install_geometry_memory(win, self._geometry_settings)
         else:
             win = SkillEditorWindow(self, self.app_skills_dir, None,
                                     on_saved=self._on_extension_created)
             self._new_editors.append(win)
+            _install_geometry_memory(win, self._geometry_settings)
         if not win.isVisible():
             win.show()
         win.raise_()
@@ -17910,10 +18483,12 @@ class ForgeWindow(QMainWindow):
                 win = PluginEditorWindow(self, self.app_plugins_dir, plugin,
                                          on_saved=self._on_extension_created)
                 self._plugin_editors[plugin.folder.name] = win
+                _install_geometry_memory(win, self._geometry_settings)
         else:
             win = PluginEditorWindow(self, self.app_plugins_dir, None,
                                      on_saved=self._on_extension_created)
             self._new_editors.append(win)
+            _install_geometry_memory(win, self._geometry_settings)
         if not win.isVisible():
             win.show()
         win.raise_()
@@ -17967,6 +18542,7 @@ class ForgeWindow(QMainWindow):
         win = getattr(self, "proposals_win", None)
         if win is None:
             win = self.proposals_win = ProposalsWindow(self)
+            _install_geometry_memory(win, self._geometry_settings)
         win.refresh()
         if not win.isVisible():
             win.show()
@@ -19722,6 +20298,27 @@ class ForgeWindow(QMainWindow):
             self._gauge_busy = False
             self.log("Gauge refresh could not start — will retry on the next tick.")
 
+    def _note_model_loading(self, model):
+        """A turn is starting with `model`: if that model is not one
+        of the locals already in RAM (last gauge snapshot), the IN
+        RAM label reads "Loading…" until the gauge pass sees it
+        loaded — never the old model's name, which read as broken
+        (2026-11-13). Provider models skip this entirely: they never
+        live in this PC's RAM, so the label is not theirs to change.
+        A model already loaded changes nothing: the label is already
+        right."""
+        if providers_mod.is_provider_model(model):
+            return
+        short = short_model(model)
+        snap = self._gauge_snap or {}
+        loaded = [short_model(m) for m in snap.get("ollama_loaded", [])]
+        if short in loaded:
+            return
+        self._loaded_pending = short
+        self._loaded_pending_ticks = 0
+        self.loaded_label.setText("Loading…")
+        self.loaded_label.setToolTip(f"Loading {short}. One moment…")
+
     def _apply_gauges(self, snap):
         self._gauge_snap = snap
         used = max(0.0, snap["total_gb"] - snap["avail_gb"])
@@ -19736,6 +20333,26 @@ class ForgeWindow(QMainWindow):
         self.cpu_bar.style().unpolish(self.cpu_bar); self.cpu_bar.style().polish(self.cpu_bar)
         self.cpu_text.setText(f"load {snap['load_1min']:.2f} / {snap['threads']} threads")
         loaded = ", ".join(short_model(m) for m in snap["ollama_loaded"]) if snap["ollama_loaded"] else "none"
+        # Loaded-label switch (2026-11-13): while a newly picked
+        # model is loading, the label stays "Loading…" — the gauge
+        # pass must not overwrite it with the stale list still in
+        # RAM. It clears when the model appears, or after
+        # _LOADED_PENDING_MAX_TICKS ticks (~60 s) if it never does
+        # (a failed load falls back to the truthful list).
+        pending = self._loaded_pending
+        if pending:
+            if pending in [short_model(m)
+                           for m in snap["ollama_loaded"]]:
+                self._loaded_pending = None
+                self.loaded_label.setToolTip(
+                    self.loaded_stamp.toolTip())
+            elif self._loaded_pending_ticks >= _LOADED_PENDING_MAX_TICKS:
+                self._loaded_pending = None
+                self.loaded_label.setToolTip(
+                    self.loaded_stamp.toolTip())
+            else:
+                self._loaded_pending_ticks += 1
+                loaded = "Loading…"
         # HeaderFit: the loaded label is capped at 150 px and elided
         # (the full list stays in the MODELS readout's tooltip), so
         # a long model list cannot push the header's minimum up.
@@ -19761,14 +20378,50 @@ class ForgeWindow(QMainWindow):
             item = self.project_list.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        self._project_buttons = []
         for entry in self.projects:
             path = entry.get("path", "")
-            btn = QPushButton(("▣  " if path == self.workspace else "▢  ") + entry.get("name", Path(path).name))
+            name = entry.get("name", Path(path).name)
+            marker = "▣  " if path == self.workspace else "▢  "
+            btn = QPushButton(marker + name)
             btn.setObjectName("navActive" if path == self.workspace else "nav")
-            btn.setToolTip(path)
+            # ProjectElision: the tooltip carries the full name
+            # first — the path stays, below it (nothing removed) —
+            # so a clipped row still gives up its name on hover.
+            btn.setToolTip(name + "\n" + path)
             btn.clicked.connect(lambda checked=False, p=path: self.set_project(p))
             self.project_list.addWidget(btn)
+            self._project_buttons.append((btn, marker, name))
+        self._elide_project_names()
         self.workspace_label.setText("PROJECT ROOT\n" + self.workspace)
+
+    def _elide_project_names(self):
+        """Elide project names to the button width (real-PC verdict
+        2026-11-13: long names hard-clipped with no '...' marker).
+        QPushButton has no built-in elision, so the text is set from
+        QFontMetrics.elidedText against the button's style contents
+        rect (SE_PushButtonContents — the rect the text is actually
+        drawn in; contentsRect() does NOT subtract the stylesheet
+        padding in this Qt build, probed 2026-11-13). The active
+        marker is kept out of the elided part, so it always
+        survives. Buttons with no width yet (before the first show)
+        keep their full text; the sidebar resize on show re-elides
+        them."""
+        sidebar = getattr(self, "sidebar", None)
+        if sidebar is not None and sidebar.layout() is not None:
+            sidebar.layout().activate()
+        for btn, marker, name in getattr(self, "_project_buttons", []):
+            opt = QStyleOptionButton()
+            opt.initFrom(btn)
+            avail = btn.style().subElementRect(
+                QStyle.SubElement.SE_PushButtonContents, opt, btn).width()
+            if avail <= 0:
+                btn.setText(marker + name)
+                continue
+            fm = btn.fontMetrics()
+            marker_w = fm.horizontalAdvance(marker)
+            elided = fm.elidedText(name, Qt.ElideRight, max(avail - marker_w, 0))
+            btn.setText(marker + elided)
 
     def _ask_project_type(self, folder):
         """Project System (2026-11-11): the type choice at creation.
@@ -21590,8 +22243,11 @@ class ForgeWindow(QMainWindow):
             # sha256 its sidecar recorded at build time BEFORE the
             # updater is spawned. A mismatch (or no recorded hash)
             # refuses the install outright; nothing is extracted.
-            # The manual dialog flow below is owner-picked and has
-            # no sidecar to trust, so it is NOT hash-gated.
+            # The manual dialog flow below is owner-picked: C15
+            # gates it the same way (release sidecar when present,
+            # explicit unverified acknowledgement when absent),
+            # plus a pre-install preview against the updater's own
+            # allowlist — it is no longer the ungated path.
             try:
                 candidate = self_maint_mod.verify_candidate_package(zip_path)
             except self_maint_mod.MaintenanceError as exc:
@@ -21606,7 +22262,20 @@ class ForgeWindow(QMainWindow):
             dialog = UpdateDialog(self)
             if dialog.exec() != QDialog.Accepted:
                 return
-            zip_path, extras = dialog.values()
+            zip_path, extras, acknowledged = dialog.values()
+            if zip_path:
+                # C15 (audit S1-22/W1): the manual branch is gated
+                # now — the dialog showed the preview and the
+                # acknowledgement, but the gate runs AGAIN here,
+                # from disk, so a zip swapped after the preview is
+                # still caught. A refusal installs nothing and
+                # never spawns the updater.
+                gate = upd.gate_manual_update(zip_path, ROOT_DIR,
+                                              acknowledged)
+                if not gate["allowed"]:
+                    QMessageBox.warning(self, "Update", gate["reason"])
+                    return
+                self.log("Update package checked: " + gate["reason"])
         if zip_path and not Path(zip_path).is_file():
             QMessageBox.warning(self, "Update", f"File not found: {zip_path}")
             return
@@ -23001,6 +23670,15 @@ class ForgeWindow(QMainWindow):
         if obj is getattr(self, "_header_frame", None) and \
                 event.type() == QEvent.Type.Resize:
             self._sync_header_mode()
+        # ProjectElision: a sidebar resize re-elides the project
+        # names to the new width — by the time this fires, the
+        # frame already has its new width, so the buttons read
+        # live geometry (same pattern as the header flip above).
+        # Setting a button's text never resizes the sidebar (the
+        # splitter owns its width), so this cannot loop.
+        if obj is getattr(self, "sidebar", None) and \
+                event.type() == QEvent.Type.Resize:
+            self._elide_project_names()
         # The input check is getattr-guarded: the header filter is
         # installed during _build_ui, before self.input exists, so
         # a header resize mid-build must not touch it.
@@ -23523,6 +24201,10 @@ class ForgeWindow(QMainWindow):
 
     def _start_turn(self, model, options, text):
         model = self._bound_turn_model(model)
+        # The IN RAM label: a turn starting on a model not yet
+        # loaded reads "Loading…" until the gauge pass sees it in
+        # RAM (2026-11-13 — the old name read as broken).
+        self._note_model_loading(model)
         self.plugin_ctx.current_model = model
         roster = self.settings.get("governing_roster", "")
         tester_model, tester_refused = seats_mod.effective_seat_model(
@@ -23673,6 +24355,8 @@ class ForgeWindow(QMainWindow):
                                       "disabled_tools", [])),
                                   result_digest_chars=self.settings.get(
                                       "tool_result_digest_chars"),
+                                  turn_timeout_minutes=self.settings.get(
+                                      "turn_timeout_minutes"),
                                   contained_run=(bool(self.settings.get(
                                       "contained_run", False))
                                       or maintenance_active),

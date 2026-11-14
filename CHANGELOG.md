@@ -1,5 +1,23 @@
 # Changelog
 
+## 2026-11-14 — Context fixes, deck touch targets, and window memory
+
+- Homework now stops reading when the context window is nearly full and drafts from what it has read, instead of running past the window for an hour.
+- A turn gets 30 minutes of model thinking time, then stops cleanly (approval waits don't count). Change it in Settings.
+- Long tool results are trimmed to fit the window, scaled to the model's size.
+- The bench now shows what the model is doing live: phase, elapsed time, tokens, and speed.
+- When models switch, the "in RAM (local)" readout says "Loading…" until the new model is actually loaded.
+- Deck buttons and list rows are full touch size (44×44) — no more missed taps.
+- Manual updates are gated: the update dialog shows a preview and a checksum check before installing, and refuses an unverified file unless you acknowledge it.
+- If a skill or plugin changes on disk after you enabled it, it comes up disabled until you re-enable it in Customize — same for any extension changed by an update.
+- The brand spark now breathes on a slow 4-second rhythm.
+- Long project names in the sidebar show with "…" and the full name in the tooltip, and re-shorten when you resize the sidebar.
+- The window opens fitted to your screen and remembers its size and position — every window does.
+- Plugin fixes: model and repository search no longer fail on every call, and a bad limit number gets a plain message instead of a crash.
+- The tree has no size cap anymore — the footprint is measured and reported, not gated.
+- The published README now carries the Performance envelope section, so the test that checks for it passes from a fresh clone.
+- Full test suite: 2,878 tests. One known pre-existing failure in the FFmpeg probe test (its premise is stale — it expects no transcription target when one is installed); everything else green.
+
 ## 2026-11-13 — Project-scoped conversations, security fixes, and plan tools
 
 - The Conversations panel now follows the project on the bench: it shows that project's chats plus unfiled ones, and re-aligns when you switch projects or open a chat from another project. Saved chats were already filed by project; the panel just lists them that way now.

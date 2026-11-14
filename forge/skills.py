@@ -7,6 +7,7 @@ on demand through the load_skill tool — MetaMorphAi slice-loading, so a
 whole library fits an 8192-token window.
 """
 from __future__ import annotations
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,6 +62,35 @@ def _parse_header(text: str) -> tuple[str, str]:
         elif name and description:
             break
     return name, description
+
+
+def skill_fingerprint(folder) -> str | None:
+    """C16 (audit S1-25/W2): the content fingerprint of a skill —
+    sha256 over EVERY file in the skill folder, each file's bytes
+    prefixed by its relative name: SKILL.md, sibling .md knowledge
+    files, and code the skill runs (such as scan.py — a replaced
+    helper changes what the skill makes the agent do exactly as a
+    replaced SKILL.md does). __pycache__ and *.pyc are excluded
+    (bytecode the interpreter regenerates). The folder is the
+    trusted unit. Returns None when SKILL.md is missing or any
+    file cannot be read — unverifiable content never counts as
+    matching."""
+    folder = Path(folder)
+    if not (folder / "SKILL.md").is_file():
+        return None
+    files = sorted(p for p in folder.rglob("*")
+                   if p.is_file() and "__pycache__" not in p.parts
+                   and p.suffix != ".pyc")
+    digest = hashlib.sha256()
+    try:
+        for path in files:
+            digest.update(path.relative_to(folder).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 def scan_skills(skills_dir: Path) -> list[Skill]:
