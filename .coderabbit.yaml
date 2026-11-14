@@ -1,0 +1,131 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# .coderabbit.yaml — Broke n' Bored Studio shared config (schema header above
+# lets an editor validate supported values; unknown nested keys may pass)
+# Drop this file at the repo root, on main. Same file works for every
+# Python/Qt desktop repo (CODE-FORGE, REBLEND, SKULLPT, MIMIK, ...).
+# The reviewer reads the copy on the branch under review, so changes to
+# this file take effect on the next PR — no reinstall needed.
+
+language: "en-US"
+
+tone_instructions: "Be direct and plainspoken. Show the exact code fix, not just the problem. No filler."
+
+reviews:
+  # assertive = most thorough: bugs + security + style + docs + tests.
+  # Arlo triages every finding, so extra signal beats extra noise.
+  profile: "assertive"
+
+  # Auto-review on PR open + each push, pausing after 5 reviewed commits
+  # (restart automatic reviews with `@coderabbitai resume`, or request one
+  # review with `@coderabbitai review`). NOTE: on public repos with fewer
+  # than 10 stars the reviewer does NOT auto-review — trigger it manually
+  # with `@coderabbitai review` on the PR. These settings go live on their
+  # own once a repo crosses 10 stars.
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 5
+
+  # No automatic approvals for now: solo dev, no required reviewers, and
+  # nothing should ever merge without Joshua or Arlo looking at it.
+  auto_approvals:
+    enabled: false
+
+  high_level_summary: true
+  poem: false
+  review_status: true
+
+  path_filters:
+    - "!**/*.lock"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+    - "!**/dist/**"
+    - "!**/*.zip"
+    - "!**/*.min.js"
+    - "!**/node_modules/**"
+    - "!**/coverage/**"
+    - "!**/.forge/**"
+    - "!**/*.ttf"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.gif"
+    - "!**/*.ico"
+    - "!**/*.b64"
+
+  path_instructions:
+    # Catch-all: V2 has no global instructions setting, so the project
+    # rules live here and apply to every file.
+    - path: "**/*"
+      instructions: |
+        Project rules — apply to every file:
+        - SECRETS: flag any hardcoded API key, token, password, or private key
+          in code. Secrets live only in .env or gitignored config files, never
+          in code. This rule is absolute.
+        - TARGET MACHINE: an 8 GB RAM Linux Mint PC with no GPU. Flag heavy
+          new dependencies, GPU-only code, and anything that would use a lot
+          of memory or slow startup.
+        - HARD $0 RULE: flag any suggested service, API, or dependency that
+          costs money or needs a paid plan.
+        - Prefer small, surgical fixes over rewrites. Never suggest
+          restructuring working code just for style.
+        - Shell scripts run under bash, never sh/dash.
+
+    - path: "**/*.py"
+      instructions: |
+        Python + PySide6/Qt desktop app:
+        - Flag code that blocks the UI thread (network, subprocess, or
+          heavy work on the main thread) — it must run off-thread or
+          async.
+        - Flag unsafe cross-thread Qt calls (touching widgets from a
+          worker thread instead of using signals/slots).
+        - Flag bare `except:` clauses and swallowed exceptions.
+        - Flag file/network operations with no error handling.
+        - Flag subprocess calls built from unsanitized strings.
+
+    - path: "**/*.sh"
+      instructions: |
+        Shell scripts run under `bash` (never `sh`/`dash`):
+        - Bash-only syntax is permitted. Flag any instruction telling the
+          user to run the script with `sh` or `dash`.
+        - Paths with spaces must be quoted.
+        - Fail loudly: `set -euo pipefail`, and no silent failures.
+
+    - path: "**/*.desktop"
+      instructions: |
+        Flag `sh -c "..."` patterns with nested escaped quotes in Exec
+        (proven: GLib rejects the whole file, "Desktop file didn't
+        specify Exec field"). The safe pattern is `python3 -c "..."`
+        with %k as a separate argument, dirname resolved in Python.
+        Keep %k outside quoted arguments.
+
+    - path: "forge/deck.py"
+      instructions: |
+        The deck page is a plain Python string, so escapes in its JS can
+        corrupt the served page while the source looks fine. Flag any
+        change to the embedded <script> that is not syntax-checked
+        (node --check) against the served page.
+
+    - path: "tests/**"
+      instructions: |
+        Tests must assert real behavior. Flag tests that would still pass
+        if the feature were broken — string-only assertions on rendered
+        output, missing file-existence checks after a save, and tests
+        with no failure path.
+
+    - path: "**/test_*.py"
+      instructions: |
+        Tests must assert real behavior. Flag tests that would still pass
+        if the feature were broken — string-only assertions on rendered
+        output, missing file-existence checks after a save, and tests
+        with no failure path.
+
+chat:
+  # Let the reviewer reply in PR threads without needing an @-mention,
+  # so follow-up questions in a review thread get answered.
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
