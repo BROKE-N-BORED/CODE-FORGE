@@ -13,20 +13,6 @@ reviews:
   # Arlo triages every finding, so extra signal beats extra noise.
   profile: "assertive"
 
-  instructions: |
-    Project rules — apply to every file:
-    - SECRETS: flag any hardcoded API key, token, password, or private key
-      in code. Secrets live only in .env or gitignored config files, never
-      in code. This rule is absolute.
-    - TARGET MACHINE: an 8 GB RAM Linux Mint PC with no GPU. Flag heavy
-      new dependencies, GPU-only code, and anything that would use a lot
-      of memory or slow startup.
-    - HARD $0 RULE: flag any suggested service, API, or dependency that
-      costs money or needs a paid plan.
-    - Prefer small, surgical fixes over rewrites. Never suggest
-      restructuring working code just for style.
-    - Shell scripts run under bash, never sh/dash.
-
   # Auto-review on PR open + every push. NOTE: on public repos with fewer
   # than 10 stars the reviewer does NOT auto-review — trigger it manually
   # with `@coderabbitai review` on the PR. These settings go live on their
@@ -34,6 +20,7 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    incremental: true
 
   # No automatic approvals for now: solo dev, no required reviewers, and
   # nothing should ever merge without Joshua or Arlo looking at it.
@@ -63,6 +50,23 @@ reviews:
     - "!**/*.b64"
 
   path_instructions:
+    # Catch-all: V2 has no global instructions setting, so the project
+    # rules live here and apply to every file.
+    - path: "**/*"
+      instructions: |
+        Project rules — apply to every file:
+        - SECRETS: flag any hardcoded API key, token, password, or private key
+          in code. Secrets live only in .env or gitignored config files, never
+          in code. This rule is absolute.
+        - TARGET MACHINE: an 8 GB RAM Linux Mint PC with no GPU. Flag heavy
+          new dependencies, GPU-only code, and anything that would use a lot
+          of memory or slow startup.
+        - HARD $0 RULE: flag any suggested service, API, or dependency that
+          costs money or needs a paid plan.
+        - Prefer small, surgical fixes over rewrites. Never suggest
+          restructuring working code just for style.
+        - Shell scripts run under bash, never sh/dash.
+
     - path: "**/*.py"
       instructions: |
         Python + PySide6/Qt desktop app:
@@ -78,17 +82,18 @@ reviews:
     - path: "**/*.sh"
       instructions: |
         Shell scripts run under `bash` (never `sh`/`dash`):
-        - Flag bash-only syntax that would break under dash, and flag any
-          instruction telling the user to run it with `sh`.
+        - Bash-only syntax is permitted. Flag any instruction telling the
+          user to run the script with `sh` or `dash`.
         - Paths with spaces must be quoted.
         - Fail loudly: `set -euo pipefail`, and no silent failures.
 
     - path: "**/*.desktop"
       instructions: |
-        GLib's desktop parser REJECTS any nested escaped quote in the
-        Exec line — the whole file then fails. Flag nested quotes in
-        Exec; the safe pattern is `python3 -c "..."` with %k as a
-        separate argument.
+        Flag `sh -c "..."` patterns with nested escaped quotes in Exec
+        (proven: GLib rejects the whole file, "Desktop file didn't
+        specify Exec field"). The safe pattern is `python3 -c "..."`
+        with %k as a separate argument, dirname resolved in Python.
+        Keep %k outside quoted arguments.
 
     - path: "forge/deck.py"
       instructions: |
