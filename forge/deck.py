@@ -282,7 +282,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <button class="stop" onclick="planAction('kill')">✗ Kill plan</button>
 </div>
 <div class="row" id="planabandon" style="display:none">
-<button class="stop" onclick="planAction('abandon')">⚑ Abandon plan</button>
+<button id="planabandonbtn" class="stop" onclick="abandonPlan()">⚑ Abandon plan</button>
 </div>
 <div class="row" id="plancomment" style="display:none">
 <input id="plancommenttext" type="text" placeholder="Comment on the draft — the driver revises it" style="flex:1">
@@ -492,6 +492,28 @@ function renderPlan(s){
   // or interrupted. A draft has Kill; a finished plan has
   // nothing left to end.
   aban.style.display = (p.status === 'running' || p.status === 'interrupted') ? '' : 'none';
+}
+let abandonArmed = null;
+function abandonPlan(){
+  // F20: the deck's confirm for abandoning a running plan — a
+  // two-tap arm, not a native confirm dialog (which would block
+  // the poll loop's cadence and read as a browser error on a
+  // phone). First tap arms the button for 5 seconds; second tap
+  // sends.
+  const btn = document.getElementById('planabandonbtn');
+  const msg = document.getElementById('planmsg');
+  if(!abandonArmed){
+    abandonArmed = setTimeout(function(){
+      abandonArmed = null;
+      if(btn) btn.textContent = '⚑ Abandon plan';
+    }, 5000);
+    if(btn) btn.textContent = 'Tap again to abandon';
+    if(msg){ msg.style.color = '@{text_amber_light}@'; msg.textContent = 'Tap again within 5 seconds to abandon. This cannot be undone.'; }
+    return;
+  }
+  clearTimeout(abandonArmed); abandonArmed = null;
+  if(btn) btn.textContent = '⚑ Abandon plan';
+  planAction('abandon');
 }
 async function planAction(action){
   const msg = document.getElementById('planmsg');

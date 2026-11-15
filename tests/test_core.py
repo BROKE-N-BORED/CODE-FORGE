@@ -11607,11 +11607,13 @@ class RunWindowTests(unittest.TestCase):
         # Item #50 adaptation: no cwd edit to point at the temp root
         # anymore — the surface follows the workspace, and runs take
         # their folder as a parameter. A placeholder runnable keeps
-        # the list populated (a selection exists, so the Run button's
-        # idle state is enabled, as the older tests expect).
+        # the list populated, and the test picks it explicitly (F16:
+        # refresh no longer auto-selects) so the Run button's idle
+        # state is enabled, as the older tests expect.
         (self.root / "marker.py").write_text("print('marker')\n")
         self.win.workspace = str(self.root)
         self.win.run_win.refresh()
+        self.win.run_file_list.setCurrentRow(0)
         self.win.run_status.setText("idle")
         self.win._set_run_controls(False)
 
@@ -11746,6 +11748,9 @@ class RunWindowTests(unittest.TestCase):
         (other / "showpwd.sh").write_text("#!/bin/sh\npwd\n")
         self.win.set_project(str(other))
         self.assertEqual(self.win.run_win.windowTitle(), "Run — other-project")
+        # F16: refresh no longer auto-selects, so the test picks
+        # the file explicitly before running it.
+        self.win.run_file_list.setCurrentRow(0)
         entry = self.win.run_win.selected_entry()
         self.assertIsNotNone(entry)
         self.assertEqual(entry["rel"], "showpwd.sh")
@@ -11894,9 +11899,12 @@ class RunWindowTests(unittest.TestCase):
         # surface produced NO output at all.
         self.assertEqual(self.win.run_win.blocks_text(), "")
         self.assertEqual(self.win.run_status.text(), "idle")
-        # The first runnable is auto-selected, ready for Run.
-        self.assertEqual(self.win.run_file_list.currentRow(), 0)
-        self.assertIsNotNone(self.win.run_win.selected_entry())
+        # F16 (U6): nothing is pre-selected — the files showed up
+        # and that is ALL that happened; Run waits for the owner
+        # to pick.
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertIsNone(self.win.run_win.selected_entry())
+        self.assertFalse(self.win.run_start_btn.isEnabled())
         self.win.run_win.close()
 
     def test_run_selected_script_streams_marker_and_exits(self):
@@ -17688,6 +17696,1286 @@ class DeckTouchTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[:400])
 
 
+class HowToUseTests(unittest.TestCase):
+    """F2 (GUIFX audit task list, Build 2, 2026-11-13): the How
+    to Use index (U22) — its own closable window off the Menu,
+    indexed by task, content written from the actual UI. Every
+    test here fails on pre-change code: the window, the menu
+    action, and the content do not exist there."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def tearDown(self):
+        self.win.howto_win.close()
+        self.app.processEvents()
+
+    def test_menu_action_opens_the_window(self):
+        self.assertIn("How to use", self.win.act_howto.text())
+        self.assertIn(self.win.act_howto,
+                      self.win.main_menu.actions())
+        self.win.act_howto.trigger()
+        self.app.processEvents()
+        self.assertTrue(self.win.howto_win.isVisible())
+
+    def test_window_reopens_after_close(self):
+        win = self.win.howto_win
+        self.win.act_howto.trigger()
+        self.app.processEvents()
+        self.assertTrue(win.isVisible())
+        win.close()
+        self.app.processEvents()
+        self.assertFalse(win.isVisible())
+        self.win.act_howto.trigger()
+        self.app.processEvents()
+        self.assertTrue(win.isVisible())
+        self.assertIs(self.win.howto_win, win)
+
+    def test_all_eight_shortcuts_listed_verbatim(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        joined = "\n".join(body for _t, body in HOW_TO_USE_SECTIONS)
+        shortcuts = [body for title, body in HOW_TO_USE_SECTIONS
+                     if title == "Keyboard shortcuts"][0]
+        for key in ("Ctrl+Shift+A", "Ctrl+Shift+R", "Ctrl+Shift+P",
+                    "Ctrl+Shift+B", "Ctrl+Shift+U", "Ctrl+Shift+S",
+                    "Ctrl+K", "Ctrl+B"):
+            self.assertIn(key, shortcuts, key)
+            self.assertIn(key, joined, key)
+
+    def test_every_palette_window_entry_has_index_entry(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        from forge.palette import base_catalog
+        joined = "\n".join(body for _t, body in HOW_TO_USE_SECTIONS)
+        windows = [e for e in base_catalog()
+                   if e.get("group") == "Windows"]
+        self.assertGreater(len(windows), 20)
+        for entry in windows:
+            title = entry["title"].rstrip("…").rstrip()
+            self.assertTrue(title, entry)
+            self.assertIn(title, joined, entry["title"])
+
+    def test_every_named_path_exists_on_the_real_ui(self):
+        win = self.win
+        for attr in ("act_howto", "act_new", "act_fork",
+                     "act_export_chat", "act_settings",
+                     "act_customize", "act_schedule", "act_deck",
+                     "act_deck_qr", "act_snapshots",
+                     "act_checkpoints", "act_bench", "act_recipes",
+                     "act_maintenance", "act_models_window",
+                     "act_plan_window", "act_run_window"):
+            self.assertTrue(hasattr(win, attr), attr)
+            self.assertIn(getattr(win, attr),
+                          win.main_menu.actions(), attr)
+        for attr in ("model_combo", "mode_combo", "menu_btn",
+                     "view_btn", "send_btn", "input"):
+            self.assertTrue(hasattr(win, attr), attr)
+        for meth in ("open_how_to_use", "open_snapshots",
+                     "open_checkpoints", "open_models_window",
+                     "open_plan_window", "open_run_window",
+                     "open_command_palette"):
+            self.assertTrue(callable(getattr(win, meth, None)), meth)
+        modes = [win.mode_combo.itemText(i)
+                 for i in range(win.mode_combo.count())]
+        self.assertEqual(modes, ["Code", "Plan", "Design",
+                                 "Architect", "Review", "Ask",
+                                 "Write", "Research"])
+
+    def test_customize_lives_in_the_menu(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        start = [body for title, body in HOW_TO_USE_SECTIONS
+                 if title == "Start here"][0]
+        self.assertIn("Customize lives in the Menu", start)
+        self.assertIn(self.win.act_customize,
+                      self.win.main_menu.actions())
+
+    def test_window_fits_1366x768(self):
+        win = self.win.howto_win
+        self.assertLessEqual(win.width(), 1366)
+        self.assertLessEqual(win.height(), 768)
+        self.assertLessEqual(win.minimumWidth(), 1366)
+        self.assertLessEqual(win.minimumHeight(), 768)
+        hint = win.minimumSizeHint()
+        self.assertLessEqual(hint.width(), 1366)
+        self.assertLessEqual(hint.height(), 768)
+
+    def test_index_lists_every_section_and_shows_its_text(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        win = self.win.howto_win
+        self.assertEqual(win.index_list.count(),
+                         len(HOW_TO_USE_SECTIONS))
+        self.assertEqual(win.index_list.currentRow(), 0)
+        self.assertEqual(win.text.toPlainText(),
+                         HOW_TO_USE_SECTIONS[0][1])
+        for row, (title, body) in enumerate(HOW_TO_USE_SECTIONS):
+            self.assertEqual(win.index_list.item(row).text(), title)
+            win.index_list.setCurrentRow(row)
+            self.app.processEvents()
+            self.assertEqual(win.text.toPlainText(), body, title)
+
+    def test_menu_section_exists_and_names_current_menu(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        titles = [t for t, _b in HOW_TO_USE_SECTIONS]
+        self.assertIn("The Menu", titles)
+        menu = [body for title, body in HOW_TO_USE_SECTIONS
+                if title == "The Menu"][0]
+        for entry in ("Menu button", "New conversation",
+                      "Agent settings", "Customize",
+                      "Snapshots", "Phone deck", "Plan window",
+                      "Models window"):
+            self.assertIn(entry, menu, entry)
+
+    def test_no_em_dash_in_index_content(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        joined = "\n".join(body for _t, body in HOW_TO_USE_SECTIONS)
+        self.assertNotIn("—", joined)
+        self.assertNotIn("—", self.win.howto_win.windowTitle())
+
+    def test_window_has_g4_header(self):
+        from forge.main import WindowHeader
+        win = self.win.howto_win
+        self.assertIsInstance(win.header, WindowHeader)
+        self.assertEqual(win.header.title_label.text(),
+                         win.windowTitle())
+
+    def test_content_covers_the_required_topics(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        joined = "\n".join(body for _t, body in HOW_TO_USE_SECTIONS)
+        for topic in ("Snapshots", "Checkpoints", "deck",
+                      "palette", "mode", "Customize",
+                      "Plan window", "Run window",
+                      "Models window", "Ctrl+K"):
+            self.assertIn(topic, joined, topic)
+
+
+class RestoreConfirmDefaultTests(unittest.TestCase):
+    """F3 (audit Build 3): the three restore/house confirmations
+    default to No — a stray Enter must never replace the project's
+    files or move its extensions. The other three question sites
+    already default to No; these three are ALL of the missing
+    defaults (only six QMessageBox.question sites exist)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.app_dir = Path(self.temp.name) / "app"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _question_args(self, func):
+        """Run func with QMessageBox.question mocked to answer No;
+        return the (buttons, default) positional args it was
+        called with — () if the question never fired."""
+        from unittest import mock
+        import forge.main as main_mod
+        seen = {}
+
+        def fake_question(parent, title, text, *a, **k):
+            seen["args"] = a
+            return main_mod.QMessageBox.No
+
+        with mock.patch.object(main_mod.QMessageBox, "question",
+                               side_effect=fake_question):
+            func()
+        return seen.get("args", ())
+
+    def _assert_defaults_no(self, args):
+        import forge.main as main_mod
+        self.assertEqual(len(args), 2)
+        self.assertEqual(args[0],
+                         main_mod.QMessageBox.Yes | main_mod.QMessageBox.No)
+        self.assertEqual(args[1], main_mod.QMessageBox.No)
+
+    def test_snapshot_restore_defaults_to_no(self):
+        from forge.main import SnapshotsDialog
+        snaps = [{"id": "b" * 40, "short": "bbbbbbb", "label": "Oldest",
+                  "timestamp": "2026-11-06 21:00"}]
+        fake = _FakeSnapshotEngine(snaps=snaps)
+        dlg = SnapshotsDialog(self.win, self.temp.name, engine=fake)
+        try:
+            dlg.list.setCurrentRow(0)
+            args = self._question_args(dlg._restore_selected)
+            self._assert_defaults_no(args)
+            # No restores nothing
+            self.assertEqual(fake.calls, [])
+        finally:
+            dlg.close()
+
+    def test_checkpoint_restore_defaults_to_no(self):
+        from forge.main import CheckpointsDialog
+        ckpts = [{"id": "b" * 40, "label": "Turn start",
+                  "timestamp": "2026-11-07 20:59"}]
+        fake = _FakeCheckpointEngine(ckpts=ckpts)
+        dlg = CheckpointsDialog(self.win, self.temp.name, self.app_dir,
+                                engine=fake)
+        try:
+            dlg.list.setCurrentRow(0)
+            args = self._question_args(dlg._restore_selected)
+            self._assert_defaults_no(args)
+            self.assertEqual(
+                [c for c in fake.calls if c[0] == "restore"], [])
+        finally:
+            dlg.close()
+
+    def test_house_extensions_defaults_to_no(self):
+        import forge.main as main_mod
+        housed = []
+        dlg = main_mod.CustomizeDialog(
+            None, [], [], set(), set(), {},
+            project_local=[{"kind": "skill", "name": "demo-skill"}],
+            on_house=lambda: housed.append(True))
+        try:
+            args = self._question_args(dlg._do_house)
+            self._assert_defaults_no(args)
+            # No houses nothing
+            self.assertEqual(housed, [])
+        finally:
+            dlg.close()
+
+
+class AbandonConfirmTests(unittest.TestCase):
+    """F20 (audit Build 3): abandoning a running plan asks first
+    on every surface. Desktop callers (PlanWindow button, palette
+    entry) confirm with default No; the deck gets a two-tap arm
+    in JS. The confirm lives at the CALLER — abandon_plan itself
+    stays unguarded, because the deck's /plan round trip calls it
+    on the GUI thread and a desktop modal there would hang the
+    phone request."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def test_no_does_not_abandon(self):
+        from unittest import mock
+        import forge.main as main_mod
+        with mock.patch.object(main_mod.QMessageBox, "question",
+                               return_value=main_mod.QMessageBox.No), \
+             mock.patch.object(self.win, "abandon_plan") as abandoned:
+            ok, _message = self.win._confirm_abandon_plan()
+        self.assertFalse(ok)
+        abandoned.assert_not_called()
+
+    def test_yes_proceeds_to_abandon(self):
+        from unittest import mock
+        import forge.main as main_mod
+        with mock.patch.object(main_mod.QMessageBox, "question",
+                               return_value=main_mod.QMessageBox.Yes), \
+             mock.patch.object(self.win, "abandon_plan",
+                               return_value=(True, "abandoned")) as abandoned:
+            ok, message = self.win._confirm_abandon_plan()
+        self.assertTrue(ok)
+        self.assertEqual(message, "abandoned")
+        abandoned.assert_called_once_with()
+
+    def test_confirm_defaults_to_no(self):
+        from unittest import mock
+        import forge.main as main_mod
+        seen = {}
+
+        def fake_question(parent, title, text, *a, **k):
+            seen["args"] = a
+            return main_mod.QMessageBox.No
+
+        with mock.patch.object(main_mod.QMessageBox, "question",
+                               side_effect=fake_question):
+            self.win._confirm_abandon_plan()
+        self.assertEqual(len(seen["args"]), 2)
+        self.assertEqual(seen["args"][0],
+                         main_mod.QMessageBox.Yes | main_mod.QMessageBox.No)
+        self.assertEqual(seen["args"][1], main_mod.QMessageBox.No)
+
+    def test_plan_button_calls_the_confirm(self):
+        from unittest import mock
+        from forge import planning
+        plan = planning.new_plan(["One"], request="Build the thing")
+        plan["status"] = "running"
+        self.win.plan_state = plan
+        self.win._plan_render()
+        self.assertTrue(self.win.plan_abandon_btn.isEnabled())
+        with mock.patch.object(self.win,
+                               "_confirm_abandon_plan") as confirm:
+            self.win.plan_abandon_btn.click()
+        confirm.assert_called_once_with()
+
+    def test_palette_binding_calls_the_confirm(self):
+        from unittest import mock
+        import forge.main as main_mod
+        _entries, bindings = self.win.palette_actions()
+        self.assertIn("abandon_plan", bindings)
+        # the binding goes through the confirm, not abandon_plan
+        # directly — this is what fails on pre-change code
+        self.assertEqual(bindings["abandon_plan"].__name__,
+                         "_confirm_abandon_plan")
+        with mock.patch.object(main_mod.QMessageBox, "question",
+                               return_value=main_mod.QMessageBox.No), \
+             mock.patch.object(self.win, "abandon_plan") as abandoned:
+            bindings["abandon_plan"]()
+        abandoned.assert_not_called()
+
+    def test_deck_abandon_button_two_tap(self):
+        import re
+        from forge.deck import PAGE
+        # the button arms, it does not POST directly
+        self.assertIn('id="planabandonbtn"', PAGE)
+        self.assertIn('onclick="abandonPlan()"', PAGE)
+        self.assertNotIn("onclick=\"planAction('abandon')\"", PAGE)
+        m = re.search(r"<script>(.*?)</script>", PAGE, re.S)
+        self.assertIsNotNone(m)
+        fn = re.search(r"function abandonPlan\(\)\{.*?\n\}",
+                       m.group(1), re.S)
+        self.assertIsNotNone(fn)
+        body = fn.group(0)
+        self.assertIn("abandonArmed", body)
+        self.assertIn("setTimeout", body)
+        self.assertIn("5000", body)
+        self.assertIn("Tap again to abandon", body)
+        self.assertIn("planAction('abandon')", body)
+        self.assertNotIn("confirm(", body)
+
+    def test_deck_script_still_parses(self):
+        import re, shutil, subprocess, tempfile
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available for JS syntax check")
+        from forge.deck import PAGE
+        m = re.search(r"<script>(.*?)</script>", PAGE, re.S)
+        self.assertIsNotNone(m)
+        with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                         delete=False) as f:
+            f.write(m.group(1))
+            path = f.name
+        r = subprocess.run([node, "--check", path],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+
+class EmptyChatCustomizeTests(unittest.TestCase):
+    """F17 (audit Build 3): the empty chat says Customize lives
+    in the Menu — it is not on the right."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def test_empty_chat_names_the_menu(self):
+        self.win.render([])
+        text = self.win.chat.toPlainText()
+        self.assertIn("Customize in the Menu", text)
+        self.assertNotIn("on the right", text)
+
+
+class RunNoPreselectTests(unittest.TestCase):
+    """F16 (U6): the Run window never pre-selects a file. Refresh
+    loads the list and that is all — Run stays disabled until the
+    owner picks, so nothing ever runs a file he never chose."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.win.run_is_running():
+            cls.win.stop_run()
+            cls.win._run_thread.wait(3000)
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "marker.py").write_text("print('marker')\n")
+        (self.root / "tool.py").write_text("print('tool')\n")
+        self.win.workspace = str(self.root)
+        self.win.run_win.refresh()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.run_win.close()
+        self.temp.cleanup()
+
+    def test_refresh_leaves_no_selection(self):
+        self.assertGreater(self.win.run_file_list.count(), 0)
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertIsNone(self.win.run_win.selected_entry())
+
+    def test_run_disabled_with_no_selection(self):
+        self.assertFalse(self.win.run_start_btn.isEnabled())
+
+    def test_run_enables_once_a_file_is_picked(self):
+        self.win.run_file_list.setCurrentRow(0)
+        self.app.processEvents()
+        self.assertTrue(self.win.run_start_btn.isEnabled())
+        self.assertIsNotNone(self.win.run_win.selected_entry())
+
+    def test_refresh_after_pick_drops_the_selection(self):
+        self.win.run_file_list.setCurrentRow(0)
+        self.assertTrue(self.win.run_start_btn.isEnabled())
+        self.win.run_win.refresh()
+        self.app.processEvents()
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertFalse(self.win.run_start_btn.isEnabled())
+
+    def test_opening_the_window_selects_nothing(self):
+        # The focus-in hole: QListWidget auto-selects row 0 when
+        # it receives keyboard focus with no current row, so
+        # opening the window used to arm Run on the first file
+        # even after refresh stopped pre-selecting. The list must
+        # stay unselected through open + focus.
+        self.win.open_run_window()
+        self.app.processEvents()
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertFalse(self.win.run_start_btn.isEnabled())
+        self.win.run_win.close()
+
+
+class InboxNoPreselectTests(unittest.TestCase):
+    """F18 (U6): the Inbox never pre-selects a row. The previous
+    selection is restored when it survives, but when it doesn't —
+    first open, or the item is gone — nothing is picked for the
+    owner, so Approve merge (and every other action) stays
+    disabled until he picks."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._groups = {
+            "working": [{"key": "turn:a", "title": "Turn A",
+                         "kind": "turn"}],
+            "attention": [], "ready": [], "held": [], "done": []}
+        self._old_groups = self.win.inbox_groups
+        self.win.inbox_groups = lambda: self._groups
+        self.box = self.win.inbox_win
+        self.box._selected_key = None
+
+    def tearDown(self):
+        self.win.inbox_groups = self._old_groups
+        self.box.close()
+
+    def test_open_with_working_items_selects_nothing(self):
+        self.box.refresh()
+        self.app.processEvents()
+        for group, lst in self.box._lists.items():
+            self.assertEqual(lst.currentRow(), -1, group)
+        self.assertIsNone(self.box._selected()[1])
+
+    def test_action_buttons_disabled_with_no_selection(self):
+        self.box.refresh()
+        self.app.processEvents()
+        self.assertFalse(self.box.go_btn.isEnabled())
+        self.assertFalse(self.box.dismiss_btn.isEnabled())
+        self.assertFalse(self.box.hold_btn.isEnabled())
+        self.assertFalse(self.box.snooze_btn.isEnabled())
+        self.assertFalse(self.box.done_btn.isEnabled())
+        self.assertFalse(self.box.merge_btn.isEnabled())
+        self.assertFalse(self.box.diff_btn.isEnabled())
+        self.assertFalse(self.box.ckpts_btn.isEnabled())
+
+    def test_previous_selection_is_restored_when_it_survives(self):
+        self.box._selected_key = "turn:a"
+        self.box.refresh()
+        self.app.processEvents()
+        self.assertEqual(
+            self.box._lists["working"].currentRow(), 0)
+        group, item = self.box._selected()
+        self.assertEqual(group, "working")
+        self.assertEqual(item["key"], "turn:a")
+        self.assertTrue(self.box.dismiss_btn.isEnabled())
+
+    def test_selection_gone_means_no_fallback(self):
+        self.box._selected_key = "turn:gone"
+        self.box.refresh()
+        self.app.processEvents()
+        self.assertEqual(
+            self.box._lists["working"].currentRow(), -1)
+        self.assertFalse(self.box.dismiss_btn.isEnabled())
+
+    def test_showing_the_window_selects_nothing(self):
+        # The focus-in hole (see RunNoPreselectTests): showing
+        # the window hands focus to the first list, which used to
+        # auto-select row 0 and arm every action.
+        self.box.refresh()
+        self.box.show()
+        self.app.processEvents()
+        for group, lst in self.box._lists.items():
+            self.assertEqual(lst.currentRow(), -1, group)
+        self.assertFalse(self.box.dismiss_btn.isEnabled())
+        self.assertFalse(self.box.merge_btn.isEnabled())
+        self.box.close()
+
+    def test_clearing_the_row_clears_the_remembered_key(self):
+        # The stale-key hole: _on_select only ever SET the key, so
+        # clearing a row left _selected() returning the item and
+        # the buttons armed with nothing picked.
+        self.box._selected_key = "turn:a"
+        self.box.refresh()
+        self.app.processEvents()
+        self.assertEqual(self.box._selected()[1]["key"], "turn:a")
+        self.box._lists["working"].setCurrentRow(-1)
+        self.app.processEvents()
+        self.assertIsNone(self.box._selected_key)
+        self.assertIsNone(self.box._selected()[1])
+        self.assertFalse(self.box.dismiss_btn.isEnabled())
+
+
+class ConverterNoPreselectTests(unittest.TestCase):
+    """F19 (U6): the Converter never pre-selects a format. Choosing
+    a file lists what it can become and that is all — Convert
+    stays disabled until the owner picks a format, so the choice
+    is always his."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.src = self.root / "notes.txt"
+        self.src.write_text("hello\n")
+        self.conv = self.win.converter_win
+
+    def tearDown(self):
+        self.conv.close()
+        self.temp.cleanup()
+
+    def _choose(self):
+        from unittest import mock
+        with mock.patch(
+                "PySide6.QtWidgets.QFileDialog.getOpenFileName",
+                return_value=(str(self.src), "")):
+            self.conv._choose_file()
+        self.app.processEvents()
+
+    def test_choosing_a_file_selects_no_format(self):
+        self._choose()
+        self.assertGreater(self.conv.targets_list.count(), 0)
+        self.assertEqual(self.conv.targets_list.currentRow(), -1)
+
+    def test_convert_disabled_with_no_format_picked(self):
+        self._choose()
+        self.assertFalse(self.conv.convert_btn.isEnabled())
+
+    def test_convert_enables_once_a_format_is_picked(self):
+        self._choose()
+        self.conv.targets_list.setCurrentRow(0)
+        self.app.processEvents()
+        self.assertTrue(self.conv.convert_btn.isEnabled())
+
+    def test_showing_the_window_selects_nothing(self):
+        # The focus-in hole (see RunNoPreselectTests): showing
+        # the window hands focus to the targets list, which used
+        # to auto-select row 0 and arm Convert.
+        self._choose()
+        self.conv.show()
+        self.app.processEvents()
+        self.assertEqual(self.conv.targets_list.currentRow(), -1)
+        self.assertFalse(self.conv.convert_btn.isEnabled())
+        self.conv.close()
+
+
+class ProjectFocusRestoreTests(unittest.TestCase):
+    """F24 (U28): rebuilding the sidebar project list keeps
+    keyboard focus. The rebuild destroys every project button, so
+    without the fix a focused button's focus lands nowhere; the
+    fix hands focus back to the new button for the same project,
+    keyed by path — not by position."""
+
+    _PROJECTS = [
+        {"name": "alpha", "path": "/work/alpha"},
+        {"name": "beta", "path": "/work/beta"},
+        {"name": "gamma", "path": "/work/gamma"},
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        cls.win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._old_projects = self.win.projects
+        self._old_workspace = self.win.workspace
+        self.win.projects = [dict(p) for p in self._PROJECTS]
+        self.win.workspace = "/work/alpha"
+        self.win.refresh_projects()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.projects = self._old_projects
+        self.win.workspace = self._old_workspace
+        self.win.refresh_projects()
+        self.app.processEvents()
+
+    def _button_for(self, path):
+        for btn, _marker, _name in self.win._project_buttons:
+            if btn.property("projectPath") == path:
+                return btn
+        return None
+
+    def test_focus_returns_to_the_same_project_after_rebuild(self):
+        btn = self._button_for("/work/beta")
+        btn.setFocus()
+        self.app.processEvents()
+        self.assertIs(self.win.focusWidget(), btn)
+        self.win.refresh_projects()
+        self.app.processEvents()
+        new_btn = self._button_for("/work/beta")
+        self.assertIsNotNone(new_btn)
+        self.assertIsNot(new_btn, btn)
+        self.assertIs(self.win.focusWidget(), new_btn)
+
+    def test_focus_on_active_project_restores_too(self):
+        btn = self._button_for("/work/alpha")
+        btn.setFocus()
+        self.app.processEvents()
+        self.assertIs(self.win.focusWidget(), btn)
+        self.win.refresh_projects()
+        self.app.processEvents()
+        self.assertIs(self.win.focusWidget(),
+                      self._button_for("/work/alpha"))
+
+    def test_focus_elsewhere_is_untouched(self):
+        self.win.model_combo.setFocus()
+        self.app.processEvents()
+        self.assertIs(self.win.focusWidget(), self.win.model_combo)
+        self.win.refresh_projects()
+        self.app.processEvents()
+        self.assertIs(self.win.focusWidget(), self.win.model_combo)
+
+    def test_restore_is_path_keyed_not_position_keyed(self):
+        btn = self._button_for("/work/beta")
+        btn.setFocus()
+        self.app.processEvents()
+        self.assertIs(self.win.focusWidget(), btn)
+        # Reorder: gamma moves ahead of beta, so beta's button is
+        # no longer at index 1 — focus must follow the path.
+        self.win.projects = [dict(self._PROJECTS[0]),
+                             dict(self._PROJECTS[2]),
+                             dict(self._PROJECTS[1])]
+        self.win.refresh_projects()
+        self.app.processEvents()
+        new_btn = self._button_for("/work/beta")
+        self.assertIs(self.win.focusWidget(), new_btn)
+        self.assertEqual(new_btn.property("projectPath"), "/work/beta")
+
+
+class InboxAllClearTests(unittest.TestCase):
+    """F25 (U29): the Inbox says so when it's clear. A muted
+    all-clear label shows exactly when every group is empty, so
+    an empty Inbox reads as 'nothing needs you' instead of five
+    bare headers."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._groups = {"working": [], "attention": [], "ready": [],
+                        "held": [], "done": []}
+        self._old_groups = self.win.inbox_groups
+        self.win.inbox_groups = lambda: self._groups
+        self.box = self.win.inbox_win
+        self.box._selected_key = None
+
+    def tearDown(self):
+        self.win.inbox_groups = self._old_groups
+        self.box.close()
+
+    def test_all_clear_visible_when_every_group_empty(self):
+        self.box.refresh()
+        self.app.processEvents()
+        self.assertFalse(self.box._all_clear_label.isHidden())
+        self.assertEqual(
+            self.box._all_clear_label.text(),
+            "Nothing needs attention. New items appear here.")
+
+    def test_all_clear_hidden_when_any_group_has_items(self):
+        self._groups["working"] = [{"key": "turn:a", "title": "Turn A",
+                                    "kind": "turn"}]
+        self.box.refresh()
+        self.app.processEvents()
+        self.assertTrue(self.box._all_clear_label.isHidden())
+
+    def test_all_clear_toggles_with_item_count(self):
+        self.box.refresh()
+        self.assertFalse(self.box._all_clear_label.isHidden())
+        self._groups["ready"] = [{"key": "job:b", "title": "Job B",
+                                  "kind": "job"}]
+        self.box.refresh()
+        self.assertTrue(self.box._all_clear_label.isHidden())
+        self._groups["ready"] = []
+        self.box.refresh()
+        self.assertFalse(self.box._all_clear_label.isHidden())
+
+    def test_all_clear_text_has_no_em_dash(self):
+        # U33: no em-dashes in visible UI text.
+        self.assertNotIn("—", self.box._all_clear_label.text())
+
+
+class SingleInstanceGuardTests(unittest.TestCase):
+    """F4: the single-instance guard, in-process. Every test
+    runs under its own key so guards never fight each other or
+    the owner's real Forge."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import uuid
+        self._key = "f5-guard-%s" % uuid.uuid4().hex[:12]
+        self._guards = []
+
+    def tearDown(self):
+        import os
+        for guard in self._guards:
+            guard.release()
+        os.environ.pop("CODE_FORGE_SINGLE_INSTANCE", None)
+
+    def _guard(self, **kw):
+        from forge.main import _SingleInstanceGuard
+        guard = _SingleInstanceGuard(key=self._key, **kw)
+        self._guards.append(guard)
+        return guard
+
+    def test_key_carries_the_username(self):
+        # No env override: the key is the prefix + the username,
+        # so two users on one machine each get their own Forge.
+        import getpass
+        from forge.main import _single_instance_key
+        self.assertEqual(_single_instance_key(),
+                         "code-forge-single-instance-"
+                         + getpass.getuser())
+
+    def test_env_override_replaces_the_key(self):
+        import os
+        from forge.main import _single_instance_key
+        os.environ["CODE_FORGE_SINGLE_INSTANCE"] = "my-test-key"
+        self.assertEqual(_single_instance_key(), "my-test-key")
+
+    def test_env_override_sanitizes_unsafe_characters(self):
+        # A socket name / filename must not carry slashes or
+        # spaces — they become dashes.
+        import os
+        from forge.main import _single_instance_key
+        os.environ["CODE_FORGE_SINGLE_INSTANCE"] = "a/b c:d"
+        self.assertEqual(_single_instance_key(), "a-b-c-d")
+
+    def test_lock_path_is_in_the_temp_dir(self):
+        # Never in the project dir or the install dir.
+        import tempfile
+        from pathlib import Path
+        from PySide6.QtCore import QStandardPaths
+        from forge.main import _single_instance_lock_path
+        path = _single_instance_lock_path("some-key")
+        temp = (QStandardPaths.writableLocation(
+            QStandardPaths.TempLocation) or tempfile.gettempdir())
+        self.assertTrue(path.startswith(temp + "/"),
+                        path + " is not under " + temp)
+        root = str(Path(__file__).resolve().parent.parent)
+        self.assertFalse(path.startswith(root + "/"),
+                         path + " is inside the install dir")
+        self.assertTrue(path.endswith(".lock"))
+
+    def test_second_guard_cannot_acquire_while_first_holds(self):
+        first = self._guard()
+        self.assertTrue(first.try_acquire())
+        second = self._guard()
+        self.assertFalse(second.try_acquire())
+        first.release()
+        third = self._guard()
+        self.assertTrue(third.try_acquire())
+
+    def test_notify_reaches_the_primary(self):
+        import time
+        from PySide6.QtCore import QCoreApplication
+        from forge.main import _notify_running_instance
+        primary = self._guard()
+        self.assertTrue(primary.try_acquire())
+        seen = []
+        primary.set_raise_callback(lambda: seen.append(True))
+        self.assertTrue(
+            _notify_running_instance(primary.server_name))
+        deadline = time.time() + 5
+        while not seen and time.time() < deadline:
+            QCoreApplication.processEvents()
+            time.sleep(0.05)
+        self.assertEqual(seen, [True])
+
+    def test_notify_returns_false_when_nobody_listens(self):
+        from forge.main import _notify_running_instance
+        self.assertFalse(_notify_running_instance(
+            "f5-nobody-" + self._key))
+
+    def test_release_frees_the_lock_and_the_server(self):
+        from forge.main import _notify_running_instance
+        first = self._guard()
+        self.assertTrue(first.try_acquire())
+        first.release()
+        second = self._guard()
+        self.assertTrue(second.try_acquire())
+        second.release()
+        # Nobody listens after the release — the socket is gone.
+        self.assertFalse(_notify_running_instance(self._key))
+
+
+class SingleInstanceProcessTests(unittest.TestCase):
+    """F4: live two-process runs against the real main(). Each
+    test runs under a unique instance key so it never fights the
+    owner's real Forge or another test. The child GUIs run
+    offscreen under a temp HOME — no real store, no real Ollama
+    contact is asserted, only the gate's behavior.
+
+    Two races this class guards against (both found live):
+    (1) the lock FILE existing does not mean a given process
+    holds it — after a kill -9 the stale file is still there —
+    so readiness polls the file's first line for the process's
+    own PID, which QLockFile writes on a successful lock;
+    (2) the first instance's event loop only starts once the
+    window is built, so a notify sent during construction sits
+    queued until then — the raise marker is awaited on a reader
+    thread instead of being assumed instant."""
+
+    def setUp(self):
+        import tempfile
+        import uuid
+        self.key = "f5-proc-%s" % uuid.uuid4().hex[:12]
+        self.root = Path(__file__).resolve().parent.parent
+        self.tmp = Path(tempfile.mkdtemp(prefix="forge-f5-proc-"))
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.procs = []
+
+    def tearDown(self):
+        import shutil
+        import subprocess
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=10)
+            if proc.stdout is not None:
+                proc.stdout.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _env(self):
+        import os
+        env = dict(os.environ)
+        env["CODE_FORGE_SINGLE_INSTANCE"] = self.key
+        env["HOME"] = str(self.home)
+        env["TMPDIR"] = str(self.tmp)
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        return env
+
+    def _launch_gui(self, read_output=False):
+        import subprocess
+        import threading
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-m", "forge.main"],
+            cwd=str(self.root), env=self._env(),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True)
+        self.procs.append(proc)
+        lines = []
+        if read_output:
+            def _reader():
+                try:
+                    for line in proc.stdout:
+                        lines.append(line)
+                except ValueError:
+                    pass  # stdout closed in tearDown
+            thread = threading.Thread(target=_reader, daemon=True)
+            thread.start()
+        return proc, lines
+
+    def _lock_path(self):
+        # The child resolves the temp dir from ITS env
+        # (TMPDIR=self.tmp — Qt's TempLocation respects it).
+        return self.tmp / (self.key + ".lock")
+
+    def _wait_for_lock(self, proc, timeout=180):
+        """Wait until THIS process holds the lock: the lock
+        file's first line is the holder's PID. (The file merely
+        existing proves nothing — a kill -9 leaves it behind.)"""
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                first = self._lock_path().read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
+            except OSError:
+                first = []
+            if first and first[0].strip() == str(proc.pid):
+                return True
+            if proc.poll() is not None:
+                self.fail("GUI exited early with code %s before "
+                          "taking the lock" % proc.returncode)
+            time.sleep(0.25)
+        return False
+
+    def _wait_for_output(self, lines, needle, timeout=90):
+        """Wait until a line containing NEEDLE reached the
+        collected output of a running GUI."""
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if any(needle in line for line in lines):
+                return True
+            time.sleep(0.25)
+        return False
+
+    def test_second_launch_exits_fast_and_first_stays_alive(self):
+        import subprocess
+        import time
+        first, first_lines = self._launch_gui(read_output=True)
+        self.assertTrue(self._wait_for_lock(first),
+                        "first launch never took the lock")
+        self.assertIsNone(first.poll())
+        started = time.monotonic()
+        second, _ = self._launch_gui()
+        out, _ = second.communicate(timeout=180)
+        elapsed = time.monotonic() - started
+        self.assertEqual(second.returncode, 0, out[-500:])
+        self.assertIn("already running", out)
+        # Fast: the second launch exits before any window, store,
+        # or model is touched — only the import stands in its way.
+        # (90 s is generous under sandbox load; the import alone
+        # is a few seconds.)
+        self.assertLess(elapsed, 90, "second launch took %.1fs"
+                        % elapsed)
+        self.assertIsNone(first.poll(),
+                          "first instance died on the second launch")
+        # The raise lands once the first instance's event loop is
+        # running — the notify may have queued during window
+        # construction, so await the marker instead of assuming.
+        self.assertTrue(self._wait_for_output(
+            first_lines, "raising this window"),
+            "first instance never raised:\n" + "".join(first_lines))
+        first.terminate()
+        first.wait(timeout=30)
+
+    def test_kill_minus_9_then_relaunch_takes_over(self):
+        first, _ = self._launch_gui(read_output=True)
+        self.assertTrue(self._wait_for_lock(first),
+                        "first launch never took the lock")
+        first.kill()  # SIGKILL — no cleanup, stale lock + socket
+        first.wait(timeout=30)
+        second, second_lines = self._launch_gui(read_output=True)
+        # The lock file must name the NEW process's PID — the
+        # stale file alone would pass a mere existence check.
+        self.assertTrue(self._wait_for_lock(second),
+                        "relaunch never took the stale lock")
+        self.assertIsNone(second.poll())
+        # A third launch exits as the secondary — proof the
+        # relaunched process holds the lock as primary.
+        third, _ = self._launch_gui()
+        out, _ = third.communicate(timeout=180)
+        self.assertEqual(third.returncode, 0, out[-500:])
+        self.assertIn("already running", out)
+        self.assertNotIn("already running", "".join(second_lines))
+        second.terminate()
+        second.wait(timeout=30)
+
+    def test_cli_still_works_while_gui_runs(self):
+        import json
+        import subprocess
+        first, _ = self._launch_gui(read_output=True)
+        self.assertTrue(self._wait_for_lock(first),
+                        "first launch never took the lock")
+        review = self.tmp / "review.md"
+        review.write_text("Review\n\nNo findings.\n",
+                          encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, "-m", "forge.cli", "review",
+             "--agent", str(review)],
+            cwd=str(self.root), env=self._env(),
+            capture_output=True, text=True, timeout=120)
+        self.assertIn(result.returncode, (0, 1),
+                      result.stderr[-500:])
+        report = json.loads(result.stdout)
+        self.assertEqual(report["verdict"], "pass")
+        first.terminate()
+        first.wait(timeout=30)
+
+
+def _debug_log_module():
+    """The vendored debug log layer, imported lazily so this test
+    module still imports on pre-change code (where forge.debug_log
+    does not exist) — the import error then fails these tests, which
+    is exactly the fail-proof."""
+    from forge import debug_log as debug_log_mod
+    return debug_log_mod
+
+
+def _close_debug_logger(logger):
+    """Detach + close the three handlers a DebugLogger added to its
+    shared logger, so test loggers don't pile handlers (and open
+    files) onto later tests."""
+    import logging.handlers
+    for handler in list(logger.logger.handlers):
+        if handler is logger._ring or handler is logger._errors:
+            logger.logger.removeHandler(handler)
+            handler.close()
+        elif (isinstance(handler, logging.handlers.RotatingFileHandler)
+                and getattr(handler, "baseFilename", None)
+                == logger.log_path):
+            logger.logger.removeHandler(handler)
+            handler.close()
+
+
+class DebugLogLayerTests(unittest.TestCase):
+    """F5 (GUIFX audit task list, Build 6, 2026-11-13): the BNB
+    debug log layer (U12) — rotating timestamped logs, a last-200
+    ring buffer, traceback capture, and a scrubbed report. These
+    tests exercise the vendored forge.debug_log module directly,
+    each against its own temp dir and its own logger name so no
+    test shares state with another."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self._loggers = []
+
+    def tearDown(self):
+        for logger in self._loggers:
+            _close_debug_logger(logger)
+        self.temp.cleanup()
+
+    def _make_logger(self, name, **kwargs):
+        mod = _debug_log_module()
+        log_dir = str(self.root / name)
+        logger = mod.DebugLogger(name, "2.5", log_dir=log_dir, **kwargs)
+        self._loggers.append(logger)
+        return logger
+
+    def _flush(self, logger):
+        for handler in list(logger.logger.handlers):
+            handler.flush()
+
+    def test_rotation_bounds_the_log_files(self):
+        logger = self._make_logger("f6-rotation", max_bytes=200,
+                                   backup_count=2)
+        for i in range(60):
+            logger.info("rotation probe line %02d - padding text here",
+                        i)
+        self._flush(logger)
+        files = sorted((self.root / "f6-rotation").glob("f6-rotation.log*"))
+        self.assertLessEqual(len(files), 3)
+        total = sum(f.stat().st_size for f in files)
+        self.assertLessEqual(total, 1000)
+
+    def test_ring_buffer_holds_the_last_200(self):
+        logger = self._make_logger("f6-ring")
+        for i in range(1, 251):
+            logger.action("step %03d" % i)
+        records = list(logger._ring.records)
+        self.assertEqual(len(records), 200)
+        self.assertTrue(records[0].endswith("step 051"))
+        self.assertTrue(records[99].endswith("step 150"))
+        self.assertTrue(records[-1].endswith("step 250"))
+
+    def test_planted_traceback_lands_in_the_report(self):
+        logger = self._make_logger("f6-traceback")
+        try:
+            raise ValueError("f6-planted-boom")
+        except ValueError:
+            logger.exception("f6 caught it")
+        report = logger.build_report()
+        self.assertIn("Traceback", report)
+        self.assertIn("ValueError: f6-planted-boom", report)
+        self.assertIn("f6 caught it", report)
+
+    def test_fake_secret_scrubbed_from_log_tail(self):
+        logger = self._make_logger("f6-scrub-tail")
+        logger.info("connecting with api_key=FAKE-KEY-7f3a9c2e1b")
+        self._flush(logger)
+        report = logger.build_report()
+        self.assertNotIn("FAKE-KEY-7f3a9c2e1b", report)
+        self.assertIn("[REDACTED]", report)
+        raw = (self.root / "f6-scrub-tail" / "f6-scrub-tail.log"
+               ).read_text(encoding="utf-8")
+        self.assertNotIn("FAKE-KEY-7f3a9c2e1b", raw)
+
+    def test_fake_secret_in_setting_scrubbed(self):
+        logger = self._make_logger("f6-scrub-setting")
+        logger.set_setting("groq_api_key", "FAKE-GROQ-9d8e7f6a5b")
+        logger.set_setting("model", "qwen3:2b")
+        report = logger.build_report()
+        self.assertNotIn("FAKE-GROQ-9d8e7f6a5b", report)
+        self.assertIn("groq_api_key", report)
+        self.assertIn("[REDACTED]", report)
+        self.assertIn("qwen3:2b", report)
+
+    def test_report_carries_versions_and_settings(self):
+        logger = self._make_logger("code-forge")
+        logger.register_dependency("PySide6")
+        logger.set_setting("model", "qwen3:2b")
+        logger.info("f6 report probe line")
+        report = logger.build_report()
+        self.assertIn("code-forge", report)
+        self.assertIn("2.5", report)
+        self.assertIn("Python:", report)
+        self.assertIn("PySide6:", report)
+        self.assertIn("== Settings ==", report)
+        self.assertIn("qwen3:2b", report)
+        self.assertIn("== Log tail", report)
+
+
+class DebugReportButtonTests(unittest.TestCase):
+    """F5 (GUIFX audit task list, Build 6, 2026-11-13): the Debug
+    report button in the Maintenance window (U12) — one button,
+    one file, and a label showing where the file went. The window
+    under test carries a temp-dir DebugLogger; the no-logger case
+    is covered too."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        mod = _debug_log_module()
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        cls.logger = mod.DebugLogger(
+            "code-forge", "2.5", log_dir=str(cls.root))
+        cls.win = ForgeWindow(debug_logger=cls.logger)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+        _close_debug_logger(cls.logger)
+        cls.temp.cleanup()
+
+    def _maintenance_window(self, owner=None):
+        from forge.main import MaintenanceWindow
+        return MaintenanceWindow(owner or self.win)
+
+    def test_button_writes_the_report_file(self):
+        self.win.log("f6 button probe line")
+        mw = self._maintenance_window()
+        mw.debug_report_btn.click()
+        self.app.processEvents()
+        label = mw.debug_report_label.text()
+        self.assertTrue(label.startswith("Report written: "),
+                        label)
+        path = Path(label[len("Report written: "):].strip())
+        self.assertTrue(path.is_file())
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("== Log tail", text)
+        self.assertIn("Python:", text)
+        self.assertIn("== Settings ==", text)
+        self.assertIn("f6 button probe line", text)
+        mw.close()
+
+    def test_button_without_logger_says_unavailable(self):
+        from forge.main import ForgeWindow
+        win2 = ForgeWindow()
+        try:
+            mw = self._maintenance_window(owner=win2)
+            mw.debug_report_btn.click()
+            self.app.processEvents()
+            self.assertEqual(
+                mw.debug_report_label.text(),
+                "Debug logging is not available in this session.")
+            mw.close()
+        finally:
+            win2.close()
+
+    def test_log_lines_flow_into_the_ring_buffer(self):
+        marker = "f6-ring-marker-4d2a9c"
+        self.win.log(marker)
+        records = list(self.logger._ring.records)
+        self.assertTrue(any(marker in record for record in records),
+                        records[-3:] if records else records)
+
+    def test_settings_sync_scrubs_secrets(self):
+        self.win.settings["fake_provider_key"] = "FAKE-PROV-1a2b3c4d"
+        try:
+            mw = self._maintenance_window()
+            mw.debug_report_btn.click()
+            self.app.processEvents()
+            label = mw.debug_report_label.text()
+            path = Path(label[len("Report written: "):].strip())
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("FAKE-PROV-1a2b3c4d", text)
+            self.assertIn("fake_provider_key", text)
+            self.assertIn("[REDACTED]", text)
+            mw.close()
+        finally:
+            self.win.settings.pop("fake_provider_key", None)
+
+
 class DeckAppLayoutTests(unittest.TestCase):
     """DECKAPP revamp (2026-11-09): the deck page became an app —
     fixed header, one screen at a time, bottom tab bar — by moving
@@ -18136,14 +19424,16 @@ class DeckTokenTests(unittest.TestCase):
         # more error ones (empty batch, unasserted independence,
         # refused fan-out, failed request), and (Fix F6)
         # the proposal decision: one more OK and two more error
-        # (refused decision, failed request). The invariant is
+        # (refused decision, failed request), and (F20) the
+        # abandon two-tap arm: one more OK assignment (the armed
+        # message). The invariant is
         # U1's: every status color on the page is either the
         # deck's OK token value or the desktop's error red.
         import re
         ok_color = self.main.TOKENS["text_amber_light"]
         assignments = re.findall(r"msg\.style\.color = '([^']+)'",
                                  self.page)
-        self.assertEqual(assignments.count(ok_color), 9)
+        self.assertEqual(assignments.count(ok_color), 10)
         self.assertEqual(assignments.count("#e5534b"), 19)
         self.assertEqual(set(assignments), {ok_color, "#e5534b"})
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-15 — How to Use, safety confirmations, no auto-select, single instance, debug report
+
+- The Menu now has a "How to use Code Forge" index: 11 sections, each indexed by the task you want to do, in its own window.
+- Restoring a snapshot or checkpoint now asks first, and the answer defaults to No. Abandoning a plan asks first too, and the phone deck asks twice (tap to arm, tap again to confirm).
+- Lists stop jumping to the first row on their own: the Run file list, the Inbox lists, and the Converter targets list keep no selection until you pick one. Switching projects keeps your place, and the Inbox says plainly when nothing needs attention.
+- Starting Code Forge a second time now brings the running window forward instead of opening a second copy.
+- The Maintenance window has a "Debug report" button: it writes a scrubbed report (log tail, versions, settings) and shows where it went. Nothing secret leaves the machine in it.
+- Full test suite: 2,945 tests. Three known items, none a regression: two ParallelTurns timing failures that pass on their own when the machine is quiet, one pre-existing FFmpeg probe failure (its premise is stale), and one deck port race that passes on its own.
+
 ## 2026-11-14 — Context fixes, deck touch targets, and window memory
 
 - Homework now stops reading when the context window is nearly full and drafts from what it has read, instead of running past the window for an hour.

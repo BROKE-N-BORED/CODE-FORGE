@@ -14,6 +14,7 @@ import base64
 import copy
 import difflib
 import filecmp
+import getpass
 import hashlib
 import json
 import math
@@ -22,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -29,7 +31,8 @@ from datetime import datetime
 from pathlib import Path
 from string import Template
 
-from PySide6.QtCore import Qt, QByteArray, QEvent, QObject, QRectF, QStringListModel, QSettings, QThread, QTime, QTimer, Signal
+from PySide6.QtCore import Qt, QByteArray, QEvent, QLockFile, QObject, QRectF, QStandardPaths, QStringListModel, QSettings, QThread, QTime, QTimer, Signal
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QCompleter, QDialog, QDialogButtonBox,
     QInputDialog, QListWidget, QListWidgetItem,
@@ -69,6 +72,7 @@ from . import notes as notes_mod
 from . import runwindow as run_mod
 from . import runfiles as runfiles_mod
 from . import debugger as debugger_mod
+from . import debug_log as debug_log_mod
 from . import gitpanel as gitpanel_mod
 from . import artifacts as artifacts_mod
 from . import knowledge as knowledge_mod
@@ -2382,7 +2386,8 @@ class CustomizeDialog(QDialog):
             self, "House project skills/plugins globally",
             f"Move {len(self._local_items)} extension(s) out of the project folder and "
             "into the Forge's own skills/plugins folders?\n\nThey become available in "
-            "every project. Items whose name already exists globally are skipped.")
+            "every project. Items whose name already exists globally are skipped.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
         # Sweep R70: a housing failure used to propagate out of the
@@ -4993,7 +4998,8 @@ class SnapshotsDialog(QDialog):
             "snapshot's. First, the Forge saves a safety snapshot of "
             "how things are right now, so you can undo this restore "
             "from this same list.\n\n"
-            "Files git is ignoring (like .venv) are never touched.")
+            "Files git is ignoring (like .venv) are never touched.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
         try:
@@ -5138,7 +5144,8 @@ class CheckpointsDialog(QDialog):
             "checkpoint of how things are right now, so you can undo "
             "this restore from this same list.\n\n"
             "Ignored files (like .venv) are never touched, and the "
-            "project's own git history is not affected.")
+            "project's own git history is not affected.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
         try:
@@ -6025,6 +6032,31 @@ class _WatchGateAsker:
         self.answer = bool(ok)
 
 
+class NoPreselectListWidget(QListWidget):
+    """A list that never picks a row by itself (F16/F18/F19, U6).
+
+    QListWidget auto-selects row 0 when it receives keyboard focus
+    with no current row — probed 2026-11-14: show + focus-in takes
+    currentRow from -1 to 0 with no click and no keypress, and it
+    happens synchronously inside focusInEvent. Removing
+    setCurrentRow(0) alone does NOT fix the pre-selection: opening
+    the window would still arm Run / Approve merge / Convert on a
+    file the owner never picked, the moment focus lands on the
+    list. This override undoes exactly the focus-in auto-select.
+    A row the owner picked survives: a click selects after the
+    focus-in clear, an arrow key selects from -1, and an explicit
+    setCurrentRow is kept because focus-in only auto-selects when
+    there is no current row (had >= 0 keeps it). Only the three
+    action-arming lists use this class — the detail-pane lists
+    keep their explicit row-0 selection."""
+
+    def focusInEvent(self, event):
+        had = self.currentRow()
+        super().focusInEvent(event)
+        if had < 0:
+            self.setCurrentRow(-1)
+
+
 class RunWindow(QWidget):
     """Item #50: the run surface is PER-PROJECT, and it LOADS — it
     does not launch. The owner's design, in his words: working
@@ -6090,7 +6122,7 @@ class RunWindow(QWidget):
         self.run_title = self.header.title_label
         self.run_status = self.header.status_label
         lay.addWidget(self.header)
-        self.run_file_list = QListWidget()
+        self.run_file_list = NoPreselectListWidget()
         self.run_file_list.setObjectName("run_file_list")
         self.run_file_list.setToolTip(
             "What's runnable in this project — loaded automatically. "
@@ -6292,10 +6324,12 @@ class RunWindow(QWidget):
 
     def refresh(self):
         """(Re)scan the active project: retitle for it, reload the
-        file list, auto-select the first runnable. Selection only —
-        refreshing NEVER starts a run (item #50: load is not run).
-        A live run is left entirely alone; only the list and the
-        title move, so a project switch mid-run cannot disturb it."""
+        file list. Selection only — refreshing NEVER starts a run
+        (item #50: load is not run), and it never picks a file for
+        the owner either (F16/U6: Run stays disabled until he
+        picks). A live run is left entirely alone; only the list
+        and the title move, so a project switch mid-run cannot
+        disturb it."""
         owner = self._owner
         if owner is None:
             return
@@ -6311,8 +6345,9 @@ class RunWindow(QWidget):
         empty = not self._entries
         self.run_empty_label.setVisible(empty)
         self.run_file_list.setVisible(not empty)
-        if self._entries:
-            self.run_file_list.setCurrentRow(0)
+        # F16 (U6): no pre-selection — the list stays unselected
+        # until the owner picks; _sync_run_enabled keeps Run
+        # disabled until then.
         self._sync_run_enabled()
         self.refresh_git()
 
@@ -10555,7 +10590,7 @@ class PlanWindow(QWidget):
             "Abandon the plan — it ends here, the record says "
             "abandoned, and no resume picks it back up")
         self.plan_abandon_btn.clicked.connect(
-            lambda: owner.abandon_plan())
+            lambda: owner._confirm_abandon_plan())
         self.header.slot_layout.addWidget(self.plan_abandon_btn)
         # Mode-room upgrade (2026-11-10): the gate becomes the
         # first tab of this window so filed plans get a room of
@@ -12922,6 +12957,23 @@ class MaintenanceWindow(QWidget):
         self.install_update_btn.clicked.connect(self.install_candidate)
         update_lay.addWidget(self.install_update_btn)
         self.tabs.addTab(update_page, "Update")
+        # F5 (U12): the Debug report button lives at the window
+        # level, under the tabs — it reports on the whole app, not
+        # on a maintenance candidate. The label beside it shows
+        # where the last report went, so the file is findable.
+        debug_row = QHBoxLayout()
+        self.debug_report_btn = QPushButton("Debug report…")
+        self.debug_report_btn.setToolTip(
+            "Write a debug report file: log tail, versions, "
+            "settings, with secrets scrubbed out, and show where "
+            "it went.")
+        self.debug_report_btn.clicked.connect(self._write_debug_report)
+        debug_row.addWidget(self.debug_report_btn)
+        self.debug_report_label = QLabel("No report written yet.")
+        self.debug_report_label.setObjectName("muted")
+        self.debug_report_label.setWordWrap(True)
+        debug_row.addWidget(self.debug_report_label, 1)
+        lay.addLayout(debug_row)
         self.refresh_models()
         self.refresh_transcript()
         self.refresh_changes()
@@ -12933,6 +12985,32 @@ class MaintenanceWindow(QWidget):
         if active:
             return Path(active)
         return self_maint_mod.worktree_dir(APP_DIR)
+
+    def _write_debug_report(self):
+        """F5 (U12): write the debug report and show where it went.
+        Settings are synced first so the report carries live state.
+        A missing logger (or a failed write) is reported in the
+        label, never a crash."""
+        logger = getattr(self._owner, "debug_logger", None)
+        if logger is None:
+            self.debug_report_label.setText(
+                "Debug logging is not available in this session.")
+            return
+        try:
+            self._owner._sync_debug_settings()
+        except Exception:
+            pass
+        try:
+            path = logger.generate_report()
+        except Exception as exc:
+            self.debug_report_label.setText(
+                "Could not write the report: %s" % exc)
+            return
+        self.debug_report_label.setText("Report written: %s" % path)
+        try:
+            self._owner.log("Debug report written → %s" % path)
+        except Exception:
+            pass
 
     def refresh_models(self):
         current = self.model_combo.currentText()
@@ -14133,13 +14211,24 @@ class InboxWindow(QWidget):
             "touched).")
         blurb.setObjectName("muted"); blurb.setWordWrap(True)
         lay.addWidget(blurb)
+        # F25 (U29): the all-clear — shown when every group is
+        # empty, hidden otherwise; refresh() is the single source
+        # of truth for its visibility. (The task list worded this
+        # with an em-dash; U33 forbids em-dashes in visible UI
+        # text, so it reads as two short sentences.)
+        self._all_clear_label = QLabel(
+            "Nothing needs attention. New items appear here.")
+        self._all_clear_label.setObjectName("muted")
+        self._all_clear_label.setWordWrap(True)
+        self._all_clear_label.setVisible(False)
+        lay.addWidget(self._all_clear_label)
         self._lists = {}
         self._group_items = {}
         for group in inbox_mod.GROUPS:
             head = QLabel(inbox_mod.GROUP_TITLES[group])
             head.setObjectName("section")
             lay.addWidget(head)
-            lst = QListWidget()
+            lst = NoPreselectListWidget()
             lst.currentRowChanged.connect(
                 lambda _row, g=group: self._on_select(g))
             lst.itemDoubleClicked.connect(lambda _i: self._go_to())
@@ -14240,8 +14329,13 @@ class InboxWindow(QWidget):
                 break
         if target is not None:
             self._lists[target[0]].setCurrentRow(target[1])
-        elif groups.get("working"):
-            self._lists["working"].setCurrentRow(0)
+        # F18 (U6): no row-0 fallback — the previous selection is
+        # restored when it survives, but nothing is ever picked for
+        # the owner; _sync_buttons keeps every action disabled
+        # until he picks.
+        # F25 (U29): the all-clear shows exactly when every group
+        # is empty.
+        self._all_clear_label.setVisible(not any(groups.values()))
         self._sync_buttons()
 
     def _on_select(self, group):
@@ -14253,6 +14347,19 @@ class InboxWindow(QWidget):
             for other, other_lst in self._lists.items():
                 if other != group:
                     other_lst.setCurrentRow(-1)
+        elif self._selected_key is not None:
+            # The list's selection was cleared (the focus-in
+            # override, a refresh, or the item going away): if the
+            # remembered key belonged to THIS group, the selection
+            # is genuinely gone and the key must go with it — or
+            # _selected() keeps returning the item from the stale
+            # key and the buttons stay armed with no row picked
+            # (F18). A key from another group is untouched: picking
+            # in one list clears the others, and that must not
+            # drop the pick.
+            if any(it.get("key") == self._selected_key
+                   for it in items):
+                self._selected_key = None
         self._sync_buttons()
 
     def _selected(self):
@@ -15549,7 +15656,7 @@ class ConverterWindow(QWidget):
         row.addWidget(self.path_label, 1)
         lay.addLayout(row)
         lay.addWidget(QLabel("Convert to"))
-        self.targets_list = QListWidget()
+        self.targets_list = NoPreselectListWidget()
         self.targets_list.currentRowChanged.connect(self._sync_convert_btn)
         lay.addWidget(self.targets_list, 1)
         self.hint_label = QLabel("")
@@ -15593,7 +15700,9 @@ class ConverterWindow(QWidget):
             item.setData(Qt.UserRole, target["ext"])
             self.targets_list.addItem(item)
         if targets:
-            self.targets_list.setCurrentRow(0)
+            # F19 (U6): no pre-selection — the format choice is
+            # the owner's; _sync_convert_btn keeps Convert
+            # disabled until he picks.
             self.hint_label.setText("")
         else:
             self.hint_label.setText(
@@ -15805,6 +15914,269 @@ def _install_geometry_memory(widget, settings=None):
     widget.installEventFilter(_GeometryMemoryFilter(widget, settings))
 
 
+# F2 (GUIFX audit task list, Build 2, 2026-11-13): the How to
+# Use index (U22): every section written from the ACTUAL UI,
+# each entry naming the real button or menu path. Sources of
+# truth: the palette catalog (base_catalog() titles) + the menu
+# structure in ForgeWindow._build_menu. No em-dashes anywhere
+# in this content (U33): F8's sweep counts them, and new text
+# must not grow its baseline.
+HOW_TO_USE_SECTIONS = [
+    ("Start here",
+     "Code Forge is a local coding agent: it runs on this PC, "
+     "with models installed here, and nothing you type leaves "
+     "the machine unless you pick a cloud model.\n\n"
+     "The bench is the main window. The sidebar on the left "
+     "holds your projects and your chat history. The chat in "
+     "the middle is where the agent works. The composer at the "
+     "bottom is where you type: write what you want, press "
+     "Send, or press Enter.\n\n"
+     "The Menu button at the top left holds everything else: "
+     "settings, Customize, snapshots, the phone deck, and "
+     "every window. Customize lives in the Menu. The View "
+     "button beside it lists every window in one place.\n\n"
+     "Lost? Press Ctrl+K and type what you want to do. The "
+     "palette finds it."),
+    ("Start a chat",
+     "Menu, then New conversation, starts a fresh chat. Your "
+     "past chats are in the sidebar under History: click one "
+     "to reopen it.\n\n"
+     "Fork conversation (Menu) branches the current chat from "
+     "here, so you can try a different direction without "
+     "losing the original.\n\n"
+     "Export chat (Menu) saves the current conversation as a "
+     "file you can keep or share."),
+    ("Pick a model",
+     "The model dropdown sits in the header, beside the IN RAM "
+     "label. It lists the models installed on this PC. Pick "
+     "one and it runs your next turn.\n\n"
+     "Menu, then Models window, shows every model Forge can "
+     "pick: its size, whether it fits this PC's RAM at your "
+     "context setting, and where it came from. Cloud models "
+     "carry no fit badge.\n\n"
+     "To add a model, use the Models window: type an Ollama "
+     "tag and press Pull, and Forge pulls it through the Run "
+     "window, so you watch it download like any other run."),
+    ("Pick a mode",
+     "The mode dropdown sits in the header, beside the model "
+     "dropdown. It sets what the agent is allowed to do.\n\n"
+     "Code builds and changes files. Plan reads and writes "
+     "the plan, and never builds. Design makes mockups and "
+     "prototypes, no program logic. Architect reads and "
+     "writes Markdown docs. Review critiques only, and may "
+     "write the report. Ask is read-only. Write is the "
+     "document workshop: read, write, copy, and edit any file "
+     "in the project, no commands. Research runs gated deep "
+     "research: a plan you approve, then budgeted browsing, "
+     "with reports filed under .forge/research/.\n\n"
+     "Picking a mode opens that mode's own room, a window "
+     "beside the bench where the mode's work collects. Plan "
+     "opens the Plan window, the gate where plans wait for "
+     "your say-so."),
+    ("Approve a tool call",
+     "When the agent drafts a plan, the Plan window opens on "
+     "its own with the plan waiting at the gate. Approve runs "
+     "it. Edit lets you change it first. Deny stops it. Kill "
+     "ends the draft.\n\n"
+     "Abandon ends a plan that is already running, for good: "
+     "nothing can resume an abandoned plan. The Abandon "
+     "button is in the Plan window.\n\n"
+     "While a turn runs, the Run window shows what it is "
+     "doing, and the Activity log panel shows each step as it "
+     "happens."),
+    ("Restore a snapshot",
+     "Menu, then Snapshots, shows the git restore points for "
+     "the current project. Take one before a risky change; "
+     "restore one to put the project's files back the way "
+     "they were.\n\n"
+     "Menu, then Checkpoints, shows shadow restore points "
+     "kept outside the project, one per write step or per "
+     "turn, for any project. They survive even if the project "
+     "folder is gone.\n\n"
+     "Restoring replaces the project's files. Forge asks "
+     "first."),
+    ("Open the deck",
+     "Menu, then Phone deck, turns the deck on or off. The "
+     "deck is a page on your local network: open it on your "
+     "phone to watch the agent, approve from your phone, and "
+     "send prompts.\n\n"
+     "Menu, then Deck QR code, shows the QR code and the "
+     "link. The link carries a token, and the token is shown "
+     "only here, so keep the QR to yourself.\n\n"
+     "The deck shows the same plan gate and the same "
+     "approvals as the bench."),
+    ("Find anything fast",
+     "Press Ctrl+K anywhere in Forge to open the command "
+     "palette. Type a few letters of what you want: a window, "
+     "an action, a model, a project, a mode.\n\n"
+     "Press Enter to run the top match, or click a row. Press "
+     "Esc to close the palette without doing anything.\n\n"
+     "The palette learns: the entries you use most rise "
+     "within their group."),
+    ("Keyboard shortcuts",
+     "Ctrl+Shift+A - Activity log panel\n"
+     "Ctrl+Shift+R - Receipts panel\n"
+     "Ctrl+Shift+P - Plan window\n"
+     "Ctrl+Shift+B - Run window\n"
+     "Ctrl+Shift+U - UI builder\n"
+     "Ctrl+Shift+S - Snapshots\n"
+     "Ctrl+K - Command palette\n"
+     "Ctrl+B - Show or hide the sidebar\n\n"
+     "These shortcuts work from the main window. This list is "
+     "the only place they are written down."),
+    ("Every window",
+     "Every room in Forge, and what it does. Open any of them "
+     "from the View button, the Menu, or the palette (Ctrl+K).\n\n"
+     "The mode rooms open when you pick a mode. Code room: "
+     "everything Code mode does this session, plus a Changes "
+     "tab of walkthroughs. Design room: design artifacts by "
+     "kind: layout, UI, flow, mechanics, aesthetic, systems. "
+     "Architect room: architecture notes, decisions, specs. "
+     "Review room: findings by severity, with the fix each "
+     "one suggests. Ask room: read-only answers, cited from "
+     "the code. Write room: the document workshop, one "
+     "persistent document beside the chat. Research room: "
+     "research plans and reports, with sources.\n\n"
+     "Activity panel - the live log of what the agent is "
+     "doing, step by step.\n"
+     "Receipts panel - a receipt for each finished step: what "
+     "changed and how it was verified.\n"
+     "Plan window - the plan gate: the agent's draft plan "
+     "waits here for Approve, Edit, Deny, or Kill.\n"
+     "Run window - run the project's files and shell "
+     "commands. Output streams here, and Stop ends a run.\n"
+     "Testing window - watch the project's tests run live, "
+     "with the session's run history.\n"
+     "Debug window - run a Python file under the debugger: "
+     "breakpoints, step, inspect.\n"
+     "Artifacts window - plans, designs, reviews, and "
+     "walkthroughs as first-class records.\n"
+     "Converter window - convert documents, images, data, "
+     "and (through ffmpeg) audio and video.\n"
+     "Sessions window - every open chat in one list: state, "
+     "model, project, last activity.\n"
+     "Privacy window - what never leaves this PC, what can, "
+     "where your data lives, and how to delete it.\n"
+     "Session notes window - the current conversation's "
+     "notes file: Forge's durable memory of plans, steps, "
+     "and folds.\n"
+     "What the AI sees window - exactly what the next request "
+     "sends the model: system prompt, folded summary, session "
+     "notes, and the turns, in order.\n"
+     "Models window - every model Forge can pick: size, RAM "
+     "fit at your context setting, and where it came from.\n"
+     "Mission control - every running turn across "
+     "conversations: what is running, what is parked at a "
+     "gate, what finished.\n"
+     "Proposals window - proposals waiting on a decision: "
+     "tester failures and fix proposals.\n"
+     "Inbox - what needs attention, what is running, what is "
+     "ready to merge, across every project.\n"
+     "Templates shelf - start a new project from a template "
+     "that ships with Code Forge.\n"
+     "Provider chat - talk with a hosted model (Groq, "
+     "Gemini, or EXAONE) alongside the bench, while the local "
+     "agent keeps working.\n"
+     "Turn timeline - this conversation's completed turns: "
+     "time, generations, and estimated tokens per turn.\n"
+     "Design canvas - the project's code-linked design "
+     "board: frames that reference files, note cards, and "
+     "variants with lineage.\n"
+     "UI builder - lay out a window visually: live preview "
+     "plus exportable PySide6 code.\n"
+     "Forge maintenance - the cloud self-maintenance room: "
+     "hosted models repair Forge itself in a guarded work "
+     "copy. You approve any install.\n"
+     "Forge Bench - fifteen fixed, test-scored tasks against "
+     "any installed model. The seat race, settled with "
+     "numbers.\n"
+     "Checkpoints - shadow restore points kept outside the "
+     "project, per write step or per turn, for any project.\n"
+     "Recipes - parameterized prompt files from the recipes "
+     "folder. Run one with fresh values.\n"
+     "New skill - the skill editor: write a new skill for "
+     "Forge.\n"
+     "New plugin - the plugin editor: write a new plugin for "
+     "Forge."),
+    # === MENU SECTION (F2): F11 (menu trim) updates ONLY this
+    # block when the menu is trimmed. The index describes the
+    # menu as it stands; a stale index is worse than none. ===
+    ("The Menu",
+     "The Menu button sits at the top left of the bench. It "
+     "holds everything that is not a window of its own. As it "
+     "stands:\n\n"
+     "Chat: New conversation, Fork conversation, Export chat.\n\n"
+     "Settings and tools: How to use Code Forge, Agent "
+     "settings, Customize (skills, plugins, connectors), "
+     "Scheduled runs, Phone deck, Donate / Support Code "
+     "Forge, Deck QR code, Rescan skills and plugins, UI "
+     "builder, Snapshots, Checkpoints, Forge Bench, Recipes, "
+     "Update and restart, Forge maintenance.\n\n"
+     "Panels and windows: Receipts panel, Activity log panel, "
+     "Approve Design Shell job, Plan window, Run window, "
+     "Debug window, Artifacts window, Converter window, "
+     "Sessions window, Privacy window, Session notes window, "
+     "What the AI sees window, Models window, Mission "
+     "control, Inbox, Templates, Testing window, Provider "
+     "chat, Turn timeline, Design canvas.\n\n"
+     "The View button beside the Menu lists the same windows "
+     "again, in one directory."),
+    # === END MENU SECTION ===
+]
+
+
+class HowToUseWindow(QWidget):
+    """F2 (GUIFX audit task list, Build 2, 2026-11-13): the How
+    to Use index (U22): its own closable QWidget window that
+    stays open beside the bench, following the Dataset Scout
+    precedent (menu entry + indexed sections, reopens after
+    close). Left: the index of sections, in plain words, one
+    per task. Right: the section's text, written from the
+    actual UI. Static content: no refresh, no timer, no new
+    settings. Born on the G4 header standard."""
+
+    def __init__(self, owner):
+        super().__init__(owner, Qt.Window)
+        self._owner = owner
+        self.sections = HOW_TO_USE_SECTIONS
+        self.resize(880, 560)
+        self.setMinimumSize(640, 440)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        self.setWindowTitle("How to Use - Code Forge")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
+        self.header = build_window_header(self, self.windowTitle())
+        lay.addWidget(self.header)
+        body = QHBoxLayout(); body.setSpacing(8)
+        self.index_list = QListWidget()
+        for title, _body in self.sections:
+            self.index_list.addItem(title)
+        self.index_list.setMaximumWidth(220)
+        self.index_list.currentRowChanged.connect(self._show_section)
+        body.addWidget(self.index_list)
+        self.text = QTextBrowser()
+        body.addWidget(self.text, 1)
+        lay.addLayout(body, 1)
+        row = QHBoxLayout()
+        row.addStretch()
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        row.addWidget(self.close_btn)
+        lay.addLayout(row)
+        self.index_list.setCurrentRow(0)
+
+    def _show_section(self, row):
+        """Show the section at this index row. A row of -1 (no
+        selection) leaves the text as it is."""
+        if 0 <= row < len(self.sections):
+            self.text.setPlainText(self.sections[row][1])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.index_list.currentRow() < 0:
+            self.index_list.setCurrentRow(0)
+
+
 class ForgeWindow(QMainWindow):
     gauge_ready = Signal(dict)
     resident_ready = Signal(object)
@@ -15813,12 +16185,18 @@ class ForgeWindow(QMainWindow):
     # is loadable in this same session.
     extension_created = Signal(str)
 
-    def __init__(self, geometry_settings=None):
+    def __init__(self, geometry_settings=None, debug_logger=None):
         # Audit B21: startup timing starts at the very top of
         # construction; the app_start record below reports it as
         # startup_ms so a slow launch is measurable, not a feeling.
         _startup_t0 = time.time()
         super().__init__()
+        # F5 (U12): the debug log layer — a DebugLogger handed in by
+        # main(), or None (tests, and a failed logger creation). The
+        # logger is injected, never built here, so constructing a
+        # window never writes a log file by itself; log() forwards
+        # to it only when one is present.
+        self.debug_logger = debug_logger
         self.setWindowTitle(f"CODE FORGE v{APP_VERSION} — Linux Forge Agent")
         # F1 (U5): the bench remembers its geometry. The settings
         # object is injectable so tests can point at a scratch
@@ -17714,6 +18092,10 @@ class ForgeWindow(QMainWindow):
         # hidden like the other rooms; opened from the menus /
         # palette.
         self.design_canvas_win = DesignCanvasWindow(self)
+        # F2 (GUIFX audit task list, Build 2): the How to Use
+        # index room: static content, created hidden like the
+        # other rooms; opened from the Menu.
+        self.howto_win = HowToUseWindow(self)
         # Skill/plugin editor windows (window rule, 2026-11-09):
         # one room per item being created/edited, opened from
         # Customize's New…/Edit… buttons. Edit windows are kept per
@@ -17990,6 +18372,8 @@ class ForgeWindow(QMainWindow):
         self.act_fork = menu.addAction("⑂   Fork conversation…", self.fork_conversation)
         self.act_export_chat = menu.addAction("📤   Export chat…", self.export_current_chat)
         menu.addSeparator()
+        self.act_howto = menu.addAction("❓   How to use Code Forge…", self.open_how_to_use)
+        self.act_howto.setToolTip("How to use Code Forge: every window, every shortcut, indexed by task")
         self.act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
         self.act_customize = menu.addAction("⚒   Customize — skills · plugins · connectors", self.open_customize)
         self.act_schedule = menu.addAction("⏰   Scheduled runs…", self.open_schedule)
@@ -18684,6 +19068,19 @@ class ForgeWindow(QMainWindow):
         if win is None:
             return
         win.refresh()
+        if not win.isVisible():
+            win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def open_how_to_use(self):
+        """F2: the How to Use room: single instance, raised on
+        re-open. Static content, so no refresh to run. Close
+        hides it (no WA_DeleteOnClose), so opening again after
+        a close shows the same room."""
+        win = getattr(self, "howto_win", None)
+        if win is None:
+            return
         if not win.isVisible():
             win.show()
         win.raise_()
@@ -20142,7 +20539,7 @@ class ForgeWindow(QMainWindow):
             "dock_receipts": lambda: self.set_dock_open(
                 "receipts", not self._dock_open.get("receipts", True)),
             "plan_window": self.open_plan_window,
-            "abandon_plan": self.abandon_plan,
+            "abandon_plan": self._confirm_abandon_plan,
             "run_window": self.open_run_window,
             "test_now": self.test_now,
             "debug_window": self.open_debug_window,
@@ -20243,6 +20640,14 @@ class ForgeWindow(QMainWindow):
     def log(self, message):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
         self._log_lines.append(line)
+        # F5 (U12): the activity log is the app's choke point — every
+        # line flows into the debug logger's ring buffer + rotating
+        # file, so a report carries what actually happened. The
+        # logger scrubs secrets itself; the raw message goes in (the
+        # logger adds its own timestamp).
+        _debug_logger = getattr(self, "debug_logger", None)
+        if _debug_logger is not None:
+            _debug_logger.info(message)
         if len(self._log_lines) > 400:
             # Audit B16: the stored history used to grow for the life
             # of the process (and the deck sync shipped from the whole
@@ -20251,6 +20656,26 @@ class ForgeWindow(QMainWindow):
             del self._log_lines[:-400]
         if not self.log_filter.text() or self.log_filter.text().lower() in line.lower():
             self.activity.appendPlainText(line)
+
+    def _sync_debug_settings(self):
+        """F5 (U12): push live state into the debug logger so a
+        report's Settings section shows what the app is doing NOW,
+        not what it was doing at startup. Called once at startup
+        (from main()) and again before every report is written.
+        The logger scrubs every value at report time, so provider
+        keys and tokens in the settings dict come out redacted."""
+        logger = getattr(self, "debug_logger", None)
+        if logger is None:
+            return
+        for key, value in (self.settings or {}).items():
+            logger.set_setting(key, value)
+        # Live state the settings dict doesn't carry.
+        try:
+            logger.set_setting(
+                "model", self.model_combo.currentText().strip())
+        except Exception:
+            pass
+        logger.set_setting("workspace", str(getattr(self, "workspace", "")))
 
     def _apply_log_filter(self, text):
         self.activity.setPlainText("\n".join(
@@ -20374,6 +20799,15 @@ class ForgeWindow(QMainWindow):
 
     # ---------- projects ----------
     def refresh_projects(self):
+        # F24 (U28): the rebuild destroys every project button, so
+        # a focused button's focus would land nowhere. Remember the
+        # focused button's project path (carried on the button as
+        # a property) and hand focus back to the new button for
+        # that path after the rebuild. A path that no longer exists
+        # restores nothing — same as before.
+        focused = self.focusWidget()
+        focused_path = (focused.property("projectPath")
+                        if focused is not None else None)
         while self.project_list.count():
             item = self.project_list.takeAt(0)
             if item.widget():
@@ -20384,6 +20818,7 @@ class ForgeWindow(QMainWindow):
             name = entry.get("name", Path(path).name)
             marker = "▣  " if path == self.workspace else "▢  "
             btn = QPushButton(marker + name)
+            btn.setProperty("projectPath", path)
             btn.setObjectName("navActive" if path == self.workspace else "nav")
             # ProjectElision: the tooltip carries the full name
             # first — the path stays, below it (nothing removed) —
@@ -20393,6 +20828,26 @@ class ForgeWindow(QMainWindow):
             self.project_list.addWidget(btn)
             self._project_buttons.append((btn, marker, name))
         self._elide_project_names()
+        if focused_path is not None:
+            # Deferred, not immediate: the new buttons are not
+            # visible yet (the layout activates on the next loop
+            # turn), and setFocus on a not-yet-visible widget in
+            # an INACTIVE window is silently dropped — probed
+            # 2026-11-14: the request never lands, not even when
+            # the window activates later. A 0 ms singleShot runs
+            # after the layout pass, when the button is visible,
+            # and setFocus on a visible button records whether
+            # the window is active or not. The path (not the
+            # button) is captured, so a second refresh before the
+            # timer fires still lands on the current button for
+            # that path; the window is the timer's context, so a
+            # teardown before the fire cancels it.
+            def _restore_focus(path=focused_path):
+                for btn, _marker, _name in self._project_buttons:
+                    if btn.property("projectPath") == path:
+                        btn.setFocus()
+                        break
+            QTimer.singleShot(0, self, _restore_focus)
         self.workspace_label.setText("PROJECT ROOT\n" + self.workspace)
 
     def _elide_project_names(self):
@@ -20867,7 +21322,7 @@ class ForgeWindow(QMainWindow):
                         '<b style="color:#eae6df;font-size:15px;">The bench is clear.</b><br>'
                         'Ask for code, a fix, an explanation — or use <b style="color:#eae6df;">＋ Attach</b> to hand the agent a file.<br>'
                         'Tools ask your approval first. Approvals have no clock on them.<br>'
-                        'Skills, plugins and connectors live under <b style="color:#eae6df;">Customize</b> on the right.</div>')
+                        'Skills, plugins and connectors live under <b style="color:#eae6df;">Customize</b> in the Menu.</div>')
         html.append('</div>')
         # Scroll discipline (owner report, 2026-11-08: "the chat
         # window never lets me scroll up"): a repaint follows the
@@ -21807,6 +22262,26 @@ class ForgeWindow(QMainWindow):
             plan["status"] = "interrupted"
             self._plan_render()
             self._plan_persist()
+
+    def _confirm_abandon_plan(self):
+        """F20: the desktop confirm for abandoning a running plan —
+        the PlanWindow button and the palette entry call this, never
+        abandon_plan directly. Abandon is irreversible (the worker's
+        restore refuses abandoned plans outright, so nothing
+        re-arms it), so the question defaults to No. The deck does
+        NOT come through here: its /plan round trip calls
+        abandon_plan on the GUI thread, and a desktop modal there
+        would hang the phone request until someone clicks on the
+        PC — the deck gets its own two-tap arm in JS instead."""
+        answer = QMessageBox.question(
+            self, "Abandon plan",
+            "Abandon the running plan? It ends here, the record says "
+            "abandoned, and no resume picks it back up. "
+            "This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False, "Plan kept — nothing abandoned."
+        return self.abandon_plan()
 
     def abandon_plan(self):
         """Remainder R2: the owner abandons the live plan — an
@@ -27076,11 +27551,187 @@ class ForgeWindow(QMainWindow):
         event.accept()
 
 
+# ---------------------------------------------------------------------------
+# Single instance (F4, U27): a second Forge must never launch — two
+# copies would both write the same SQLite store and both drive
+# Ollama. The guard is a QLockFile (tryLock(0) — the timeout
+# argument is required, bare tryLock() raises TypeError in this
+# PySide6 build) plus a QLocalServer so the second launch can ask
+# the running Forge to raise its window before exiting. The lock
+# file and the server name live in the platform temp dir and
+# carry the username, so they are per-user and per-machine — never
+# in the project dir or the install dir. CODE_FORGE_SINGLE_INSTANCE
+# overrides the instance key outright: it is the test seam (the
+# two-process tests run under a unique key per run so they never
+# fight the owner's real Forge or each other); production never
+# sets it. The CLI (forge.cli) never imports this module, so it
+# is outside the gate by construction — review commands still run
+# while the GUI is up.
+# ---------------------------------------------------------------------------
+
+_SINGLE_INSTANCE_ENV = "CODE_FORGE_SINGLE_INSTANCE"
+_SINGLE_INSTANCE_PREFIX = "code-forge-single-instance"
+
+
+def _single_instance_key():
+    """The instance key: the lock filename stem and the local
+    server name. The env override is the test seam; otherwise
+    the key carries the username so two users on one machine
+    each get their own Forge."""
+    override = os.environ.get(_SINGLE_INSTANCE_ENV, "").strip()
+    if override:
+        safe = "".join(ch if ch.isalnum() or ch in "_-." else "-"
+                       for ch in override)
+        return safe or _SINGLE_INSTANCE_PREFIX
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "user"
+    return "%s-%s" % (_SINGLE_INSTANCE_PREFIX, user)
+
+
+def _single_instance_lock_path(key=None):
+    """The lock file path for an instance key (default: this
+    process's key). Temp dir, never the project or install dir."""
+    if key is None:
+        key = _single_instance_key()
+    base = QStandardPaths.writableLocation(QStandardPaths.TempLocation)
+    if not base:
+        base = tempfile.gettempdir()
+    return os.path.join(base, key + ".lock")
+
+
+def _notify_running_instance(server_name, timeout_ms=1000):
+    """Ask the running Forge to raise its window. Returns True
+    when the message reached a listening server."""
+    sock = QLocalSocket()
+    try:
+        sock.connectToServer(server_name)
+        if not sock.waitForConnected(timeout_ms):
+            return False
+        sock.write(b"raise")
+        sock.waitForBytesWritten(timeout_ms)
+        sock.disconnectFromServer()
+        return True
+    except Exception:
+        return False
+
+
+class _SingleInstanceGuard(QObject):
+    """Holds the lock + server for the process's life. Keep one
+    alive in _SINGLE_INSTANCE_GUARD — a local that gets
+    garbage-collected would drop the lock and close the server.
+    try_acquire() returns True for the primary instance (the one
+    that holds the lock); False means another Forge is already
+    running and the caller should notify + exit, never build a
+    window. A stale lock (owner killed, e.g. kill -9) is taken
+    over by QLockFile itself — tryLock succeeds once the owning
+    process is gone."""
+
+    def __init__(self, key=None, lock_path=None, parent=None):
+        super().__init__(parent)
+        self.key = key or _single_instance_key()
+        self.server_name = self.key
+        if lock_path is None:
+            lock_path = _single_instance_lock_path(self.key)
+        self.lock_path = lock_path
+        self._lock = QLockFile(lock_path)
+        self._server = None
+        self._raise_callback = None
+
+    def try_acquire(self):
+        if not self._lock.tryLock(0):
+            return False
+        # A crashed run leaves its socket behind — clear it
+        # before listening, or listen() fails on the stale name.
+        QLocalServer.removeServer(self.server_name)
+        self._server = QLocalServer(self)
+        self._server.newConnection.connect(self._on_connection)
+        if not self._server.listen(self.server_name):
+            # Primary anyway (the lock is held); second launches
+            # just can't raise this window — say so and carry on.
+            print("Code Forge: single-instance server could not "
+                  "listen — a second launch will exit without "
+                  "raising this window.")
+        return True
+
+    def release(self):
+        """Give the lock back (tests only — production holds it
+        for the process's life)."""
+        if self._server is not None:
+            self._server.close()
+            QLocalServer.removeServer(self.server_name)
+            self._server = None
+        self._lock.unlock()
+
+    def set_raise_callback(self, callback):
+        """What runs when a second launch asks to be seen — set
+        once the main window exists."""
+        self._raise_callback = callback
+
+    def _on_connection(self):
+        if self._server is None:
+            return
+        sock = self._server.nextPendingConnection()
+        if sock is not None:
+            sock.disconnectFromServer()
+            sock.deleteLater()
+        if self._raise_callback is not None:
+            self._raise_callback()
+
+
+def _raise_main_window(window):
+    """The second-launch answer: bring the running Forge forward."""
+    print("Another Code Forge launch was requested — raising "
+          "this window.", flush=True)
+    window.raise_()
+    window.activateWindow()
+
+
+# The guard lives here, not in a local — it must outlive main()'s
+# frame for the whole process, or the lock drops with it.
+_SINGLE_INSTANCE_GUARD = None
+
+
 def main():
+    global _SINGLE_INSTANCE_GUARD
     app = QApplication(sys.argv)
     app.setApplicationName("Code Forge v2")
     app.setStyleSheet(STYLE)
-    window = ForgeWindow()
+    # F4: one Forge at a time. A second launch signals the
+    # running one and exits BEFORE any window, store, or model
+    # is touched.
+    guard = _SingleInstanceGuard()
+    if not guard.try_acquire():
+        _notify_running_instance(guard.server_name)
+        print("Code Forge is already running — raising the open "
+              "window.", flush=True)
+        return
+    _SINGLE_INSTANCE_GUARD = guard
+    # F5 (U12): the debug log layer — one DebugLogger for the
+    # process, writing to the per-user app data dir (never the
+    # install dir). Logging must never break the app: if the
+    # logger can't be created, the app runs without one and the
+    # Maintenance window's Debug report button says so.
+    debug_logger = None
+    try:
+        debug_logger = debug_log_mod.DebugLogger(
+            "code-forge", APP_VERSION, log_dir=str(APP_DIR / "logs"))
+    except OSError:
+        debug_logger = None
+    window = ForgeWindow(debug_logger=debug_logger)
+    if debug_logger is not None:
+        # The Ollama check reads the live setting at report time,
+        # so a changed URL is reflected without a restart.
+        debug_logger.register_service(
+            "ollama", lambda: debug_log_mod.check_ollama(
+                window.settings.get("ollama_url",
+                                    "http://127.0.0.1:11434")))
+        debug_logger.register_dependency("PySide6")
+        window._sync_debug_settings()
+        debug_logger.install_crash_handler()
+        debug_logger.info("Code Forge %s started", APP_VERSION)
+    guard.set_raise_callback(lambda: _raise_main_window(window))
     window.show()
     # Owner request, 2026-11-10: the welcome / donate screen is
     # there at startup, on top of the ready bench — closing it
