@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from string import Template
 
-from PySide6.QtCore import Qt, QByteArray, QEvent, QLockFile, QObject, QRectF, QStandardPaths, QStringListModel, QSettings, QThread, QTime, QTimer, Signal
+from PySide6.QtCore import Qt, QByteArray, QEvent, QEasingCurve, QLockFile, QObject, QPoint, QPropertyAnimation, QRect, QRectF, QStandardPaths, QStringListModel, QSettings, QThread, QTime, QTimer, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QCompleter, QDialog, QDialogButtonBox,
@@ -52,7 +52,7 @@ except Exception:
           "widgets will show as placeholder boxes.", file=sys.stderr)
     QSvgRenderer = None
 
-from . import governor, hooks as hooks_mod, permissions as perm_mod, macros as macros_mod, projects as proj, repomap, scheduler as sched, update as upd, voice as voice_mod, watch as watch_mod
+from . import governor, hooks as hooks_mod, permissions as perm_mod, macros as macros_mod, projects as proj, procscan as procscan_mod, repomap, scheduler as sched, update as upd, voice as voice_mod, watch as watch_mod
 from . import create_ext as create_mod
 from . import qr as qr_mod
 from . import mentions as mentions_mod
@@ -606,30 +606,40 @@ class BrandSparkWidget(QLabel):
 
     A QLabel subclass, deliberately: the old spark WAS a QLabel holding
     this pixmap, and QLabel's pixmap placement is what puts the spark
-    at exactly the right spot in the brand row (a 15x15 QWidget in the
-    same layout sits 1 px higher — QLabel rounds the 6.5 px centering
-    up, the layout rounds it down). Subclassing keeps the pixmap, its
-    placement, the sizeHint, and the layout behavior identical by
-    construction — the only thing added is the pulse. The pulse is two
+    at exactly the right spot in the brand row (a plain QWidget in the
+    same layout sits 1 px higher: QLabel rounds the half-pixel
+    centering up, the layout rounds it down). The widget is fixed at
+    40x32 so the halo has room to spill past the 15x15 pixmap: at the
+    old 15 px width Qt clipped all painting to the widget rect and the
+    halo barely showed past the pixmap edge, so the breath was nearly
+    invisible on a real screen. The pixmap itself is unchanged and
+    stays centered in the wider widget. The pulse is two
     radial-gradient light layers: a warm amber halo drawn UNDER the
-    pixmap, so it shows only through the pixmap's transparent cells
-    (light spilling out from between the pixels), and a hot core drawn
-    OVER it that brightens the center cell as each breath peaks. Both
-    layers' alpha follows _breathing_intensity, driven by a 50 ms timer
-    that repaints only this widget — nothing else in the window is
-    touched. Independent of EmberWidget: a breath doesn't stop
-    at rest. (The stylesheet background is painted by the framework
-    before paintEvent runs, so the halo goes on top of it as drawn.)
+    pixmap, spilling out around it, and a hot core drawn OVER it that
+    brightens the center cell as each breath peaks. Both layers' alpha
+    follows _breathing_intensity, driven by a 50 ms timer that
+    repaints only this widget. Nothing else in the window is touched.
+    Independent of EmberWidget: a breath doesn't stop at rest. (The
+    stylesheet background is painted by the framework before
+    paintEvent runs, so the halo goes on top of it as drawn.)
     """
 
     PERIOD = 4.0      # seconds per breath cycle (~2 s in, ~2 s out)
-    INTERVAL = 50     # ms between ticks (20 fps on a 15x28 widget)
+    INTERVAL = 50     # ms between ticks (20 fps on a 40x32 widget)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("brandSpark")
         self._pixmap = _brand_spark_pixmap()
         self.setPixmap(self._pixmap)
+        # Fixed 40x32: the halo needs room to spill past the 15x15
+        # pixmap, and Qt clips all painting to the widget rect, so
+        # at the old 15 px width the breath was nearly invisible.
+        # AlignCenter puts the pixmap in the middle: QLabel's
+        # default alignment is left, which would pin it to the
+        # widget's edge and leave the glow lopsided.
+        self.setAlignment(Qt.AlignCenter)
+        self.setFixedSize(40, 32)
         self._started = time.monotonic()
         self._intensity = _breathing_intensity(0.0)
         self._timer = QTimer(self)
@@ -647,24 +657,26 @@ class BrandSparkWidget(QLabel):
 
     def paintEvent(self, event):
         # The glow is centered on the middle PIXEL of the widget, not
-        # its geometric center: for the 28 px tall label the geometric
-        # center y=14.0 falls exactly on a pixel-row boundary, so rows
+        # its geometric center: for the 32 px tall label the geometric
+        # center y=16.0 falls exactly on a pixel-row boundary, so rows
         # above sample half a pixel closer than rows below and the halo
-        # comes out visibly stronger on top (measured: +10 red at the
-        # top gap vs the bottom gap). floor(h/2)+0.5 is the center of
-        # the middle pixel row — the same row QLabel centers the pixmap
-        # on (its pixmap top is row 7, center row 14).
+        # comes out visibly stronger on top (measured on the old 28 px
+        # label: +10 red at the top gap vs the bottom gap). floor(h/2)
+        # + 0.5 is the center of the middle pixel row, the same row
+        # QLabel centers the pixmap on (its pixmap top is row 9,
+        # center row 16).
         cx = self.width() // 2 + 0.5
         cy = self.height() // 2 + 0.5
         p = QPainter(self)
         # Halo: warm amber light spilling out from inside the spark.
-        # Radius 10 (past the pixmap edge) with a gentle falloff, so
-        # the light is still visible in the transparent cells near the
-        # edge; a radius-7.5 gradient would fade to nothing exactly
-        # where the gaps are.
-        halo = QRadialGradient(cx, cy, 10.0)
-        halo.setColorAt(0.0, QColor(255, 201, 46, int(110 * self._intensity)))
-        halo.setColorAt(0.55, QColor(255, 201, 46, int(55 * self._intensity)))
+        # Radius 18, past the pixmap edge on every side (the widget
+        # is 40x32, so the halo fits with room to spill), with a
+        # gentle falloff: bright at the center, half at the midpoint,
+        # gone at the edge. At the breath peak the glow reads clearly
+        # 8 to 12 px out from the spark; at the floor it nearly dies.
+        halo = QRadialGradient(cx, cy, 18.0)
+        halo.setColorAt(0.0, QColor(255, 201, 46, int(160 * self._intensity)))
+        halo.setColorAt(0.5, QColor(255, 201, 46, int(80 * self._intensity)))
         halo.setColorAt(1.0, QColor(255, 201, 46, 0))
         p.fillRect(self.rect(), halo)
         p.end()
@@ -674,8 +686,8 @@ class BrandSparkWidget(QLabel):
         # not the core's own #fff0a8 — an overlay in the core's own color
         # would be invisible; white lifts it toward a hot glow.
         p = QPainter(self)
-        core = QRadialGradient(cx, cy, 4.5)
-        core.setColorAt(0.0, QColor(255, 255, 255, int(120 * self._intensity)))
+        core = QRadialGradient(cx, cy, 6.0)
+        core.setColorAt(0.0, QColor(255, 255, 255, int(140 * self._intensity)))
         core.setColorAt(1.0, QColor(255, 255, 255, 0))
         p.fillRect(self.rect(), core)
         p.end()
@@ -1404,8 +1416,10 @@ class ApprovalDialog(QDialog):
         lay.addWidget(body)
         row = QHBoxLayout()
         deny = QPushButton("Deny")
+        _install_press_dip(deny)
         deny.clicked.connect(self.reject)
         approve = QPushButton("Approve once")
+        _install_press_dip(approve)
         approve.setObjectName("primary")
         approve.clicked.connect(self._approve)
         row.addStretch(); row.addWidget(deny)
@@ -1420,6 +1434,7 @@ class ApprovalDialog(QDialog):
             row.addWidget(self.sensitive_note)
         elif show_remember:
             remember_btn = QPushButton("Approve && remember")
+            _install_press_dip(remember_btn)
             if tool_name == "run_command":
                 # H2: the copy says what is actually remembered now —
                 # this exact command, in this project only.
@@ -3724,6 +3739,36 @@ class ModelsThread(QThread):
             self.failed.emit(str(exc))
 
 
+class StartupUnloadThread(QThread):
+    """Clean slate (2026-11-15): Forge opens with no local model
+    in RAM. Ollama holds models from earlier sessions until their
+    keep_alive expires, so startup unloads every resident one on
+    this thread (ps() then the unload idiom per model) and
+    reports the names it freed. Silent by shape: Ollama down, or
+    nothing resident, is an empty list, never an error, and the
+    window's first paint never waits on it. Provider models are
+    cloud, so there is never anything local of theirs to unload."""
+
+    done = Signal(object)
+
+    def __init__(self, client):
+        super().__init__()
+        self.client = client
+
+    def run(self):
+        try:
+            resident = self.client.ps()
+            names = [m.get("name") for m in resident
+                     if isinstance(m, dict) and m.get("name")]
+            unloaded = []
+            for name in names:
+                if self.client.unload_model(name):
+                    unloaded.append(name)
+            self.done.emit(unloaded)
+        except Exception:
+            self.done.emit([])
+
+
 class SummarizeThread(QThread):
     """Note 14 #3: ONE summary generation on the session model with
     tools off, run off the UI thread — a 2B model summarizing a long
@@ -5803,7 +5848,7 @@ class PaletteDialog(QDialog):
         if query.strip() and not self._shown:
             self._no_match_label.setText(
                 f"No match for \"{query.strip()}\". Try a shorter "
-                "word, or find the action in the Menu.")
+                "word, or find the action in the Menu or View.")
             self._no_match_label.show()
         else:
             self._no_match_label.hide()
@@ -7282,6 +7327,7 @@ class ModeWindow(QWidget):
         self.composer_status.setWordWrap(True)
         composer_row.addWidget(self.composer_status, 1)
         self.composer_send_btn = QPushButton("Send")
+        _install_press_dip(self.composer_send_btn)
         self.composer_send_btn.setToolTip(
             f"Run a {self.label} turn with what's typed above: "
             "it runs on the bench, in this mode")
@@ -9810,6 +9856,7 @@ class ResearchWindow(ModeWindow):
         glay.addWidget(self.gate_steps_list)
         gate_row = QHBoxLayout()
         self.gate_approve_btn = QPushButton("✓ Approve · start the research")
+        _install_press_dip(self.gate_approve_btn)
         self.gate_approve_btn.setObjectName("primary")
         self.gate_approve_btn.clicked.connect(
             lambda: self._gate_action("approve"))
@@ -10671,6 +10718,7 @@ class PlanWindow(QWidget):
         self.header = build_window_header(self, self.windowTitle())
         lay.addWidget(self.header)
         self.plan_approve_btn = QPushButton("✓ Approve")
+        _install_press_dip(self.plan_approve_btn)
         self.plan_approve_btn.setObjectName("primary")
         self.plan_approve_btn.setToolTip("Approve the plan. The agent works the steps in order")
         self.plan_approve_btn.clicked.connect(lambda: owner._plan_gate_action("approve"))
@@ -11008,6 +11056,7 @@ class ArtifactsWindow(QWidget):
         lay.addWidget(self.knowledge_drafts_list)
         knowledge_row = QHBoxLayout()
         self.knowledge_approve_btn = QPushButton("✔ Approve")
+        _install_press_dip(self.knowledge_approve_btn)
         self.knowledge_approve_btn.setToolTip(
             "Approve the selected draft: it becomes project "
             "knowledge and its summary joins the project brief")
@@ -11047,6 +11096,7 @@ class ArtifactsWindow(QWidget):
         lay.addWidget(self.guidelines_list)
         guidelines_row = QHBoxLayout()
         self.guidelines_approve_btn = QPushButton("✔ Approve")
+        _install_press_dip(self.guidelines_approve_btn)
         self.guidelines_approve_btn.setToolTip(
             "Approve this guideline file. Its rules join Review "
             "and Plan turns for this project.")
@@ -13016,6 +13066,7 @@ class MaintenanceWindow(QWidget):
         chat_lay.addWidget(self.input)
         send_row = QHBoxLayout()
         self.send_btn = QPushButton("Send")
+        _install_press_dip(self.send_btn)
         self.send_btn.setObjectName("primary")
         self.send_btn.clicked.connect(self.send)
         send_row.addWidget(self.send_btn)
@@ -16038,13 +16089,195 @@ def _install_geometry_memory(widget, settings=None):
     widget.installEventFilter(_GeometryMemoryFilter(widget, settings))
 
 
+# F12 + F14 (GUIFX audit task list, Build 12, 2026-11-15):
+# motion that answers the user's hand. Both mechanisms are
+# one-shot, user-triggered QPropertyAnimations with zero idle
+# cost: no timer runs at rest, no animation object lives past
+# its finish, and neither mechanism touches the action it
+# decorates. First QPropertyAnimation use in the tree (Round 2
+# audit: zero QPropertyAnimation/QEasingCurve before this).
+_MORPH_DURATION_MS = 275
+_MORPH_MAX_MS = 400
+_PRESS_DIP_MS = 150
+_PRESS_DIP_DY = 2
+
+
+class _MorphInterruptFilter(QObject):
+    """Stops a morph the moment the user grabs the window: while
+    the animation runs, every geometry change the animation makes
+    matches its current interpolated value within a pixel; a
+    change that does not match came from outside (a drag), so the
+    animation stops and the window stays where the user put it.
+    The comparison is against the value CLAMPED to the window's
+    size floor (see _clamped_rect): Qt clamps setGeometry to the
+    minimum size, so an unclamped comparison would read the
+    clamp as a grab and stop the morph on its first tick
+    (probed 2026-11-15 — the design room's 93x40 start rect
+    landed at its 367x332 minimumSizeHint and false-stopped).
+    Probed 2026-11-15 (f12-verify/probe_interrupt.py): offscreen
+    AND xcb deliver Move synchronously during animation ticks,
+    and the only mismatch in a full run was the simulated grab
+    itself."""
+
+    def __init__(self, anim):
+        super().__init__(anim.targetObject())
+        self._anim = anim
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Move, QEvent.Resize):
+            anim = self._anim
+            if anim is not None and anim.state() == QPropertyAnimation.Running:
+                cur = anim.currentValue()
+                g = obj.geometry()
+                expected = _clamped_rect(obj, cur) if cur is not None else None
+                if (expected is None or abs(g.x() - expected.x()) > 1
+                        or abs(g.y() - expected.y()) > 1
+                        or abs(g.width() - expected.width()) > 1
+                        or abs(g.height() - expected.height()) > 1):
+                    anim.stop()
+        return super().eventFilter(obj, event)
+
+
+def _clamped_rect(widget, rect):
+    """The rect Qt's setGeometry would actually land on: the size
+    clamped to the window's effective minimum and maximum.
+    Qt's floor rule, probed 2026-11-15
+    (f12-verify/probe_min_size_floor.py): per dimension, the
+    explicit minimumSize wins when set (> 0), else the
+    minimumSizeHint — a (400, 0) explicit minimum floors at
+    (400, hint height). Position passes through untouched."""
+    explicit = widget.minimumSize()
+    hint = widget.minimumSizeHint()
+    min_w = explicit.width() if explicit.width() > 0 else hint.width()
+    min_h = explicit.height() if explicit.height() > 0 else hint.height()
+    max_size = widget.maximumSize()
+    w = max(min_w, min(rect.width(), max_size.width()))
+    h = max(min_h, min(rect.height(), max_size.height()))
+    return QRect(rect.x(), rect.y(), w, h)
+
+
+def _morph_cleanup(window, anim, guard):
+    """Run when a morph animation reaches the Stopped state
+    (finished naturally or stopped by a grab): drop the guard
+    filter and clear the window's morph reference, so nothing
+    of the animation lives past its finish."""
+    if anim.state() != QPropertyAnimation.Stopped:
+        return
+    try:
+        window.removeEventFilter(guard)
+    except Exception:
+        pass
+    guard.deleteLater()
+    anim.deleteLater()
+    if getattr(window, "_morph_anim", None) is anim:
+        window._morph_anim = None
+
+
+def _morph_show(window, start_rect, duration_ms=_MORPH_DURATION_MS):
+    """Show a window by morphing it from start_rect to its target
+    geometry — the geometry it already has (F1 restored it at
+    construction, so no show is needed to learn it). One-shot,
+    user-triggered; nothing runs at rest. Returns the animation,
+    or None when the morph could not run, in which case the
+    window is shown instantly instead (today's behavior). The
+    animation's start value is read back after the window is
+    placed at start_rect: Qt clamps setGeometry to the window's
+    minimum size, so the start the window actually occupies —
+    combo position, minimum size — is the honest start."""
+    target = QRect(window.geometry())
+    if start_rect is None or start_rect.isNull() or target.isNull():
+        window.show()
+        return None
+    old = getattr(window, "_morph_anim", None)
+    if old is not None:
+        try:
+            old.stop()
+        except Exception:
+            pass
+        window._morph_anim = None
+    window.show()
+    window.setGeometry(start_rect)
+    start = QRect(window.geometry())
+    anim = QPropertyAnimation(window, b"geometry", window)
+    anim.setDuration(duration_ms)
+    anim.setStartValue(start)
+    anim.setEndValue(target)
+    anim.setEasingCurve(QEasingCurve.OutCubic)
+    guard = _MorphInterruptFilter(anim)
+    window.installEventFilter(guard)
+    anim.stateChanged.connect(
+        lambda: _morph_cleanup(window, anim, guard))
+    window._morph_anim = anim
+    anim.start()
+    return anim
+
+
+def _dip_cleanup(button, anim):
+    """Run when a dip animation reaches the Stopped state
+    (finished naturally or stopped by a re-press): drop the
+    animation so nothing of it lives past its finish. The
+    origin is NOT cleared here — a re-press restarts from the
+    stored origin, and only the finished handler clears it."""
+    if anim.state() != QPropertyAnimation.Stopped:
+        return
+    anim.deleteLater()
+    if getattr(button, "_press_dip_anim", None) is anim:
+        button._press_dip_anim = None
+
+
+def _install_press_dip(button):
+    """F14: give a button the press dip — a 150 ms geometry dip
+    (y +2 px, height -2 px, OutBack easing) triggered by the
+    press, restoring after. Purely visual: the animation never
+    touches the button's action, enabled state, or checked
+    state. The animation is created per press and deleted when
+    it stops, so nothing runs — or lives — at rest. A re-press
+    mid-dip stops the in-flight dip and restarts from the
+    stored origin, never from the dipped geometry."""
+    if button is None:
+        return
+    button._press_dip_anim = None
+    button._press_dip_origin = None
+
+    def _start():
+        old = getattr(button, "_press_dip_anim", None)
+        if old is not None and old.state() == QPropertyAnimation.Running:
+            old.stop()
+        elif getattr(button, "_press_dip_origin", None) is None:
+            button._press_dip_origin = QRect(button.geometry())
+        origin = button._press_dip_origin
+        if origin is None or origin.isNull():
+            return
+        anim = QPropertyAnimation(button, b"geometry", button)
+        anim.setDuration(_PRESS_DIP_MS)
+        anim.setEasingCurve(QEasingCurve.OutBack)
+        dipped = QRect(origin.x(), origin.y() + _PRESS_DIP_DY,
+                       origin.width(),
+                       max(1, origin.height() - _PRESS_DIP_DY))
+        anim.setStartValue(QRect(origin))
+        anim.setEndValue(dipped)
+        anim.finished.connect(lambda: _finish(anim))
+        anim.stateChanged.connect(
+            lambda: _dip_cleanup(button, anim))
+        button._press_dip_anim = anim
+        anim.start()
+
+    def _finish(anim):
+        origin = getattr(button, "_press_dip_origin", None)
+        if origin is not None and not origin.isNull():
+            button.setGeometry(origin)
+        button._press_dip_origin = None
+
+    button.pressed.connect(_start)
+
+
 # F2 (GUIFX audit task list, Build 2, 2026-11-13): the How to
 # Use index (U22): every section written from the ACTUAL UI,
 # each entry naming the real button or menu path. Sources of
 # truth: the palette catalog (base_catalog() titles) + the menu
-# structure in ForgeWindow._build_menu. No em-dashes anywhere
-# in this content (U33): F8's sweep counts them, and new text
-# must not grow its baseline.
+# structure in ForgeWindow._build_menu and _build_view_menu.
+# No em-dashes anywhere in this content (U33): F8's sweep
+# counts them, and new text must not grow its baseline.
 HOW_TO_USE_SECTIONS = [
     ("Start here",
      "Code Forge is a local coding agent: it runs on this PC, "
@@ -16055,10 +16288,11 @@ HOW_TO_USE_SECTIONS = [
      "the middle is where the agent works. The composer at the "
      "bottom is where you type: write what you want, press "
      "Send, or press Enter.\n\n"
-     "The Menu button at the top left holds everything else: "
-     "settings, Customize, snapshots, the phone deck, and "
-     "every window. Customize lives in the Menu. The View "
-     "button beside it lists every window in one place.\n\n"
+     "The Menu button at the top left holds the rest: your "
+     "chats, the phone deck, scheduled runs, and Forge "
+     "maintenance. Customize lives in View. The View button "
+     "beside it lists every window in one place: settings, "
+     "Customize, snapshots, and every window.\n\n"
      "Lost? Press Ctrl+K and type what you want to do. The "
      "palette finds it."),
     ("Start a chat",
@@ -16074,7 +16308,7 @@ HOW_TO_USE_SECTIONS = [
      "The model dropdown sits in the header, beside the IN RAM "
      "label. It lists the models installed on this PC. Pick "
      "one and it runs your next turn.\n\n"
-     "Menu, then Models window, shows every model Forge can "
+     "View, then Models window, shows every model Forge can "
      "pick: its size, whether it fits this PC's RAM at your "
      "context setting, and where it came from. Cloud models "
      "carry no fit badge.\n\n"
@@ -16109,11 +16343,11 @@ HOW_TO_USE_SECTIONS = [
      "doing, and the Activity log panel shows each step as it "
      "happens."),
     ("Restore a snapshot",
-     "Menu, then Snapshots, shows the git restore points for "
+     "View, then Snapshots, shows the git restore points for "
      "the current project. Take one before a risky change; "
      "restore one to put the project's files back the way "
      "they were.\n\n"
-     "Menu, then Checkpoints, shows shadow restore points "
+     "View, then Checkpoints, shows shadow restore points "
      "kept outside the project, one per write step or per "
      "turn, for any project. They survive even if the project "
      "folder is gone.\n\n"
@@ -16150,7 +16384,8 @@ HOW_TO_USE_SECTIONS = [
      "the only place they are written down."),
     ("Every window",
      "Every room in Forge, and what it does. Open any of them "
-     "from the View button, the Menu, or the palette (Ctrl+K).\n\n"
+     "from the View button or the palette (Ctrl+K). Forge "
+     "maintenance opens from the Menu.\n\n"
      "The mode rooms open when you pick a mode. Code room: "
      "everything Code mode does this session, plus a Changes "
      "tab of walkthroughs. Design room: design artifacts by "
@@ -16230,21 +16465,15 @@ HOW_TO_USE_SECTIONS = [
      "holds everything that is not a window of its own. As it "
      "stands:\n\n"
      "Chat: New conversation, Fork conversation, Export chat.\n\n"
-     "Settings and tools: How to use Code Forge, Agent "
-     "settings, Customize (skills, plugins, connectors), "
-     "Scheduled runs, Phone deck, Donate / Support Code "
-     "Forge, Deck QR code, Rescan skills and plugins, UI "
-     "builder, Snapshots, Checkpoints, Forge Bench, Recipes, "
-     "Update and restart, Forge maintenance.\n\n"
-     "Panels and windows: Receipts panel, Activity log panel, "
-     "Approve Design Shell job, Plan window, Run window, "
-     "Debug window, Artifacts window, Converter window, "
-     "Sessions window, Privacy window, Session notes window, "
-     "What the AI sees window, Models window, Mission "
-     "control, Inbox, Templates, Testing window, Provider "
-     "chat, Turn timeline, Design canvas.\n\n"
-     "The View button beside the Menu lists the same windows "
-     "again, in one directory."),
+     "Settings and tools: How to use Code Forge, Scheduled "
+     "runs, Phone deck, Donate / Support Code Forge, Deck QR "
+     "code, Rescan skills and plugins, Update and restart, "
+     "Forge maintenance.\n\n"
+     "Also here: Approve Design Shell job, when a design job "
+     "is waiting at the gate.\n\n"
+     "The View button beside the Menu is the one directory of "
+     "everything openable: Agent settings, Customize, and "
+     "every window."),
     # === END MENU SECTION ===
 ]
 
@@ -16299,6 +16528,85 @@ class HowToUseWindow(QWidget):
         super().showEvent(event)
         if self.index_list.currentRow() < 0:
             self.index_list.setCurrentRow(0)
+
+
+class ProcessCheckDialog(QDialog):
+    """Pre-load process check (2026-11-15): a local model is about
+    to load, and heavy programs are already using the memory it
+    needs. One window, one job: list the top few candidates with
+    checkboxes and let the owner pick which ones Forge closes
+    before the model loads. Nothing is checked by default (U6).
+    Closing the window without choosing counts as Cancel. The
+    turn does not start. A QDialog, not a ModeWindow: the mode
+    rooms are document workspaces with tabs and transcripts, and
+    this choice has to BLOCK the turn until it is answered. The
+    tree's blocking-confirmation shape is a dialog exec, the same
+    as QMessageBox.question."""
+
+    def __init__(self, parent, candidates):
+        super().__init__(parent)
+        self.setWindowTitle("Free up memory before loading the model")
+        self.setModal(True)
+        self.resize(520, 440)
+        self.setStyleSheet(f"background:{TOKENS['surface_base']};")
+        # The answer the gate reads: "kill", "continue", or
+        # "cancel". Cancel is the default, so closing the window
+        # (the X, Esc) never starts a turn by accident.
+        self.choice = "cancel"
+        self.selected_pids = []
+        shown = list(candidates)[:procscan_mod.PROC_KILL_MAX]
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14); lay.setSpacing(8)
+        intro = QLabel(
+            "A local model is about to load, and these programs "
+            "are using a lot of memory. Closing some makes room, "
+            "so the model loads faster and the PC stays usable "
+            "while it runs.")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        self._checks = []
+        for info in shown:
+            box = QCheckBox(
+                f"{info.name}  ·  PID {info.pid}  ·  "
+                f"{procscan_mod.format_bytes(info.rss_bytes)}  ·  "
+                f"{info.cpu_percent:.0f}% CPU")
+            box.setObjectName(f"proc_check_{info.pid}")
+            box.setChecked(False)
+            lay.addWidget(box)
+            self._checks.append((box, info.pid))
+        note = QLabel(
+            "Killing a program closes it at once. Anything you "
+            "have not saved in it is lost. Programs you leave "
+            "unchecked are left alone.")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch(1)
+        btn_row = QHBoxLayout()
+        self.kill_btn = QPushButton("Kill selected and continue")
+        self.kill_btn.clicked.connect(self._on_kill)
+        self.continue_btn = QPushButton("Continue without killing")
+        self.continue_btn.clicked.connect(self._on_continue)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self.kill_btn)
+        btn_row.addWidget(self.continue_btn)
+        btn_row.addWidget(self.cancel_btn)
+        lay.addLayout(btn_row)
+
+    def _on_kill(self):
+        self.selected_pids = [pid for box, pid in self._checks
+                              if box.isChecked()]
+        self.choice = "kill"
+        self.accept()
+
+    def _on_continue(self):
+        self.choice = "continue"
+        self.accept()
+
+    def _on_cancel(self):
+        self.choice = "cancel"
+        self.reject()
 
 
 class ForgeWindow(QMainWindow):
@@ -16430,6 +16738,7 @@ class ForgeWindow(QMainWindow):
         self._fold_thread = None
         self._copy_thread = None
         self._models_thread = None
+        self._startup_unload_thread = None
         self._maintenance_thread = None
         self._run_thread = None
         # C1: the Watch seat's per-run state. The window owns one
@@ -16527,6 +16836,10 @@ class ForgeWindow(QMainWindow):
         # shape is pinned by the deck tests). A prompt queued in
         # one project must not fire into another after a switch.
         self._phone_queue_ws = []
+        # Pre-load check (2026-11-15): True while a phone-deck
+        # prompt is being sent. The check skips deck turns, since
+        # the phone cannot answer a PC modal (the F20 shape).
+        self._deck_send_active = False
         # Message queue (2026-11-11): messages the owner sent while
         # a turn or fold was running, held in arrival order until
         # the bench settles. Entries are dicts {"id", "text",
@@ -16655,6 +16968,7 @@ class ForgeWindow(QMainWindow):
         proj.ensure_project(self.workspace)
         self.new_chat()
         self.refresh_models_async()
+        self._unload_resident_at_startup()
         self._gauge_timer = QTimer(self)
         self._gauge_timer.timeout.connect(self.refresh_gauges)
         self._gauge_timer.start(3000)
@@ -17837,7 +18151,10 @@ class ForgeWindow(QMainWindow):
         spark = BrandSparkWidget()
         brand_row = QWidget()
         brand_lay = QHBoxLayout(brand_row)
-        brand_lay.setContentsMargins(0, 0, 0, 0); brand_lay.setSpacing(8)
+        # Spacing 0: the spark widget is 40 wide with its pixmap
+        # centered, so the pixmap still sits about 13 px past the
+        # brand text, and the glow fills the gap between them.
+        brand_lay.setContentsMargins(0, 0, 0, 0); brand_lay.setSpacing(0)
         brand_lay.addWidget(brand); brand_lay.addWidget(spark); brand_lay.addStretch(1)
         sl.addWidget(brand_row)
         sub = QLabel("v2.5 · LOCAL AGENT"); sub.setObjectName("muted"); sl.addWidget(sub)
@@ -18548,9 +18865,12 @@ class ForgeWindow(QMainWindow):
 
     # ---------- Note 24: collapsible shell ----------
     def _build_menu(self):
-        """The hamburger MENU holds the sidebar's old button wall (the
-        diet that pays for the chat list's room) plus the dock toggles.
-        Nothing that existed as a button is lost — it lives here."""
+        """The hamburger MENU holds the sidebar's old button wall
+        (the diet that pays for the chat list's room): chats, the
+        phone deck, scheduled runs, maintenance. F11 trimmed the
+        View duplicates out of it: settings, Customize, and every
+        window live in View now, one menu over. Nothing that
+        existed as a button is lost."""
         menu = QMenu(self)
         self.act_new = menu.addAction("＋   New conversation", self.new_chat)
         self.act_fork = menu.addAction("⑂   Fork conversation…", self.fork_conversation)
@@ -18558,8 +18878,6 @@ class ForgeWindow(QMainWindow):
         menu.addSeparator()
         self.act_howto = menu.addAction("❓   How to use Code Forge…", self.open_how_to_use)
         self.act_howto.setToolTip("How to use Code Forge: every window, every shortcut, indexed by task")
-        self.act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
-        self.act_customize = menu.addAction("⚒   Customize · skills · plugins · connectors", self.open_customize)
         self.act_schedule = menu.addAction("⏰   Scheduled runs…", self.open_schedule)
         self.act_deck = menu.addAction("📱   Phone deck: OFF", self._toggle_deck)
         self.act_welcome = menu.addAction("☕   Donate / Support Code Forge…", self.show_welcome)
@@ -18567,85 +18885,17 @@ class ForgeWindow(QMainWindow):
         self.act_deck_qr = menu.addAction("📱   Deck QR code…", self._show_deck_link)
         self.act_deck.setToolTip("Serve a local-network phone page: watch the agent, approve from your "
                                  "phone, send prompts. Token in the URL. Shown only here.")
-        self.act_rescan = menu.addAction("↻   Rescan skills & plugins", self.rescan_extensions)
+        self.act_rescan = menu.addAction("↻   Rescan skills && plugins", self.rescan_extensions)
         self.act_rescan.setToolTip("Pick up skills/plugins created since launch: including ones the agent just wrote (Note 18)")
-        self.act_builder = menu.addAction("🖌   UI builder…", self.open_ui_builder)
-        self.act_builder.setToolTip("Note 13B: lay out a window visually. Live preview + exportable PySide6 code")
-        self.act_snapshots = menu.addAction("📸   Snapshots…", self.open_snapshots)
-        self.act_snapshots.setToolTip("Note 14 item 1: git restore points for the current project. Take one, roll back")
-        self.act_checkpoints = menu.addAction("🧷   Checkpoints…", self.open_checkpoints)
-        self.act_checkpoints.setToolTip("Audit D38: shadow restore points kept OUTSIDE the project. Per write step or per turn, for any project")
-        self.act_bench = menu.addAction("🏁   Forge Bench…", self.open_bench)
-        self.act_bench.setToolTip("Audit D37: fifteen fixed, test-scored tasks against any installed model. The seat race, settled with numbers")
-        self.act_recipes = menu.addAction("📋   Recipes…", self.open_recipes)
-        self.act_recipes.setToolTip("Audit D41: parameterized prompt files from the data folder's recipes/. Run one with fresh values")
-        self.act_update = menu.addAction("⬆   Update & restart…", self.apply_update)
+        self.act_update = menu.addAction("⬆   Update && restart…", self.apply_update)
         self.act_maintenance = menu.addAction("🛠   Forge maintenance…", self.open_maintenance_window)
         self.act_maintenance.setToolTip("Item #69: the dedicated cloud self-maintenance room. Groq/Gemini/EXAONE repair Forge itself in a guarded work copy; you approve any install")
-        menu.addSeparator()
-        self.act_dock_receipts = menu.addAction(
-            "🧾   Receipts panel",
-            lambda: self.set_dock_open("receipts", not self._dock_open.get("receipts", True)))
-        self.act_dock_receipts.setCheckable(True); self.act_dock_receipts.setChecked(True)
-        self.act_dock_activity = menu.addAction(
-            "📜   Activity log panel",
-            lambda: self.set_dock_open("activity", not self._dock_open.get("activity", True)))
-        self.act_dock_activity.setCheckable(True); self.act_dock_activity.setChecked(True)
         self.act_design_shell_approve = menu.addAction(
             "🎨   Approve Design Shell job", self._design_gate_approve_clicked)
         self.act_design_shell_approve.setToolTip(
             "Approve the Design Shell job waiting at the gate "
             "(enabled when a design_shell plan has been presented)")
         self.act_design_shell_approve.setEnabled(False)
-        self.act_plan_window = menu.addAction(
-            "🗂   Plan window", self.open_plan_window)
-        self.act_plan_window.setToolTip("The plan gate is its own window now, not a panel (owner directive, 2026-11-08)")
-        self.act_run_window = menu.addAction(
-            "▶   Run window", self.open_run_window)
-        self.act_debug_window = menu.addAction(
-            "🐞   Debug window", self.open_debug_window)
-        self.act_debug_window.setToolTip("Run a Python file under the debugger: breakpoints, step, inspect. The agent's debug tools drive the same session")
-        self.act_artifacts_window = menu.addAction(
-            "🧩   Artifacts window", self.open_artifacts_window)
-        self.act_converter_window = menu.addAction(
-            "🔀   Converter window", self.open_converter_window)
-        self.act_sessions_window = menu.addAction(
-            "👥   Sessions window", self.open_sessions_window)
-        self.act_sessions_window.setToolTip("G2: every open chat in one list. State, model, project, last activity; click a row to go to it")
-        self.act_privacy_window = menu.addAction(
-            "🔒   Privacy window", self.open_privacy_window)
-        self.act_privacy_window.setToolTip("H1: what never leaves this PC, what can (per chat, your choice of model), where your data lives, and how to delete it")
-        self.act_notes_window = menu.addAction(
-            "📝   Session notes window", self.open_notes_window)
-        self.act_notes_window.setToolTip("H5: the current conversation's notes file. Forge's durable memory of plans, steps and folds, yours to read and edit")
-        self.act_sees_window = menu.addAction(
-            "👁   What the AI sees window", self.open_sees_window)
-        self.act_sees_window.setToolTip("H5: exactly what the next request sends the model. System prompt, folded summary, session notes, and the turns, in order")
-        self.act_models_window = menu.addAction(
-            "🤖   Models window", self.open_models_window)
-        self.act_models_window.setToolTip("H4: every model Forge can pick. Its size, whether it fits this PC's RAM at your context setting, and where it came from; cloud models carry no fit badge")
-        self.act_mission_window = menu.addAction(
-            "🛰   Mission control", self.open_mission_control)
-        self.act_mission_window.setToolTip("Item #64: every running turn across conversations. What is running, what is parked at a gate, what finished")
-        self.act_inbox_window = menu.addAction(
-            "📥   Inbox", self.open_inbox)
-        self.act_inbox_window.setToolTip("Inbox mode: what needs attention, what's running, what's ready to merge, across every project")
-        self.act_templates_window = menu.addAction(
-            "🧰   Templates", self.open_templates_window)
-        self.act_templates_window.setToolTip("Item C4: start a new project from a template that ships with Code Forge")
-        self.act_testing_window = menu.addAction(
-            "🧪   Testing window", self.open_testing_window)
-        self.act_testing_window.setToolTip("Item C8: watch the project's tests run live. Streamed output, the runner's own tally, and the session's run history")
-        self.act_provider_chat = menu.addAction(
-            "💬   Provider chat", self.open_provider_chat)
-        self.act_provider_chat.setToolTip("Talk with a hosted model (Groq / Gemini / EXAONE) alongside the bench. Conversation only, no tools; the local agent keeps working untouched")
-        self.act_timeline_window = menu.addAction(
-            "🕰   Turn timeline", self.open_timeline)
-        self.act_timeline_window.setToolTip("Item C9: this conversation's completed turns. Time, generations and estimated tokens per turn, with its soft budget state")
-        self.act_design_canvas = menu.addAction(
-            "🎨   Design canvas", self.open_design_canvas)
-        self.act_design_canvas.setToolTip("Item C5: the project's code-linked design board. Frames that reference files, note cards, and variants with lineage; saved as .forge/design/canvas.json")
-        self.act_run_window.setToolTip("Note 13A + shell round 2: the run surface is its own window, not a panel")
         self.main_menu = menu
         self.menu_btn.setMenu(menu)
 
@@ -18653,9 +18903,10 @@ class ForgeWindow(QMainWindow):
         """Item 16: the VIEW menu — the one directory of everything
         openable: the standalone windows and dialogs first, then the
         three remaining panel toggles. Every entry calls the SAME
-        method the main menu and the palette already
-        call; the toggles' checked state is kept in sync by
-        set_dock_open, whichever door was used."""
+        method the palette already calls; the toggles' checked
+        state is kept in sync by set_dock_open, whichever door
+        was used. Since F11 trimmed the Menu's duplicates, View
+        is the only menu that carries these entries."""
         menu = QMenu(self)
         self.view_act_run = menu.addAction("▶   Run window", self.open_run_window)
         self.view_act_debug = menu.addAction("🐞   Debug window", self.open_debug_window)
@@ -18728,8 +18979,10 @@ class ForgeWindow(QMainWindow):
                "receipts": getattr(self, "receipts_dock_btn", None)}.get(name)
         if btn is not None and btn.isChecked() != open_:
             btn.blockSignals(True); btn.setChecked(open_); btn.blockSignals(False)
-        # Both menus carry the panel toggles (Menu and View) — keep
-        # every copy's check in sync, whichever door was used.
+        # The View menu carries the panel toggles (F11 trimmed the
+        # Menu's copies) — keep every copy's check in sync,
+        # whichever door was used. The Menu attribute is gone;
+        # getattr's None default covers it.
         for attr in (f"act_dock_{name}", f"view_act_dock_{name}"):
             act = getattr(self, attr, None)
             if act is not None and act.isChecked() != open_:
@@ -19077,6 +19330,24 @@ class ForgeWindow(QMainWindow):
         elif key in getattr(self, "mode_windows", {}):
             self.open_mode_window(key)
 
+    def _show_window_morphed(self, win):
+        """F12: open a window with a morph from the mode combo's
+        global rect to the window's target rect. Falls back to
+        an instant show when the combo is unavailable — the
+        window still opens, just without the morph."""
+        start = None
+        combo = getattr(self, "mode_combo", None)
+        if combo is not None:
+            try:
+                top_left = combo.mapToGlobal(QPoint(0, 0))
+                start = QRect(top_left, combo.size())
+            except Exception:
+                start = None
+        if start is None or start.isNull():
+            win.show()
+            return None
+        return _morph_show(win, start)
+
     def open_plan_window(self):
         """The plan gate's window: single instance, raised on
         re-open. Opened by the menus, the palette, Ctrl+Shift+P,
@@ -19086,7 +19357,7 @@ class ForgeWindow(QMainWindow):
             return
         win.set_project(self.workspace)
         if not win.isVisible():
-            win.show()
+            self._show_window_morphed(win)
         win.raise_()
         win.activateWindow()
 
@@ -19099,7 +19370,7 @@ class ForgeWindow(QMainWindow):
             return
         win.set_project(self.workspace)
         if not win.isVisible():
-            win.show()
+            self._show_window_morphed(win)
         win.raise_()
         win.activateWindow()
 
@@ -21552,7 +21823,7 @@ class ForgeWindow(QMainWindow):
                         '<b style="color:#eae6df;font-size:15px;">The bench is clear.</b><br>'
                         'Ask for code, a fix, an explanation, or use <b style="color:#eae6df;">＋ Attach</b> to hand the agent a file.<br>'
                         'Tools ask your approval first. Approvals have no clock on them.<br>'
-                        'Skills, plugins and connectors live under <b style="color:#eae6df;">Customize</b> in the Menu.</div>')
+                        'Skills, plugins and connectors live under <b style="color:#eae6df;">Customize</b> in View.</div>')
         html.append('</div>')
         # Scroll discipline (owner report, 2026-11-08: "the chat
         # window never lets me scroll up"): a repaint follows the
@@ -23237,7 +23508,15 @@ class ForgeWindow(QMainWindow):
                           f"the prompts ahead of it.")
         self.log("📱 Phone prompt received.")
         self.input.setPlainText(text)
-        self.send_message()
+        # The pre-load check skips deck sends (see
+        # _pre_load_process_check): the phone cannot answer a PC
+        # modal, and blocking the round trip on one would hang the
+        # phone until the owner walks to the PC (the F20 shape).
+        self._deck_send_active = True
+        try:
+            self.send_message()
+        finally:
+            self._deck_send_active = False
         # Item #71: if the send path refused (the multimodal
         # guard), the phone hears the refusal itself — the blanket
         # "Received" would be a lie about a turn that never ran.
@@ -24179,6 +24458,26 @@ class ForgeWindow(QMainWindow):
         self._models_thread = thread
         thread.start()
 
+    def _unload_resident_at_startup(self):
+        """Clean slate (2026-11-15): Forge opens with no local
+        model in RAM: anything Ollama still holds from an earlier
+        session is unloaded on a thread, so startup paint never
+        waits on it. A startup unload already in flight makes this
+        a no-op."""
+        if self._startup_unload_thread is not None and self._startup_unload_thread.isRunning():
+            return
+        thread = StartupUnloadThread(self.client)
+        thread.done.connect(self._apply_startup_unload)
+        self._startup_unload_thread = thread
+        thread.start()
+
+    def _apply_startup_unload(self, names):
+        if names:
+            self.log("Startup: unloaded "
+                     + ", ".join(short_model(n) for n in names)
+                     + " from RAM. No local model loads until a "
+                       "turn needs one.")
+
     # ---------- attachments (Note 7) ----------
     def toggle_dictation(self):
         if self._recorder and self._recorder.recording:
@@ -25004,8 +25303,91 @@ class ForgeWindow(QMainWindow):
                      f"this {mode} turn.")
         return resolved
 
+    def _pre_load_process_check(self, model):
+        """Pre-load process check (2026-11-15): before a LOCAL
+        model loads into RAM, look for heavy programs fighting it
+        for memory and let the owner close the ones he picks.
+        Returns True when the turn may proceed, False when the
+        owner cancelled the turn. Provider models skip it (nothing
+        local loads), a model already in RAM skips it (nothing new
+        loads), a phone-deck turn skips it (the phone cannot answer
+        a PC modal (the F20 shape), and a quiet system skips it
+        (no window when there is nothing worth closing)."""
+        if providers_mod.is_provider_model(model):
+            return True
+        if getattr(self, "_deck_send_active", False):
+            return True
+        # Residency is fresh from Ollama, not the gauge snapshot:
+        # a model already in RAM loads nothing, so there is nothing
+        # to make room for. Ollama down reads as not resident.
+        # The turn fails on that on its own, and the check costs
+        # nothing either way.
+        try:
+            resident = [short_model(m.get("name", ""))
+                        for m in self.client.ps()
+                        if isinstance(m, dict)]
+        except Exception:
+            resident = []
+        if short_model(model) in resident:
+            return True
+        candidates = procscan_mod.scan_heavy_processes()
+        if not candidates:
+            return True
+        choice, pids = self._ask_process_check(candidates)
+        if choice == "cancel":
+            return False
+        if choice == "kill" and pids:
+            names = {info.pid: info.name for info in candidates}
+            result = procscan_mod.kill_processes(pids)
+            if result["killed"]:
+                self.log("Closed before loading the model: "
+                         + ", ".join(names.get(pid, f"PID {pid}")
+                                     for pid in result["killed"])
+                         + ".")
+            for pid, why in result["refused"].items():
+                self.log(f"Left {names.get(pid, f'PID {pid}')} "
+                         f"alone: {why}.")
+            for pid in result["still_running"]:
+                self.log(f"{names.get(pid, f'PID {pid}')} would not "
+                         "close: left running.")
+        elif choice == "kill":
+            self.log("No programs selected: continuing without "
+                     "closing any.")
+        return True
+
+    def _ask_process_check(self, candidates):
+        """Present the pre-load window and return (choice, pids):
+        choice is "kill", "continue", or "cancel"; pids are the
+        checked ones. Offscreen (the test harness: no display, no
+        user to answer) never blocks. It logs and continues
+        without closing anything, since a modal nobody can answer
+        is a hang."""
+        if QGuiApplication.platformName() == "offscreen":
+            self.log("Pre-load check: heavy programs are running, "
+                     "but there is no screen to ask on: continuing "
+                     "without closing any.")
+            return "continue", []
+        dlg = ProcessCheckDialog(self, candidates)
+        dlg.exec()
+        return dlg.choice, dlg.selected_pids
+
     def _start_turn(self, model, options, text):
         model = self._bound_turn_model(model)
+        # Pre-load process check (2026-11-15): a local model about
+        # to load gets room made for it first. The owner picks
+        # which heavy programs to close. Cancel aborts the turn
+        # before anything loads; the request stays in the
+        # conversation, unsent, and the bench settles back to idle
+        # (the fold-cancel shape).
+        if not self._pre_load_process_check(model):
+            upd.clear_resume_state(APP_DIR)
+            self.log("Turn cancelled before the model loaded: "
+                     "nothing was sent.")
+            self._sync_send_button()
+            self.agent_state.setText("●  IDLE")
+            self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
+            self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
+            return
         # The IN RAM label: a turn starting on a model not yet
         # loaded reads "Loading…" until the gauge pass sees it in
         # RAM (2026-11-13 — the old name read as broken).

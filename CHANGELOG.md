@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-16 — Spark glow, memory check before loading, menu trim, motion, deck wrap
+
+- The brand spark now glows from the inside on its slow pulse — the halo was being clipped by the widget, so the glow never showed. Fixed: the halo spills out around the spark at the peak of each breath.
+- Before a local model loads, Code Forge unloads anything left in memory from last time, then shows which programs are using a lot of memory and lets you close some first. Provider turns skip the check entirely.
+- The Menu is trimmed from 38 entries to 12 — the duplicates that also live in View are gone, so it fits on one screen. The palette now says "Menu or View" when it points you at an action.
+- Windows glide open from the mode button (a short morph), and Send and Approve buttons dip slightly when pressed.
+- Long unbroken links and hashes on the phone deck now wrap inside their cards instead of overflowing the screen.
+- The five merge batteries are green (234 tests across them); the full suite runs after this release.
+
 ## 2026-11-16 — History search, model notes, chat follow, and dead-end guidance
 
 - History search now runs off the UI thread (150 ms debounce), so typing in the history box no longer freezes the chat. The 200-result cap shows its real count, and the history pane says plainly when there is nothing to show.

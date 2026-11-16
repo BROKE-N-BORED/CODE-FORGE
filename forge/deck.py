@@ -178,6 +178,7 @@ _PAGE_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CODE FORGE · phone deck</title>
 <style>body{background:@{surface_base}@;color:@{text_base}@;font-family:system-ui;margin:0;padding:76px 12px 96px}
+main{overflow-wrap:break-word}
 h1{font-size:16px;color:@{accent_amber}@;letter-spacing:.1em;margin:2px 0 0}
 .stamp{color:@{text_muted}@;font-size:11px;letter-spacing:.06em;margin-bottom:10px}
 .card{background:@{surface_compose_bottom}@;border:1px solid @{rim}@;border-radius:12px;padding:12px;margin:10px 0}

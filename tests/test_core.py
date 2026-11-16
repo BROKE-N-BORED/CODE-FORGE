@@ -6560,14 +6560,18 @@ class BrandSparkPulseTests(unittest.TestCase):
     """Brand-spark breathing pulse (GUIFX, 2026-11-13): Joshua pointed
     at the amber spark next to CODE FORGE and said keep it exactly
     like it is but make it glow from the inside, pulsing slowly like
-    breathing. The spark pixmap, colors, size and position are all
-    unchanged — the pulse is two radial-gradient light layers (an
-    amber halo under the pixmap, a hot core over it) whose alpha
-    follows a slow 4 s breathing curve, one smooth peak per breath.
-    (Revised 2026-11-13: the first build pulsed like a double-thump;
-    Joshua corrected it to a slow breath.) These tests FAIL on the
-    pre-change code: the spark was a static QLabel with no timer,
-    no glow, and no BrandSparkWidget at all."""
+    breathing. The spark pixmap and colors are unchanged. The pulse
+    is two radial-gradient light layers (an amber halo under the
+    pixmap, a hot core over it) whose alpha follows a slow 4 s
+    breathing curve, one smooth peak per breath. (Revised 2026-11-13:
+    the first build pulsed like a double-thump; Joshua corrected it
+    to a slow breath. Fixed 2026-11-15: the widget is 40x32 now, so
+    the halo has room to spill past the pixmap. At the old 15 px
+    width Qt clipped the halo to the widget rect and the breath was
+    nearly invisible on his real screen. The brand-row spacing went
+    8 to 0, so the pixmap sits only a few px further right.) These
+    tests FAIL on the pre-change code: the spark was a static QLabel
+    with no timer, no glow, and no BrandSparkWidget at all."""
 
     # The 13 filled cells of _brand_spark_pixmap(), (col, row): color.
     _CELLS = {(2, 2): "#fff0a8",
@@ -6674,19 +6678,22 @@ class BrandSparkPulseTests(unittest.TestCase):
                 self.assertEqual(wimg.pixelColor(x, y),
                                  img.pixelColor(x, y))
 
-    def test_geometry_is_15x15(self):
-        # A QLabel sizes itself from its pixmap: same 15x15 as the
-        # old label (a plain QWidget would report an invalid sizeHint
-        # and sit 1 px higher in the row — QLabel placement is the
-        # reason BrandSparkWidget subclasses QLabel).
+    def test_geometry_is_40x32(self):
+        # The widget is fixed at 40x32: the 15x15 pixmap sits
+        # centered in it and the halo has room to spill past the
+        # pixmap on every side (at the old 15 px width Qt clipped
+        # the halo to the widget rect and the breath was nearly
+        # invisible). QLabel placement is still the reason
+        # BrandSparkWidget subclasses QLabel: a plain QWidget
+        # would sit 1 px higher in the row.
         w = self._widget()
         w.show()
         self.app.processEvents()
-        self.assertEqual((w.width(), w.height()), (15, 15))
+        self.assertEqual((w.width(), w.height()), (40, 32))
         self.assertEqual((w.sizeHint().width(), w.sizeHint().height()),
-                         (15, 15))
+                         (40, 32))
         self.assertEqual((w.minimumSizeHint().width(),
-                          w.minimumSizeHint().height()), (15, 15))
+                          w.minimumSizeHint().height()), (40, 32))
 
     def test_timer_interval_floor(self):
         w = self._widget()
@@ -6707,39 +6714,48 @@ class BrandSparkPulseTests(unittest.TestCase):
 
         # Peak of the breath is mid-cycle (elapsed 2.0 of the 4 s
         # period); the floor is at the top of the cycle (elapsed 0.0).
+        # The pixmap sits centered in the 40x32 widget (x 13..27,
+        # y 9..23), so the samples below are in widget coords.
         bright = grab_at(2.0)
         dim = grab_at(0.0)
         self.assertNotEqual(bytes(bright.bits()), bytes(dim.bits()))
         # The core brightens toward white at the peak...
-        core_bright = bright.pixelColor(7, 7)
-        core_dim = dim.pixelColor(7, 7)
+        core_bright = bright.pixelColor(20, 16)
+        core_dim = dim.pixelColor(20, 16)
         self.assertGreater(core_bright.green(), core_dim.green())
         self.assertGreater(core_bright.blue(), core_dim.blue())
         # ...the halo lights the transparent gaps at the peak...
-        gap_bright = bright.pixelColor(4, 1)
-        gap_dim = dim.pixelColor(4, 1)
+        gap_bright = bright.pixelColor(14, 10)
+        gap_dim = dim.pixelColor(14, 10)
         self.assertGreater(gap_bright.red(), gap_dim.red())
+        # ...and, the point of the 40 px width, the halo spills past
+        # the pixmap: 12 px out from the center the peak is clearly
+        # amber while the floor is near background.
+        out_bright = bright.pixelColor(8, 16)
+        out_dim = dim.pixelColor(8, 16)
+        self.assertGreater(out_bright.red(), out_dim.red() + 20)
         # ...and the spark's own deep-orange pixels never move.
-        self.assertEqual(bright.pixelColor(7, 1), dim.pixelColor(7, 1))
+        self.assertEqual(bright.pixelColor(13, 16), dim.pixelColor(13, 16))
 
     def test_halo_is_vertically_symmetric(self):
-        # The label is 28 px tall in the brand row; centering the
-        # glow on the geometric center y=14.0 put it on a pixel-row
-        # boundary, and the halo came out visibly stronger above the
-        # spark than below it (+10 red at the top gap). The glow is
-        # centered on the middle pixel row now, so the top and bottom
-        # gaps must match.
+        # The label is 32 px tall; centering the glow on the
+        # geometric center y=16.0 would put it on a pixel-row
+        # boundary, and the halo would come out visibly stronger
+        # above the spark than below it (+10 red at the top gap on
+        # the old 28 px label). The glow is centered on the middle
+        # pixel row now, so the top and bottom gaps must match.
+        # (The widget is fixed at 40x32, so no resize is needed;
+        # the samples sit 12 px left of the center, in pure halo.)
         import time
         w = self._widget()
-        w.resize(15, 28)
         w.show()
         self.app.processEvents()
         w._started = time.monotonic() - 2.0  # peak of the breath
         w._tick()
         self.app.processEvents()
         img = w.grab().toImage()
-        top = img.pixelColor(4, 8)
-        bottom = img.pixelColor(4, 20)
+        top = img.pixelColor(8, 8)
+        bottom = img.pixelColor(8, 24)
         self.assertLessEqual(abs(top.red() - bottom.red()), 3)
         self.assertLessEqual(abs(top.green() - bottom.green()), 3)
 
@@ -6752,19 +6768,24 @@ class BrandSparkPulseTests(unittest.TestCase):
         self.assertIsNotNone(spark.pixmap())
         row = spark.parent()
         lay = row.layout()
-        self.assertEqual(lay.spacing(), 8)
+        self.assertEqual(lay.spacing(), 0)
         brand = lay.itemAt(0).widget()
         self.assertEqual(brand.text(), "CODE FORGE")
         self.assertIs(lay.itemAt(1).widget(), spark)
-        # The label stretches to the row height, exactly as the old
-        # QLabel did (15 wide, row tall), one spacing past the brand.
-        self.assertEqual(spark.width(), 15)
+        # The spark is 40 wide now (the halo needs the room) and
+        # flush against the brand: spacing is 0 and the pixmap
+        # sits centered in the widget, about 13 px past the brand
+        # text. The row is 32 tall, the widget's fixed height.
+        self.assertEqual(spark.width(), 40)
         self.assertEqual(spark.height(), row.height())
-        self.assertEqual(spark.x(), brand.x() + brand.width() + 8)
+        self.assertEqual(spark.height(), 32)
+        self.assertEqual(spark.x(), brand.x() + brand.width() + 0)
         self.assertEqual(spark.y(), 0)
-        # And the PAINTED spark sits where it always did: rows 7..21
-        # of the row (QLabel rounds the 6.5 px centering up). A plain
-        # 15x15 QWidget in this layout would paint at rows 6..20.
+        # And the PAINTED spark sits near where it always did: rows
+        # 9..23 of the row (QLabel rounds the 8.5 px centering up).
+        # A plain 15x15 QWidget in this layout would paint at rows
+        # 8..22. The scan uses red > 150, which the halo alone
+        # never reaches outside the pixmap.
         img = row.grab().toImage()
         rows = []
         for y in range(img.height()):
@@ -6772,7 +6793,7 @@ class BrandSparkPulseTests(unittest.TestCase):
                 if img.pixelColor(x, y).red() > 150:
                     rows.append(y)
                     break
-        self.assertEqual((min(rows), max(rows)), (7, 21))
+        self.assertEqual((min(rows), max(rows)), (9, 23))
 
     def test_pulse_targets_only_the_spark(self):
         from PySide6.QtCore import QEvent, QObject
@@ -6811,11 +6832,11 @@ class BrandSparkPulseTests(unittest.TestCase):
                          "the brand label repainted during the pulse")
         # The sidebar DOES repaint — once per spark tick at most.
         # That is Qt background painting, not a second widget update:
-        # the sidebar is a styled QFrame, so when the spark's 15x15
+        # the sidebar is a styled QFrame, so when the spark's 40x32
         # region is marked dirty Qt repaints the sidebar's gradient
         # background under that region before painting the spark.
         # Any child update in the sidebar would do the same; the
-        # repainted region stays 15x15.
+        # repainted region stays 40x32.
         self.assertLessEqual(sidebar_counter.count - sidebar0,
                              spark_counter.count - spark0)
 
@@ -12876,7 +12897,7 @@ class UiBuilderDialogTests(unittest.TestCase):
         # 2026-11-08); the menu action is the registration that
         # remains.
         self.assertFalse(hasattr(self.win, "builder_btn"))
-        self.assertIn("UI builder", self.win.act_builder.text())
+        self.assertIn("UI builder", self.win.view_act_builder.text())
         self.assertTrue(callable(self.win.open_ui_builder))
 
     def test_place_select_edit_delete_via_canvas(self):
@@ -13433,7 +13454,7 @@ class SnapshotsDialogTests(unittest.TestCase):
         # 2026-11-08); the menu action is the registration that
         # remains.
         self.assertFalse(hasattr(self.win, "snapshots_btn"))
-        self.assertIn("Snapshots", self.win.act_snapshots.text())
+        self.assertIn("Snapshots", self.win.view_act_snapshots.text())
         self.assertTrue(callable(self.win.open_snapshots))
 
     def test_git_missing_state(self):
@@ -13862,7 +13883,6 @@ class CheckpointsDialogTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_window_wiring_menu(self):
-        self.assertIn("Checkpoints", self.win.act_checkpoints.text())
         self.assertIn("Checkpoints", self.win.view_act_checkpoints.text())
         self.assertTrue(callable(self.win.open_checkpoints))
 
@@ -16651,25 +16671,25 @@ class ShellRound2Tests(unittest.TestCase):
         self.assertTrue(self.win._dock_open["receipts"])
         self.assertGreaterEqual(
             self.win._docks["receipts"]["layout"].indexOf(self.win.receipt_bar), 0)
-        # Both menus' checks agree.
+        # The View menu's check agrees with the dock state.
+        # (F11 trimmed the Menu's dock toggles; View is the door.)
         self.assertTrue(self.win.view_act_dock_receipts.isChecked())
-        self.assertTrue(self.win.act_dock_receipts.isChecked())
         self.win.view_act_dock_receipts.trigger()
         self.assertFalse(self.win._dock_open["receipts"])
         self.assertFalse(self.win.view_act_dock_receipts.isChecked())
-        self.assertFalse(self.win.act_dock_receipts.isChecked())
 
     def test_view_menu_plan_entry_opens_the_plan_window(self):
         self.win.view_act_plan_window.trigger()
         self.app.processEvents()
         self.assertTrue(self.win.plan_win.isVisible())
 
-    def test_dock_checks_sync_whichever_door_was_used(self):
+    def test_view_dock_check_follows_set_dock_open(self):
+        # F11 trimmed the Menu's dock toggles; the View menu's
+        # action is the door that remains, and its check still
+        # follows set_dock_open either way.
         self.win.set_dock_open("activity", False)
-        self.assertFalse(self.win.act_dock_activity.isChecked())
         self.assertFalse(self.win.view_act_dock_activity.isChecked())
         self.win.set_dock_open("activity", True)
-        self.assertTrue(self.win.act_dock_activity.isChecked())
         self.assertTrue(self.win.view_act_dock_activity.isChecked())
 
     ROLO_BTNS = ("customize_btn", "rescan_btn", "builder_btn",
@@ -17715,6 +17735,74 @@ class DeckTouchTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[:400])
 
 
+class DeckOverflowWrapTests(unittest.TestCase):
+    """F23 (GUIFX audit task list, Build 13, 2026-11-16): a long
+    unbroken token (a 200-char URL/hash with no spaces) overflows
+    its card on a 390 px phone screen — `.msg .body` wraps at
+    spaces only (white-space:pre-wrap) and `#ptool`, `#prisk`,
+    `#proposals`, `#docs` are plain divs with no wrapping
+    protection. One rule on the common parent fixes it:
+    `main { overflow-wrap: break-word; }` — overflow-wrap is
+    inherited, so it covers every screen. Every assertion runs
+    against the SERVED page (build_page(TOKENS)), never a source
+    grep. No pixel proof exists in the sandbox (no browser
+    render); the rule is standard CSS and certain by
+    construction."""
+
+    def _served_page(self):
+        from forge.deck import build_page
+        from forge.main import TOKENS
+        return build_page(TOKENS)
+
+    def _style_block(self, page):
+        import re
+        m = re.search(r"<style>(.*?)</style>", page, re.S)
+        self.assertIsNotNone(m, "no <style> block in served page")
+        return m.group(1)
+
+    def test_main_overflow_wrap_rule_present_in_served_page(self):
+        import re
+        style = self._style_block(self._served_page())
+        m = re.search(r"main\{([^}]*)\}", style)
+        self.assertIsNotNone(m, "no main rule in served CSS")
+        self.assertIn("overflow-wrap:break-word", m.group(1))
+
+    def test_overflow_wrap_appears_exactly_once(self):
+        # The fix is one rule on the common parent — no second
+        # wrapping rule anywhere, no word-break fallback.
+        page = self._served_page()
+        self.assertEqual(page.count("overflow-wrap"), 1)
+        self.assertNotIn("word-break", page)
+
+    def test_rule_lives_in_the_style_block(self):
+        # Placement guard: the rule is CSS in <style>, not text
+        # that leaked into the body or the script.
+        page = self._served_page()
+        style = self._style_block(page)
+        self.assertIn("main{overflow-wrap:break-word}", style)
+        body = page.split("</style>", 1)[1]
+        self.assertNotIn("overflow-wrap", body)
+
+    def test_served_script_still_parses(self):
+        # F23 touches the template; the deck rule says the served
+        # script must still parse. (DeckPageScriptTests guards this
+        # too — this pins it for this change's diff.)
+        import re, shutil, subprocess, tempfile
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available for JS syntax check")
+        page = self._served_page()
+        m = re.search(r"<script>(.*?)</script>", page, re.S)
+        self.assertIsNotNone(m)
+        with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                         delete=False) as f:
+            f.write(m.group(1))
+            path = f.name
+        r = subprocess.run([node, "--check", path],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+
 class HowToUseTests(unittest.TestCase):
     """F2 (GUIFX audit task list, Build 2, 2026-11-13): the How
     to Use index (U22) — its own closable window off the Menu,
@@ -17784,15 +17872,20 @@ class HowToUseTests(unittest.TestCase):
     def test_every_named_path_exists_on_the_real_ui(self):
         win = self.win
         for attr in ("act_howto", "act_new", "act_fork",
-                     "act_export_chat", "act_settings",
-                     "act_customize", "act_schedule", "act_deck",
-                     "act_deck_qr", "act_snapshots",
-                     "act_checkpoints", "act_bench", "act_recipes",
-                     "act_maintenance", "act_models_window",
-                     "act_plan_window", "act_run_window"):
+                     "act_export_chat", "act_schedule", "act_deck",
+                     "act_deck_qr", "act_maintenance"):
             self.assertTrue(hasattr(win, attr), attr)
             self.assertIn(getattr(win, attr),
                           win.main_menu.actions(), attr)
+        # F11 moved these to the View menu; the paths still exist.
+        for attr in ("view_act_settings", "view_act_customize",
+                     "view_act_snapshots", "view_act_checkpoints",
+                     "view_act_bench", "view_act_recipes",
+                     "view_act_models", "view_act_plan_window",
+                     "view_act_run"):
+            self.assertTrue(hasattr(win, attr), attr)
+            self.assertIn(getattr(win, attr),
+                          win.view_menu.actions(), attr)
         for attr in ("model_combo", "mode_combo", "menu_btn",
                      "view_btn", "send_btn", "input"):
             self.assertTrue(hasattr(win, attr), attr)
@@ -17807,13 +17900,13 @@ class HowToUseTests(unittest.TestCase):
                                  "Architect", "Review", "Ask",
                                  "Write", "Research"])
 
-    def test_customize_lives_in_the_menu(self):
+    def test_customize_lives_in_view(self):
         from forge.main import HOW_TO_USE_SECTIONS
         start = [body for title, body in HOW_TO_USE_SECTIONS
                  if title == "Start here"][0]
-        self.assertIn("Customize lives in the Menu", start)
-        self.assertIn(self.win.act_customize,
-                      self.win.main_menu.actions())
+        self.assertIn("Customize lives in View", start)
+        self.assertIn(self.win.view_act_customize,
+                      self.win.view_menu.actions())
 
     def test_window_fits_1366x768(self):
         win = self.win.howto_win
@@ -17845,11 +17938,18 @@ class HowToUseTests(unittest.TestCase):
         self.assertIn("The Menu", titles)
         menu = [body for title, body in HOW_TO_USE_SECTIONS
                 if title == "The Menu"][0]
+        # F11 trimmed the Menu: settings, Customize, snapshots,
+        # and every window live in View now. The section names
+        # the menu as it stands, and points at View.
         for entry in ("Menu button", "New conversation",
-                      "Agent settings", "Customize",
-                      "Snapshots", "Phone deck", "Plan window",
-                      "Models window"):
+                      "Scheduled runs", "Phone deck",
+                      "Forge maintenance",
+                      "Approve Design Shell job", "View button"):
             self.assertIn(entry, menu, entry)
+        for entry in ("Agent settings", "Snapshots",
+                      "Plan window", "Models window"):
+            self.assertNotIn(entry, menu.split("View button")[0],
+                             entry)
 
     def test_no_em_dash_in_index_content(self):
         from forge.main import HOW_TO_USE_SECTIONS
@@ -18095,8 +18195,9 @@ class AbandonConfirmTests(unittest.TestCase):
 
 
 class EmptyChatCustomizeTests(unittest.TestCase):
-    """F17 (audit Build 3): the empty chat says Customize lives
-    in the Menu — it is not on the right."""
+    """F17 (audit Build 3): the empty chat says where Customize
+    lives. F11 moved it to View, so the wording moved with it:
+    it is not on the right, and it is not in the Menu anymore."""
 
     @classmethod
     def setUpClass(cls):
@@ -18109,11 +18210,12 @@ class EmptyChatCustomizeTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.win.close()
 
-    def test_empty_chat_names_the_menu(self):
+    def test_empty_chat_names_view(self):
         self.win.render([])
         text = self.win.chat.toPlainText()
-        self.assertIn("Customize in the Menu", text)
+        self.assertIn("Customize in View", text)
         self.assertNotIn("on the right", text)
+        self.assertNotIn("in the Menu", text)
 
 
 class RunNoPreselectTests(unittest.TestCase):
@@ -19645,10 +19747,15 @@ class EmDashGuardTests(unittest.TestCase):
 
     SWEPT = ("forge/main.py", "forge/deck.py", "forge/debug_log.py")
     # (relative path, line): the split-delimiter sites, and only those.
+    # F12 recomputed these: the first two moved +8 (dip attaches
+    # above them), the last four +191 (those 8 + the Maintenance
+    # send dip + the 182-line F12/F14 helper block, incl. the
+    # _clamped_rect fix). Recompute whenever main.py gains/loses
+    # lines above the split sites.
     ALLOWED = {
-        ("forge/main.py", 12747), ("forge/main.py", 12886),
-        ("forge/main.py", 17256), ("forge/main.py", 17264),
-        ("forge/main.py", 17280), ("forge/main.py", 17301),
+        ("forge/main.py", 12797), ("forge/main.py", 12936),
+        ("forge/main.py", 17570), ("forge/main.py", 17578),
+        ("forge/main.py", 17594), ("forge/main.py", 17615),
     }
 
     @staticmethod
@@ -19713,10 +19820,187 @@ class EmDashGuardTests(unittest.TestCase):
                           f"{rel}:{line} is no longer a split delimiter")
 
 
+class MenuTrimTests(unittest.TestCase):
+    """F11 (audit Build 11): the Menu trim. The Menu held 38
+    entries and wrapped into two columns offscreen at 1366x768;
+    the 26 entries that duplicate View are gone from the Menu,
+    and every one still opens from View. Nothing is removed:
+    each action lives one menu over."""
+
+    # (menu label, view action attr, open method, window attr).
+    # Window attr is None for dialogs (modal: triggering would
+    # block, so reachability is text + callable method) and a
+    # dock name for the two panel toggles.
+    TRIMMED = (
+        ("Agent settings", "view_act_settings", "open_settings", None),
+        ("Customize", "view_act_customize", "open_customize", None),
+        ("UI builder", "view_act_builder", "open_ui_builder", None),
+        ("Snapshots", "view_act_snapshots", "open_snapshots", None),
+        ("Checkpoints", "view_act_checkpoints", "open_checkpoints", None),
+        ("Forge Bench", "view_act_bench", "open_bench", None),
+        ("Recipes", "view_act_recipes", "open_recipes", None),
+        ("Receipts panel", "view_act_dock_receipts", None, "receipts"),
+        ("Activity log panel", "view_act_dock_activity", None, "activity"),
+        ("Plan window", "view_act_plan_window", "open_plan_window", "plan_win"),
+        ("Run window", "view_act_run", "open_run_window", "run_win"),
+        ("Debug window", "view_act_debug", "open_debug_window", "debug_win"),
+        ("Artifacts window", "view_act_artifacts", "open_artifacts_window", "artifacts_win"),
+        ("Converter window", "view_act_converter", "open_converter_window", "converter_win"),
+        ("Sessions window", "view_act_sessions", "open_sessions_window", "sessions_win"),
+        ("Privacy window", "view_act_privacy", "open_privacy_window", "privacy_win"),
+        ("Session notes window", "view_act_notes", "open_notes_window", "notes_win"),
+        ("What the AI sees window", "view_act_sees", "open_sees_window", "sees_win"),
+        ("Models window", "view_act_models", "open_models_window", "models_win"),
+        ("Mission control", "view_act_mission", "open_mission_control", "mission_win"),
+        ("Inbox", "view_act_inbox", "open_inbox", "inbox_win"),
+        ("Templates", "view_act_templates", "open_templates_window", "templates_win"),
+        ("Testing window", "view_act_testing", "open_testing_window", "testing_win"),
+        ("Provider chat", "view_act_provider_chat", "open_provider_chat", "provider_chat_win"),
+        ("Turn timeline", "view_act_timeline", "open_timeline", "timeline_win"),
+        ("Design canvas", "view_act_design_canvas", "open_design_canvas", "design_canvas_win"),
+    )
+
+    KEPT = (
+        "New conversation", "Fork conversation", "Export chat",
+        "How to use Code Forge", "Scheduled runs", "Phone deck",
+        "Donate / Support Code Forge", "Deck QR code",
+        "Rescan skills", "Update", "Forge maintenance",
+        "Approve Design Shell job",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def tearDown(self):
+        # Close any window a trigger opened, and restore the docks.
+        win = self.win
+        for _label, _attr, _meth, wattr in self.TRIMMED:
+            if wattr is None or wattr in ("receipts", "activity"):
+                continue
+            w = getattr(win, wattr, None)
+            if w is not None:
+                w.close()
+        win.set_dock_open("receipts", True)
+        win.set_dock_open("activity", True)
+        self.app.processEvents()
+
+    def _menu_texts(self):
+        return [a.text() for a in self.win.main_menu.actions()
+                if not a.isSeparator()]
+
+    def test_trimmed_entries_are_gone_from_the_menu(self):
+        texts = self._menu_texts()
+        for label, _attr, _meth, _w in self.TRIMMED:
+            self.assertFalse(
+                any(label in t for t in texts), label)
+
+    def test_trimmed_action_attributes_are_gone(self):
+        for attr in ("act_settings", "act_customize", "act_builder",
+                     "act_snapshots", "act_checkpoints", "act_bench",
+                     "act_recipes", "act_dock_receipts",
+                     "act_dock_activity", "act_plan_window",
+                     "act_run_window", "act_debug_window",
+                     "act_artifacts_window", "act_converter_window",
+                     "act_sessions_window", "act_privacy_window",
+                     "act_notes_window", "act_sees_window",
+                     "act_models_window", "act_mission_window",
+                     "act_inbox_window", "act_templates_window",
+                     "act_testing_window", "act_provider_chat",
+                     "act_timeline_window", "act_design_canvas"):
+            self.assertFalse(hasattr(self.win, attr), attr)
+
+    def test_remaining_menu_entries_still_exist(self):
+        texts = self._menu_texts()
+        self.assertEqual(len(texts), 12, texts)
+        for label in self.KEPT:
+            self.assertTrue(
+                any(label in t for t in texts), label)
+
+    def test_trimmed_windows_open_from_view(self):
+        win = self.win
+        for label, attr, _meth, wattr in self.TRIMMED:
+            if wattr is None or wattr in ("receipts", "activity"):
+                continue
+            act = getattr(win, attr)
+            self.assertIn(label, act.text(), label)
+            act.trigger()
+            self.app.processEvents()
+            w = getattr(win, wattr)
+            self.assertTrue(w.isVisible(), label)
+            w.close()
+            self.app.processEvents()
+
+    def test_trimmed_dialogs_and_toggles_still_reachable_from_view(self):
+        win = self.win
+        for label, attr, meth, wattr in self.TRIMMED:
+            if wattr is not None:
+                continue
+            act = getattr(win, attr)
+            self.assertIn(label, act.text(), label)
+            self.assertTrue(callable(getattr(win, meth, None)), meth)
+        # The dock toggles flip the dock from View.
+        win.set_dock_open("receipts", True)
+        win.view_act_dock_receipts.trigger()
+        self.assertFalse(win._dock_open["receipts"])
+        win.set_dock_open("receipts", True)
+        win.view_act_dock_activity.trigger()
+        self.assertFalse(win._dock_open["activity"])
+        win.set_dock_open("activity", True)
+
+    def test_ampersand_entries_render_with_a_literal_ampersand(self):
+        # A bare & in a Qt action label is a mnemonic marker: the
+        # & vanishes and the next letter gets an underline. &&
+        # renders as one literal &. (Qt eats & in visible text:
+        # MIMIK v0.1.1.)
+        self.assertIn("&&", self.win.act_rescan.text())
+        self.assertIn("&&", self.win.act_update.text())
+
+    def test_how_to_use_menu_section_matches_the_trimmed_menu(self):
+        from forge.main import HOW_TO_USE_SECTIONS
+        sections = dict(HOW_TO_USE_SECTIONS)
+        menu = sections["The Menu"]
+        tools = menu.split("Settings and tools:")[1].split("Also here:")[0]
+        for label in ("Agent settings", "Customize", "Snapshots",
+                      "Checkpoints", "Forge Bench", "Recipes",
+                      "UI builder"):
+            self.assertNotIn(label, tools, label)
+        for label in ("Plan window", "Run window", "Debug window",
+                      "Artifacts window", "Converter window",
+                      "Sessions window", "Privacy window",
+                      "Session notes window",
+                      "What the AI sees window", "Models window",
+                      "Mission control", "Inbox", "Templates",
+                      "Testing window", "Provider chat",
+                      "Turn timeline", "Design canvas",
+                      "Receipts panel", "Activity log panel"):
+            self.assertNotIn(label, menu, label)
+        for label in ("New conversation", "Scheduled runs",
+                      "Phone deck", "Forge maintenance",
+                      "Approve Design Shell job"):
+            self.assertIn(label, menu, label)
+        # The other sections that named a menu path follow the move.
+        self.assertIn("View, then Models window",
+                      sections["Pick a model"])
+        self.assertIn("View, then Snapshots",
+                      sections["Restore a snapshot"])
+        self.assertIn("View, then Checkpoints",
+                      sections["Restore a snapshot"])
+        self.assertIn("Customize lives in View",
+                      sections["Start here"])
+
+
 class PaletteNoMatchTests(unittest.TestCase):
     """F9 (U29): the palette shows guidance when the search
     finds nothing — naming the query, teaching a shorter query,
-    and pointing at the Menu — instead of a bare empty list.
+    and pointing at the Menu or View — instead of a bare empty list.
     The dialog is never shown in these tests, so visibility is
     asserted with isHidden(), the F7 pattern."""
 
@@ -19915,6 +20199,1051 @@ class BrokenSkillNoticeTests(unittest.TestCase):
             self.assertNotIn("\u2014", notice.text())
         finally:
             dlg.close()
+
+
+class ModeMorphTests(unittest.TestCase):
+    """F12 (GUIFX audit task list, Build 12, 2026-11-15): mode
+    windows morph from the mode combo instead of jumping — a
+    275 ms OutCubic geometry animation from the combo's global
+    rect to the window's target rect, attached at both open
+    paths (open_mode_window and open_plan_window), interruptible
+    by grabbing the window mid-flight, nothing running at rest.
+    Every test here fails on pre-change code: no morph, no
+    animation, no _morph_anim attribute."""
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        import tempfile
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import STYLE, ForgeWindow
+        cls.app.setStyleSheet(STYLE)
+        cls._tmp = tempfile.mkdtemp(prefix="f12-morph-")
+        from PySide6.QtCore import QSettings
+        cls._settings = QSettings(os.path.join(cls._tmp, "geometry.ini"),
+                                  QSettings.IniFormat)
+        cls.win = ForgeWindow(geometry_settings=cls._settings)
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.win.close()
+        cls.app.processEvents()
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def tearDown(self):
+        # Close every room this test may have opened, stopping
+        # any morph still in flight first.
+        for room in list(self.win.mode_windows.values()):
+            anim = getattr(room, "_morph_anim", None)
+            if anim is not None:
+                try:
+                    anim.stop()
+                except Exception:
+                    pass
+            try:
+                room.close()
+            except Exception:
+                pass
+        plan = getattr(self.win, "plan_win", None)
+        if plan is not None:
+            anim = getattr(plan, "_morph_anim", None)
+            if anim is not None:
+                try:
+                    anim.stop()
+                except Exception:
+                    pass
+            try:
+                plan.close()
+            except Exception:
+                pass
+        self.app.processEvents()
+
+    def _pump_until(self, pred, timeout=5.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            self.app.processEvents()
+            time.sleep(0.02)
+        self.app.processEvents()
+        return pred()
+
+    def _close_enough(self, got, want, tol=3):
+        # Offscreen geometry lands within ~2 px of the asked
+        # rect (probed); xcb lands exact. 3 px covers both.
+        return (abs(got.x() - want.x()) <= tol
+                and abs(got.y() - want.y()) <= tol
+                and abs(got.width() - want.width()) <= tol
+                and abs(got.height() - want.height()) <= tol)
+
+    def test_morph_duration_is_275ms_within_the_400ms_cap(self):
+        from forge.main import _MORPH_DURATION_MS, _MORPH_MAX_MS
+        self.assertGreaterEqual(_MORPH_DURATION_MS, 250)
+        self.assertLessEqual(_MORPH_DURATION_MS, 300)
+        self.assertEqual(_MORPH_MAX_MS, 400)
+        self.assertLessEqual(_MORPH_DURATION_MS, _MORPH_MAX_MS)
+        room = self.win.mode_windows["ask"]
+        self.win.open_mode_window("ask")
+        anim = getattr(room, "_morph_anim", None)
+        self.assertIsNotNone(anim)
+        self.assertEqual(anim.duration(), _MORPH_DURATION_MS)
+        self.assertLessEqual(anim.duration(), _MORPH_MAX_MS)
+        self.assertTrue(self._pump_until(
+            lambda: getattr(room, "_morph_anim", None) is None))
+
+    def test_window_lands_at_its_target_rect(self):
+        room = self.win.mode_windows["design"]
+        # Today's instant show is the reference: show it plain,
+        # record where it lands (Qt may clamp the restored
+        # geometry to the window's minimum size on show), close
+        # it, then morph it open and compare.
+        room.show()
+        self.app.processEvents()
+        instant = room.geometry()
+        room.close()
+        self.app.processEvents()
+        self.assertFalse(instant.isNull())
+        self.win.open_mode_window("design")
+        anim = getattr(room, "_morph_anim", None)
+        self.assertIsNotNone(anim)
+        self.assertEqual(anim.endValue(), instant)
+        self.assertTrue(self._pump_until(
+            lambda: getattr(room, "_morph_anim", None) is None))
+        self.assertTrue(room.isVisible())
+        self.assertTrue(
+            self._close_enough(room.geometry(), instant),
+            f"morphed {room.geometry().getRect()} != "
+            f"instant {instant.getRect()}")
+
+    def test_morph_starts_from_the_mode_combo_rect(self):
+        from PySide6.QtCore import QPoint, QRect
+        combo = self.win.mode_combo
+        combo_rect = QRect(combo.mapToGlobal(QPoint(0, 0)),
+                           combo.size())
+        self.assertFalse(combo_rect.isNull())
+        room = self.win.mode_windows["review"]
+        # The start is the combo rect clamped up to the window's
+        # size floor (Qt's rule, probed): per dimension, the
+        # explicit minimumSize wins when set, else the
+        # minimumSizeHint.
+        explicit = room.minimumSize()
+        hint = room.minimumSizeHint()
+        floor_w = explicit.width() if explicit.width() > 0 \
+            else hint.width()
+        floor_h = explicit.height() if explicit.height() > 0 \
+            else hint.height()
+        expected = QRect(combo_rect.x(), combo_rect.y(),
+                         max(combo_rect.width(), floor_w),
+                         max(combo_rect.height(), floor_h))
+        self.win.open_mode_window("review")
+        anim = getattr(room, "_morph_anim", None)
+        self.assertIsNotNone(anim)
+        self.assertEqual(anim.startValue(), expected)
+        self.assertTrue(self._pump_until(
+            lambda: getattr(room, "_morph_anim", None) is None))
+
+    def test_reopening_a_visible_window_raises_without_morphing(self):
+        room = self.win.mode_windows["architect"]
+        self.win.open_mode_window("architect")
+        self.assertTrue(self._pump_until(
+            lambda: getattr(room, "_morph_anim", None) is None))
+        self.assertTrue(room.isVisible())
+        self.win.open_mode_window("architect")
+        self.app.processEvents()
+        self.assertIsNone(getattr(room, "_morph_anim", None))
+        self.assertTrue(room.isVisible())
+
+    def test_grab_mid_flight_stops_the_morph(self):
+        from PySide6.QtCore import QPropertyAnimation
+        room = self.win.mode_windows["code"]
+        target = room.geometry()
+        self.win.open_mode_window("code")
+
+        def _mid_flight():
+            cur = getattr(room, "_morph_anim", None)
+            return cur is not None and cur.currentTime() >= 50
+
+        self.assertTrue(self._pump_until(_mid_flight),
+                        "morph never reached mid-flight")
+        anim = getattr(room, "_morph_anim", None)
+        self.assertIsNotNone(anim)
+        self.assertEqual(anim.state(), QPropertyAnimation.Running)
+        room.move(room.x() + 200, room.y() + 150)
+        landed = room.geometry()
+        self.assertTrue(self._pump_until(
+            lambda: getattr(room, "_morph_anim", None) is None,
+            timeout=2.0))
+        self.assertEqual(room.geometry(), landed)
+        self.assertFalse(self._close_enough(room.geometry(), target))
+
+    def test_plan_window_morphs_too(self):
+        plan = self.win.plan_win
+        plan.show()
+        self.app.processEvents()
+        instant = plan.geometry()
+        plan.close()
+        self.app.processEvents()
+        self.assertFalse(instant.isNull())
+        self.win.open_plan_window()
+        anim = getattr(plan, "_morph_anim", None)
+        self.assertIsNotNone(anim)
+        self.assertEqual(anim.duration(), 275)
+        self.assertEqual(anim.endValue(), instant)
+        self.assertTrue(self._pump_until(
+            lambda: getattr(plan, "_morph_anim", None) is None))
+        self.assertTrue(plan.isVisible())
+        self.assertTrue(
+            self._close_enough(plan.geometry(), instant),
+            f"morphed {plan.geometry().getRect()} != "
+            f"instant {instant.getRect()}")
+
+    def test_nothing_runs_at_rest_after_the_morph(self):
+        from PySide6.QtCore import QPropertyAnimation
+        import forge.main as main_mod
+        room = self.win.mode_windows["write"]
+        self.win.open_mode_window("write")
+        self.assertTrue(self._pump_until(
+            lambda: getattr(room, "_morph_anim", None) is None))
+        self.app.processEvents()
+        self.assertEqual(room.findChildren(QPropertyAnimation), [])
+        self.assertEqual(
+            room.findChildren(main_mod._MorphInterruptFilter), [])
+
+
+class PressDipTests(unittest.TestCase):
+    """F14 (GUIFX audit task list, Build 12, 2026-11-15): the
+    press dip — a 150 ms OutBack geometry dip (y +2 px, height
+    -2 px) on Send + Approve/Deny, triggered by the press,
+    restoring after. Purely visual: the dip never re-triggers
+    the action, never touches enabled/checked state, and nothing
+    runs — or lives — at rest. Every test here fails on
+    pre-change code: no dip, no _press_dip_anim, no wiring."""
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        import tempfile
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import STYLE, ForgeWindow
+        cls.app.setStyleSheet(STYLE)
+        cls._tmp = tempfile.mkdtemp(prefix="f12-dip-")
+        from PySide6.QtCore import QSettings
+        cls._settings = QSettings(os.path.join(cls._tmp, "geometry.ini"),
+                                  QSettings.IniFormat)
+        cls.win = ForgeWindow(geometry_settings=cls._settings)
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.win.show()
+        cls.app.processEvents()
+        # The rooms whose buttons carry the dip, shown so the
+        # buttons have real laid-out geometry.
+        cls.ask_room = cls.win.mode_windows["ask"]
+        cls.ask_room.show()
+        cls.research_room = cls.win.mode_windows["research"]
+        cls.research_room.show()
+        cls.win.plan_win.show()
+        cls.win.artifacts_win.show()
+        import forge.main as main_mod
+        cls.maint_win = main_mod.MaintenanceWindow(cls.win)
+        cls.maint_win.show()
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.maint_win.close()
+        cls.win.close()
+        cls.app.processEvents()
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def tearDown(self):
+        # Let any dip still in flight finish, so no test leaves
+        # a button mid-dip for the next.
+        self._pump_until(self._all_dips_done, timeout=2.0)
+        self.app.processEvents()
+        if getattr(self, "_dlg", None) is not None:
+            try:
+                self._dlg.close()
+            except Exception:
+                pass
+            self._dlg = None
+        self._dip_btns = None
+
+    def _pump_until(self, pred, timeout=5.0):
+        import time
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if pred():
+                return True
+            self.app.processEvents()
+            time.sleep(0.02)
+        self.app.processEvents()
+        return pred()
+
+    def _all_dips_done(self):
+        for _, btn in self._dip_buttons():
+            if getattr(btn, "_press_dip_anim", None) is not None:
+                return False
+        return True
+
+    def _dialog_buttons(self):
+        import forge.main as main_mod
+        dlg = main_mod.ApprovalDialog(
+            None, "model-x", "write_file", "a.py", "Write a.py?")
+        from PySide6.QtWidgets import QPushButton
+        found = {}
+        for btn in dlg.findChildren(QPushButton):
+            found[btn.text()] = btn
+        return dlg, found
+
+    def _dip_buttons(self):
+        """The nine named buttons, in audit order. Built once
+        per test and cached — the dialog must be the same
+        object across the press and the check."""
+        if getattr(self, "_dip_btns", None) is not None:
+            return self._dip_btns
+        dlg, found = self._dialog_buttons()
+        self._dlg = dlg
+        dlg.show()
+        self.app.processEvents()
+        buttons = [
+            ("composer_send", self.ask_room.composer_send_btn),
+            ("maintenance_send", self.maint_win.send_btn),
+            ("deny", found["Deny"]),
+            ("approve", found["Approve once"]),
+            ("remember", dlg.remember_btn),
+            ("gate_approve", self.research_room.gate_approve_btn),
+            ("plan_approve", self.win.plan_win.plan_approve_btn),
+            ("knowledge_approve",
+             self.win.artifacts_win.knowledge_approve_btn),
+            ("guidelines_approve",
+             self.win.artifacts_win.guidelines_approve_btn),
+        ]
+        for name, btn in buttons:
+            self.assertIsNotNone(btn, f"{name} button missing")
+        self._dip_btns = buttons
+        return buttons
+
+    def test_all_nine_named_buttons_carry_the_dip(self):
+        from PySide6.QtCore import QEasingCurve, QPropertyAnimation
+        for name, btn in self._dip_buttons():
+            btn.pressed.emit()
+            anim = getattr(btn, "_press_dip_anim", None)
+            self.assertIsNotNone(anim, f"{name}: no dip on press")
+            self.assertEqual(anim.duration(), 150, name)
+            self.assertEqual(anim.easingCurve().type(),
+                             QEasingCurve.OutBack, name)
+            self.assertEqual(anim.state(),
+                             QPropertyAnimation.Running, name)
+            self.assertTrue(self._pump_until(
+                lambda b=btn: getattr(b, "_press_dip_anim", None)
+                is None,
+                timeout=2.0), f"{name}: dip never finished")
+
+    def test_dip_geometry_dips_and_restores(self):
+        from PySide6.QtCore import QRect
+        btn = self.win.plan_win.plan_approve_btn
+        origin = QRect(btn.geometry())
+        self.assertFalse(origin.isNull())
+        btn.pressed.emit()
+        anim = getattr(btn, "_press_dip_anim", None)
+        self.assertIsNotNone(anim)
+        dipped = QRect(origin.x(), origin.y() + 2,
+                       origin.width(), origin.height() - 2)
+        self.assertEqual(anim.endValue(), dipped)
+
+        def _mid_dip():
+            cur = getattr(btn, "_press_dip_anim", None)
+            return cur is not None and cur.currentTime() >= 50
+
+        self.assertTrue(self._pump_until(_mid_dip, timeout=2.0),
+                        "dip never reached mid-flight")
+        mid = btn.geometry()
+        self.assertGreater(mid.y(), origin.y())
+        self.assertLess(mid.height(), origin.height())
+        self.assertTrue(self._pump_until(
+            lambda: getattr(btn, "_press_dip_anim", None) is None,
+            timeout=2.0))
+        self.assertEqual(btn.geometry(), origin)
+
+    def test_double_press_fires_the_action_exactly_twice(self):
+        from PySide6.QtCore import QEasingCurve, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QPushButton, QWidget
+        import forge.main as main_mod
+        holder = QWidget()
+        btn = QPushButton("Probe", holder)
+        main_mod._install_press_dip(btn)
+        fired = []
+        btn.clicked.connect(lambda: fired.append(1))
+        holder.show()
+        self.app.processEvents()
+        QTest.mouseClick(btn, Qt.LeftButton)
+        anim = getattr(btn, "_press_dip_anim", None)
+        self.assertIsNotNone(anim)
+        self.assertEqual(anim.duration(), 150)
+        self.assertEqual(anim.easingCurve().type(),
+                         QEasingCurve.OutBack)
+        QTest.mouseClick(btn, Qt.LeftButton)
+        self.assertEqual(fired, [1, 1])
+        self.assertTrue(self._pump_until(
+            lambda: getattr(btn, "_press_dip_anim", None) is None,
+            timeout=2.0))
+        holder.close()
+
+    def test_approve_action_still_works_through_the_dip(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QDialog
+        dlg, found = self._dialog_buttons()
+        dlg.show()
+        self.app.processEvents()
+        QTest.mouseClick(found["Approve once"], Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(dlg.result(), QDialog.Accepted)
+        self.assertTrue(dlg.approved)
+        dlg.close()
+
+    def test_dip_is_purely_visual(self):
+        btn = self.research_room.gate_approve_btn
+        before = (btn.isEnabled(), btn.isChecked(), btn.text(),
+                  btn.toolTip(), btn.minimumSize(), btn.sizeHint())
+        btn.pressed.emit()
+        self.assertTrue(self._pump_until(
+            lambda: getattr(btn, "_press_dip_anim", None) is None,
+            timeout=2.0))
+        after = (btn.isEnabled(), btn.isChecked(), btn.text(),
+                 btn.toolTip(), btn.minimumSize(), btn.sizeHint())
+        self.assertEqual(after, before)
+
+    def test_repress_mid_dip_restarts_from_the_origin(self):
+        from PySide6.QtCore import QRect
+        btn = self.ask_room.composer_send_btn
+        origin = QRect(btn.geometry())
+        btn.pressed.emit()
+        first = getattr(btn, "_press_dip_anim", None)
+        self.assertIsNotNone(first)
+
+        def _mid_dip():
+            cur = getattr(btn, "_press_dip_anim", None)
+            return cur is not None and cur.currentTime() >= 50
+
+        self.assertTrue(self._pump_until(_mid_dip, timeout=2.0),
+                        "dip never reached mid-flight")
+        btn.pressed.emit()
+        second = getattr(btn, "_press_dip_anim", None)
+        self.assertIsNotNone(second)
+        self.assertIsNot(second, first)
+        self.assertTrue(self._pump_until(
+            lambda: getattr(btn, "_press_dip_anim", None) is None,
+            timeout=2.0))
+        self.assertEqual(btn.geometry(), origin)
+
+    def test_nothing_runs_at_rest_after_the_dip(self):
+        from PySide6.QtCore import QPropertyAnimation
+        for _, btn in self._dip_buttons():
+            btn.pressed.emit()
+        self.assertTrue(self._pump_until(self._all_dips_done,
+                                         timeout=2.0))
+        self.app.processEvents()
+        for name, btn in self._dip_buttons():
+            self.assertEqual(
+                btn.findChildren(QPropertyAnimation), [], name)
+            self.assertIsNone(
+                getattr(btn, "_press_dip_origin", None), name)
+
+
+# ------------------------------------------------------------------
+# Pre-load process check (2026-11-15): before a local model loads,
+# Forge looks for heavy programs fighting it for memory and offers
+# to close the ones the owner picks. The scan/kill core is pure
+# /proc work (forge/procscan.py) tested against a fake /proc dir;
+# the window and the _start_turn gate are tested on the real
+# window offscreen.
+# ------------------------------------------------------------------
+
+class _FakeProcDir:
+    """A fake /proc tree: write_proc adds one process (stat +
+    status + cmdline), write_stat sets the CPU totals. RSS is
+    given in whole MB."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+
+    @staticmethod
+    def _pages(mb):
+        return mb * 1024 * 1024 // 4096
+
+    def write_proc(self, pid, comm, ppid=1, uid=1000, rss_mb=0,
+                   utime=0, stime=0, argv0=None, cmdline_empty=False):
+        proc = self.root / str(pid)
+        proc.mkdir(parents=True, exist_ok=True)
+        fields = ["R", str(ppid)] + ["0"] * 9 + [str(utime),
+                                                 str(stime)] + \
+            ["0"] * 7 + ["0", str(self._pages(rss_mb))]
+        (proc / "stat").write_text(
+            f"{pid} ({comm}) " + " ".join(fields),
+            encoding="utf-8")
+        (proc / "status").write_text(
+            f"Name:\t{comm}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n",
+            encoding="utf-8")
+        if cmdline_empty:
+            (proc / "cmdline").write_bytes(b"")
+        else:
+            (proc / "cmdline").write_bytes(
+                (argv0 or comm).encode() + b"\x00")
+        return proc
+
+    def write_stat(self, total=1000):
+        (self.root / "stat").write_text(
+            f"cpu  {total} 0 0 0 0 0 0 0 0 0\n", encoding="utf-8")
+
+
+class ProcScanTests(unittest.TestCase):
+    """forge/procscan.py against a fake /proc: ranking, the floor,
+    and every exclusion. No Qt, no real /proc."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.fake = _FakeProcDir(self.temp.name)
+        self.fake.write_stat()
+        self.uid = 1000
+        self.own_pid = 99999
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _scan(self, **kwargs):
+        from forge import procscan as procscan_mod
+        kwargs.setdefault("proc_dir", self.temp.name)
+        kwargs.setdefault("own_pid", self.own_pid)
+        kwargs.setdefault("uid", self.uid)
+        kwargs.setdefault("sample_seconds", 0)
+        return procscan_mod.scan_heavy_processes(**kwargs)
+
+    def test_ranking_is_heaviest_first(self):
+        self.fake.write_proc(101, "firefox", rss_mb=1200)
+        self.fake.write_proc(102, "code", rss_mb=800)
+        self.fake.write_proc(103, "slack", rss_mb=1500)
+        found = self._scan()
+        self.assertEqual([p.pid for p in found], [103, 101, 102])
+        self.assertEqual(found[0].name, "slack")
+
+    def test_floor_excludes_small_processes(self):
+        from forge import procscan as procscan_mod
+        self.fake.write_proc(101, "big", rss_mb=201)
+        self.fake.write_proc(102, "small", rss_mb=199)
+        found = self._scan()
+        self.assertEqual([p.pid for p in found], [101])
+        self.assertEqual(procscan_mod.PROC_KILL_FLOOR_BYTES,
+                         200 * 1024 * 1024)
+
+    def test_denylist_excluded_whatever_they_weigh(self):
+        self.fake.write_proc(101, "cinnamon", rss_mb=1500)
+        self.fake.write_proc(102, "ollama", rss_mb=3000)
+        self.fake.write_proc(103, "pulseaudio", rss_mb=500)
+        self.fake.write_proc(104, "firefox", rss_mb=1200)
+        found = self._scan()
+        self.assertEqual([p.pid for p in found], [104])
+
+    def test_truncated_comm_still_denied(self):
+        # comm truncates at 15 chars: "gnome-keyring-d" is
+        # gnome-keyring-daemon, and it stays off the list.
+        self.fake.write_proc(101, "gnome-keyring-d", rss_mb=500,
+                             argv0="gnome-keyring-d")
+        self.fake.write_proc(102, "firefox", rss_mb=1200)
+        found = self._scan()
+        self.assertEqual([p.pid for p in found], [102])
+
+    def test_own_pid_and_descendants_excluded(self):
+        self.fake.write_proc(self.own_pid, "python3", rss_mb=1500)
+        self.fake.write_proc(201, "ffmpeg", ppid=self.own_pid,
+                             rss_mb=1500)
+        self.fake.write_proc(202, "firefox", rss_mb=1200)
+        found = self._scan()
+        self.assertEqual([p.pid for p in found], [202])
+
+    def test_pid_1_and_other_users_and_kernel_threads_excluded(self):
+        self.fake.write_proc(1, "systemd", rss_mb=1500)
+        self.fake.write_proc(301, "firefox", uid=1001, rss_mb=1500)
+        self.fake.write_proc(302, "kworker", rss_mb=1500,
+                             cmdline_empty=True)
+        self.fake.write_proc(303, "firefox", rss_mb=1200)
+        found = self._scan()
+        self.assertEqual([p.pid for p in found], [303])
+
+    def test_at_most_six_candidates(self):
+        from forge import procscan as procscan_mod
+        for i in range(8):
+            self.fake.write_proc(400 + i, f"hog{i}",
+                                 rss_mb=1000 - i * 10)
+        found = self._scan()
+        self.assertEqual(len(found), 6)
+        self.assertEqual(procscan_mod.PROC_KILL_MAX, 6)
+        self.assertEqual([p.pid for p in found],
+                         [400, 401, 402, 403, 404, 405])
+
+    def test_cpu_percent_math(self):
+        from forge import procscan as procscan_mod
+        # Half the machine's CPU between the samples.
+        self.assertAlmostEqual(
+            procscan_mod.cpu_percent(100, 150, 1000, 1100), 50.0)
+        # No time passed, or a process born between samples.
+        self.assertEqual(
+            procscan_mod.cpu_percent(100, 150, 1000, 1000), 0.0)
+        self.assertEqual(
+            procscan_mod.cpu_percent(150, 100, 1000, 1100), 0.0)
+        # Never over 100.
+        self.assertEqual(
+            procscan_mod.cpu_percent(0, 200, 1000, 1100), 100.0)
+
+    def test_scan_wires_cpu_from_two_samples(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        first = {101: {"comm": "firefox", "argv0": "firefox",
+                       "uid": 1000, "ppid": 1, "rss_bytes": 1200 << 20,
+                       "ticks": 100, "cmdline_empty": False}}
+        second = {101: {"comm": "firefox", "argv0": "firefox",
+                        "uid": 1000, "ppid": 1, "rss_bytes": 1200 << 20,
+                        "ticks": 150, "cmdline_empty": False}}
+        with mock.patch.object(
+                procscan_mod, "read_proc_snapshot",
+                side_effect=[(first, 1000), (second, 1100)]):
+            found = procscan_mod.scan_heavy_processes(
+                proc_dir=self.temp.name, own_pid=self.own_pid,
+                uid=self.uid, sample_seconds=0.01)
+        self.assertEqual(len(found), 1)
+        self.assertAlmostEqual(found[0].cpu_percent, 50.0)
+
+    def test_format_bytes(self):
+        from forge import procscan as procscan_mod
+        self.assertEqual(procscan_mod.format_bytes(1289 * 1024 * 1024),
+                         "1.3 GB")
+        self.assertEqual(procscan_mod.format_bytes(850 * 1024 * 1024),
+                         "850 MB")
+        self.assertEqual(procscan_mod.format_bytes(512 * 1024),
+                         "512 KB")
+
+
+class _FakeKiller:
+    """os.kill stand-in: records every call, and drops a pid from
+    the alive set on SIGTERM only when it is in die_on_term, on
+    SIGKILL always."""
+
+    def __init__(self, alive, die_on_term):
+        import signal as _signal
+        self.calls = []
+        self.alive = set(alive)
+        self.die_on_term = set(die_on_term)
+        self._signal = _signal
+
+    def kill(self, pid, sig):
+        self.calls.append((pid, sig))
+        if sig == self._signal.SIGTERM and pid in self.die_on_term:
+            self.alive.discard(pid)
+        elif sig == self._signal.SIGKILL:
+            self.alive.discard(pid)
+
+    def is_alive(self, pid):
+        return pid in self.alive
+
+
+class ProcKillTests(unittest.TestCase):
+    """kill_processes: TERM first, KILL only for survivors, and
+    the kill-time re-validation that refuses a denylisted or
+    foreign pid even when it is handed over explicitly."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.fake = _FakeProcDir(self.temp.name)
+        self.fake.write_stat()
+        self.uid = 1000
+        self.own_pid = 99999
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _kill(self, pids, killer):
+        from forge import procscan as procscan_mod
+        return procscan_mod.kill_processes(
+            pids, proc_dir=self.temp.name, own_pid=self.own_pid,
+            uid=self.uid, term_wait=0.05, kill_wait=0.05,
+            kill_fn=killer.kill, alive_fn=killer.is_alive)
+
+    def test_term_first_kill_only_survivors(self):
+        import signal
+        self.fake.write_proc(101, "firefox", rss_mb=1200)
+        self.fake.write_proc(102, "slack", rss_mb=800)
+        killer = _FakeKiller(alive={101, 102}, die_on_term={101})
+        result = self._kill([101, 102], killer)
+        self.assertEqual(result["killed"], [101, 102])
+        self.assertEqual(result["still_running"], [])
+        terms = [pid for pid, sig in killer.calls
+                 if sig == signal.SIGTERM]
+        kills = [pid for pid, sig in killer.calls
+                 if sig == signal.SIGKILL]
+        self.assertEqual(sorted(terms), [101, 102])
+        # 101 died on TERM and never saw a KILL.
+        self.assertEqual(kills, [102])
+
+    def test_only_listed_pids_are_touched(self):
+        self.fake.write_proc(101, "firefox", rss_mb=1200)
+        self.fake.write_proc(102, "slack", rss_mb=800)
+        killer = _FakeKiller(alive={101, 102}, die_on_term={101})
+        result = self._kill([101], killer)
+        self.assertEqual(result["killed"], [101])
+        self.assertEqual([pid for pid, _ in killer.calls], [101])
+
+    def test_denylisted_and_own_pids_refused_even_if_listed(self):
+        self.fake.write_proc(101, "cinnamon", rss_mb=1500)
+        self.fake.write_proc(self.own_pid, "python3", rss_mb=1500)
+        self.fake.write_proc(102, "firefox", rss_mb=1200)
+        killer = _FakeKiller(alive={101, 102, self.own_pid},
+                             die_on_term={101, 102})
+        result = self._kill([101, self.own_pid, 102], killer)
+        self.assertEqual(result["killed"], [102])
+        self.assertIn(101, result["refused"])
+        self.assertIn(self.own_pid, result["refused"])
+        self.assertNotIn(101, [pid for pid, _ in killer.calls])
+        self.assertNotIn(self.own_pid,
+                         [pid for pid, _ in killer.calls])
+
+    def test_gone_pid_reported_not_killed(self):
+        killer = _FakeKiller(alive=set(), die_on_term=set())
+        result = self._kill([777], killer)
+        self.assertEqual(result["gone"], [777])
+        self.assertEqual(killer.calls, [])
+
+    def test_stubborn_process_reported_still_running(self):
+        import signal
+        self.fake.write_proc(101, "firefox", rss_mb=1200)
+
+        class _Stubborn(_FakeKiller):
+            def kill(self, pid, sig):
+                self.calls.append((pid, sig))
+                # Never dies, whatever it is sent.
+
+        killer = _Stubborn(alive={101}, die_on_term=set())
+        result = self._kill([101], killer)
+        self.assertEqual(result["killed"], [])
+        self.assertEqual(result["still_running"], [101])
+        self.assertIn((101, signal.SIGKILL), killer.calls)
+
+
+class ProcessCheckDialogTests(unittest.TestCase):
+    """The pre-load window: at most six rows, nothing checked by
+    default, every row carrying name, PID, memory, and CPU, and
+    the three answers (kill / continue / cancel) all landing."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _candidates(self, count=3):
+        from forge.procscan import ProcessInfo
+        return [ProcessInfo(pid=100 + i, name=f"hog{i}",
+                            rss_bytes=(1200 - i * 100) * 1024 * 1024,
+                            cpu_percent=10.0 * (i + 1), uid=1000)
+                for i in range(count)]
+
+    def _dialog(self, count=3):
+        from forge.main import ProcessCheckDialog
+        dlg = ProcessCheckDialog(None, self._candidates(count))
+        self.addCleanup(dlg.close)
+        return dlg
+
+    def _boxes(self, dlg):
+        from PySide6.QtWidgets import QCheckBox
+        return dlg.findChildren(QCheckBox)
+
+    def test_shows_at_most_six_rows(self):
+        dlg = self._dialog(count=8)
+        self.assertEqual(len(self._boxes(dlg)), 6)
+
+    def test_nothing_checked_by_default(self):
+        dlg = self._dialog(count=3)
+        self.assertTrue(all(not box.isChecked()
+                            for box in self._boxes(dlg)))
+
+    def test_rows_carry_name_pid_memory_and_cpu(self):
+        dlg = self._dialog(count=2)
+        boxes = self._boxes(dlg)
+        self.assertIn("hog0", boxes[0].text())
+        self.assertIn("PID 100", boxes[0].text())
+        self.assertIn("1.2 GB", boxes[0].text())
+        self.assertIn("10% CPU", boxes[0].text())
+        self.assertIn("hog1", boxes[1].text())
+        self.assertIn("PID 101", boxes[1].text())
+
+    def test_kill_button_returns_checked_pids_only(self):
+        dlg = self._dialog(count=3)
+        boxes = self._boxes(dlg)
+        boxes[0].setChecked(True)
+        boxes[2].setChecked(True)
+        dlg.kill_btn.click()
+        self.assertEqual(dlg.choice, "kill")
+        self.assertEqual(dlg.selected_pids, [100, 102])
+
+    def test_continue_button(self):
+        dlg = self._dialog(count=3)
+        dlg.continue_btn.click()
+        self.assertEqual(dlg.choice, "continue")
+        self.assertEqual(dlg.selected_pids, [])
+
+    def test_cancel_button_and_default_choice(self):
+        dlg = self._dialog(count=3)
+        self.assertEqual(dlg.choice, "cancel")
+        dlg.cancel_btn.click()
+        self.assertEqual(dlg.choice, "cancel")
+        self.assertEqual(dlg.selected_pids, [])
+
+    def test_no_em_dash_in_any_visible_string(self):
+        from PySide6.QtWidgets import QLabel, QPushButton
+        dlg = self._dialog(count=2)
+        texts = [dlg.windowTitle()]
+        texts += [w.text() for w in dlg.findChildren(QLabel)]
+        texts += [w.text() for w in dlg.findChildren(QPushButton)]
+        texts += [w.text() for w in self._boxes(dlg)]
+        for text in texts:
+            self.assertNotIn("—", text)
+
+
+class PreLoadCheckTests(unittest.TestCase):
+    """The _start_turn gate: provider and resident turns skip the
+    check, a quiet system asks nothing, Cancel aborts the turn
+    with no worker started, and Kill closes only the checked
+    programs."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from forge import main as main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.store = ConversationStore(root / "c.db")
+        self.win.store = self.store
+        self.win.eventlog = EventLog(root / "log")
+        self._real_app_dir = main_mod.APP_DIR
+        main_mod.APP_DIR = root / "app"
+        self.win.conversation_id = None
+        self.win.worker = None
+
+    def tearDown(self):
+        from forge import main as main_mod
+        main_mod.APP_DIR = self._real_app_dir
+        self.win.worker = None
+        self.win._deck_send_active = False
+        self.temp.cleanup()
+
+    def _candidates(self):
+        from forge.procscan import ProcessInfo
+        return [ProcessInfo(pid=101, name="firefox",
+                            rss_bytes=1200 * 1024 * 1024,
+                            cpu_percent=25.0, uid=1000),
+                ProcessInfo(pid=102, name="slack",
+                            rss_bytes=800 * 1024 * 1024,
+                            cpu_percent=5.0, uid=1000)]
+
+    def test_provider_model_skips_the_check(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        with mock.patch.object(procscan_mod, "scan_heavy_processes",
+                               side_effect=AssertionError("scanned")):
+            self.assertTrue(self.win._pre_load_process_check(
+                "groq:openai/gpt-oss-120b"))
+
+    def test_resident_model_skips_the_check(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        with mock.patch.object(self.win.client, "ps",
+                               return_value=[{"name": "fake-model"}]), \
+                mock.patch.object(
+                    procscan_mod, "scan_heavy_processes",
+                    side_effect=AssertionError("scanned")):
+            self.assertTrue(
+                self.win._pre_load_process_check("fake-model"))
+
+    def test_quiet_system_asks_nothing(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        with mock.patch.object(self.win.client, "ps",
+                               return_value=[]), \
+                mock.patch.object(procscan_mod, "scan_heavy_processes",
+                                  return_value=[]), \
+                mock.patch.object(self.win, "_ask_process_check",
+                                  side_effect=AssertionError("asked")):
+            self.assertTrue(
+                self.win._pre_load_process_check("fake-model"))
+
+    def test_cancel_aborts_the_turn_with_no_worker(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        with mock.patch.object(self.win.client, "ps",
+                               return_value=[]), \
+                mock.patch.object(procscan_mod, "scan_heavy_processes",
+                                  return_value=self._candidates()), \
+                mock.patch.object(self.win, "_ask_process_check",
+                                  return_value=("cancel", [])):
+            self.assertFalse(
+                self.win._pre_load_process_check("fake-model"))
+            self.win._start_turn("fake-model", {}, "hello")
+        self.assertIsNone(self.win.worker)
+        self.assertEqual(self.win.agent_state.text(), "●  IDLE")
+
+    def test_kill_choice_closes_only_checked_pids(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        calls = []
+        result = {"killed": [101], "refused": {},
+                  "still_running": [], "gone": []}
+
+        def _fake_kill(pids):
+            calls.append(list(pids))
+            return result
+
+        with mock.patch.object(self.win.client, "ps",
+                               return_value=[]), \
+                mock.patch.object(procscan_mod, "scan_heavy_processes",
+                                  return_value=self._candidates()), \
+                mock.patch.object(self.win, "_ask_process_check",
+                                  return_value=("kill", [101])), \
+                mock.patch.object(procscan_mod, "kill_processes",
+                                  side_effect=_fake_kill):
+            self.assertTrue(
+                self.win._pre_load_process_check("fake-model"))
+        self.assertEqual(calls, [[101]])
+
+    def test_deck_send_skips_the_check(self):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        self.win._deck_send_active = True
+        try:
+            with mock.patch.object(
+                    procscan_mod, "scan_heavy_processes",
+                    side_effect=AssertionError("scanned")):
+                self.assertTrue(
+                    self.win._pre_load_process_check("fake-model"))
+        finally:
+            self.win._deck_send_active = False
+
+    def test_offscreen_ask_continues_without_killing(self):
+        # The test harness runs offscreen: no display, no user to
+        # answer, so the ask logs and continues instead of
+        # blocking on a modal nobody can see.
+        choice, pids = self.win._ask_process_check(self._candidates())
+        self.assertEqual(choice, "continue")
+        self.assertEqual(pids, [])
+
+
+class StartupUnloadTests(unittest.TestCase):
+    """The clean slate: at startup Forge unloads every resident
+    local model on a thread, silently when there is nothing to
+    unload or Ollama is down."""
+
+    def test_thread_unloads_each_resident_model(self):
+        from unittest import mock
+        from forge.main import StartupUnloadThread
+        client = mock.Mock()
+        client.ps.return_value = [{"name": "lfm3:1.7b"},
+                                  {"name": "qwen3:4b"}]
+        client.unload_model.return_value = True
+        done = []
+        thread = StartupUnloadThread(client)
+        thread.done.connect(done.append)
+        thread.run()
+        self.assertEqual(
+            [c.args[0] for c in client.unload_model.call_args_list],
+            ["lfm3:1.7b", "qwen3:4b"])
+        self.assertEqual(done, [["lfm3:1.7b", "qwen3:4b"]])
+
+    def test_thread_quiet_when_nothing_resident(self):
+        from unittest import mock
+        from forge.main import StartupUnloadThread
+        client = mock.Mock()
+        client.ps.return_value = []
+        done = []
+        thread = StartupUnloadThread(client)
+        thread.done.connect(done.append)
+        thread.run()
+        client.unload_model.assert_not_called()
+        self.assertEqual(done, [[]])
+
+    def test_thread_survives_client_failure(self):
+        from unittest import mock
+        from forge.main import StartupUnloadThread
+        client = mock.Mock()
+        client.ps.side_effect = RuntimeError("boom")
+        done = []
+        thread = StartupUnloadThread(client)
+        thread.done.connect(done.append)
+        thread.run()
+        self.assertEqual(done, [[]])
+
+    def test_window_starts_unload_at_startup(self):
+        import time
+        from unittest import mock
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        win = ForgeWindow()
+        try:
+            # The construction-time unload runs on the real client
+            # (Ollama down: fast empty). Wait for it before
+            # swapping in the mock, or the second start is a no-op.
+            first = win._startup_unload_thread
+            deadline = time.time() + 10
+            while first is not None and first.isRunning() \
+                    and time.time() < deadline:
+                app.processEvents()
+                time.sleep(0.05)
+            client = mock.Mock()
+            client.ps.return_value = [{"name": "lfm3:1.7b"}]
+            client.unload_model.return_value = True
+            real_client = win.client
+            win.client = client
+            try:
+                win._unload_resident_at_startup()
+                thread = win._startup_unload_thread
+                self.assertIsNotNone(thread)
+                deadline = time.time() + 10
+                while thread.isRunning() and time.time() < deadline:
+                    app.processEvents()
+                    time.sleep(0.05)
+                app.processEvents()
+                self.assertFalse(thread.isRunning())
+            finally:
+                win.client = real_client
+            client.unload_model.assert_called_once_with("lfm3:1.7b")
+        finally:
+            win.close()
 
 
 class DeckAppLayoutTests(unittest.TestCase):
@@ -23304,8 +24633,9 @@ class BenchDialogTests(unittest.TestCase):
         from forge.main import BenchDialog
         return BenchDialog(self.win, list(models), object(), **kw)
 
-    def test_menu_entries_exist(self):
-        self.assertTrue(hasattr(self.win, "act_bench"))
+    def test_view_menu_entry_exists(self):
+        # F11 trimmed the Menu's copy; View is the door.
+        self.assertFalse(hasattr(self.win, "act_bench"))
         self.assertTrue(hasattr(self.win, "view_act_bench"))
 
     def test_dialog_populates_models_and_preselects_current(self):
@@ -24099,7 +25429,6 @@ class RecipesDialogTests(unittest.TestCase):
         self._write_recipe("release.json", data)
 
     def test_window_wiring_menu(self):
-        self.assertIn("Recipes", self.win.act_recipes.text())
         self.assertIn("Recipes", self.win.view_act_recipes.text())
         self.assertTrue(callable(self.win.open_recipes))
 
@@ -33938,13 +35267,12 @@ class PrivacyWindowTests(unittest.TestCase):
                       "No usage meter. Nothing expires.", text)
         self.assertIn("no telemetry and no phone-home", text)
 
-    def test_open_privacy_window_from_both_menus(self):
+    def test_open_privacy_window_from_the_view_menu(self):
         win = self.win
         self.assertTrue(hasattr(win, "view_act_privacy"))
         self.assertIn("Privacy window", win.view_act_privacy.text())
-        self.assertTrue(hasattr(win, "act_privacy_window"))
-        self.assertIn("Privacy window",
-                      win.act_privacy_window.text())
+        # F11 trimmed the Menu's copy; View is the door.
+        self.assertFalse(hasattr(win, "act_privacy_window"))
         win.open_privacy_window()
         self.app.processEvents()
         self.assertTrue(win.privacy_win.isVisible())
@@ -34535,11 +35863,13 @@ class SessionNotesTests(unittest.TestCase):
         self.assertIn("Beta note", text)
         self.assertNotIn("Alpha note", text)
 
-    def test_menus_open_both_windows(self):
+    def test_view_menu_opens_both_windows(self):
         win = self.win
-        for attr in ("act_notes_window", "act_sees_window",
-                     "view_act_notes", "view_act_sees"):
+        # F11 trimmed the Menu's copies; View is the door.
+        for attr in ("view_act_notes", "view_act_sees"):
             self.assertTrue(hasattr(win, attr), attr)
+        self.assertFalse(hasattr(win, "act_notes_window"))
+        self.assertFalse(hasattr(win, "act_sees_window"))
         win.open_notes_window()
         self.assertTrue(win.notes_win.isVisible())
         win.open_sees_window()
@@ -44780,8 +46110,8 @@ class TestingWindowTests(unittest.TestCase):
         self.app.processEvents()
         self.assertIs(self.win.testing_win, view)
         self.assertTrue(view.isVisible())
-        # Both menus and the palette carry the same door.
-        self.assertIsNotNone(self.win.act_testing_window)
+        # The View menu and the palette carry the same door.
+        # (F11 trimmed the Menu's copy.)
         self.assertIsNotNone(self.win.view_act_testing)
         _entries, bindings = self.win.palette_actions()
         self.assertIn("testing_window", bindings)
@@ -45761,7 +47091,7 @@ class DesignCanvasWindowTests(unittest.TestCase):
         self.win.open_design_canvas()
         self.app.processEvents()
         self.assertIs(self.win.design_canvas_win, view)
-        self.assertIsNotNone(self.win.act_design_canvas)
+        # F11 trimmed the Menu's copy; View is the door.
         self.assertIsNotNone(self.win.view_act_design_canvas)
         _entries, bindings = self.win.palette_actions()
         self.assertIn("design_canvas", bindings)
