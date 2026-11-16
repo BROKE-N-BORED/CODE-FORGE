@@ -314,10 +314,13 @@ class ConversationHistoryWindowTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _history_button_texts(self):
+        # F22: the empty-state label lives in the same layout —
+        # count history buttons only.
+        from PySide6.QtWidgets import QPushButton
         texts = []
         for i in range(self.win.history_list.count()):
             widget = self.win.history_list.itemAt(i).widget()
-            if widget is not None:
+            if isinstance(widget, QPushButton):
                 texts.append(widget.text())
         return texts
 
@@ -327,12 +330,21 @@ class ConversationHistoryWindowTests(unittest.TestCase):
         self.assertTrue(any("alpha widget plans" in t for t in texts))
         self.assertTrue(any("beta soup recipe" in t for t in texts))
         # Typing a query leaves only the matching chat's button.
+        # F6: the search is debounced + off-thread, so the loop
+        # must run before the list lands. The alpha wait is a
+        # count (2 buttons -> 1); the simmer wait is content
+        # (the list already holds one button from the alpha
+        # search when the second search starts, so a count
+        # would return at once on the stale list).
         self.win.history_search.setText("alpha")
+        _wait_for_history(lambda: len(self._history_button_texts()) == 1)
         texts = self._history_button_texts()
         self.assertEqual(len(texts), 1)
         self.assertIn("alpha widget plans", texts[0])
         # A word that only appears in a message body matches too.
         self.win.history_search.setText("simmer")
+        _wait_for_history(lambda: any("beta soup recipe" in t
+                                      for t in self._history_button_texts()))
         texts = self._history_button_texts()
         self.assertEqual(len(texts), 1)
         self.assertIn("beta soup recipe", texts[0])
@@ -448,10 +460,13 @@ class ProjectScopedConversationsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _history_button_texts(self):
+        # F22: the empty-state label lives in the same layout —
+        # count history buttons only.
+        from PySide6.QtWidgets import QPushButton
         texts = []
         for i in range(self.win.history_list.count()):
             widget = self.win.history_list.itemAt(i).widget()
-            if widget is not None:
+            if isinstance(widget, QPushButton):
                 texts.append(widget.text())
         return texts
 
@@ -489,9 +504,13 @@ class ProjectScopedConversationsTests(unittest.TestCase):
         self.assertTrue(any("unfiled old chat" in t for t in texts))
 
     def test_search_stays_inside_the_current_project(self):
+        # F6: the search is debounced + off-thread, so the loop
+        # must run before the list lands.
         self.win.history_search.setText("beta")
+        _wait_for_history(lambda: self._history_button_texts() == [])
         self.assertEqual(self._history_button_texts(), [])
         self.win.history_search.setText("alpha")
+        _wait_for_history(lambda: len(self._history_button_texts()) == 1)
         texts = self._history_button_texts()
         self.assertEqual(len(texts), 1)
         self.assertIn("alpha project plans", texts[0])
@@ -2463,7 +2482,7 @@ class TrustCompletionTests(unittest.TestCase):
             self.assertIsNone(dlg.remember_btn)
             self.assertIsNotNone(dlg.sensitive_note)
             self.assertEqual(dlg.sensitive_note.text(),
-                             "Sensitive files always ask — this can't be remembered.")
+                             "Sensitive files always ask: this can't be remembered.")
             self.assertEqual(dlg.risk_text, "Sensitive file · always asks")
             self.assertIsNotNone(dlg.risk_label)
             texts = [b.text() for b in dlg.findChildren(QPushButton)]
@@ -8778,7 +8797,7 @@ class LoadConversationProjectTests(unittest.TestCase):
         # Item #50 adaptation: no cwd edit exists anymore — the
         # surface proves the follow by its title and its rescan of
         # the restored project's files.
-        self.assertEqual(self.win.run_win.windowTitle(), "Run — proj_b")
+        self.assertEqual(self.win.run_win.windowTitle(), "Run: proj_b")
         listed = [self.win.run_file_list.item(i).text()
                   for i in range(self.win.run_file_list.count())]
         self.assertTrue(any("hello.py" in row for row in listed), listed)
@@ -9221,7 +9240,7 @@ class DeckPromptDeliveryTests(unittest.TestCase):
             ok, message = self.win._deliver_phone_prompt("queued one")
             self.assertTrue(ok)
             self.assertEqual(message,
-                             "Queued — it runs when the current turn ends.")
+                             "Queued. It runs when the current turn ends.")
             ok, message = self.win._deliver_phone_prompt("queued two")
             self.assertTrue(ok)
             self.assertIn("#2 in line", message)
@@ -9283,7 +9302,7 @@ class DeckPromptDeliveryTests(unittest.TestCase):
         import urllib.request
         from forge.deck import DeckServer
         server = DeckServer()
-        verdict = {"answer": (True, "Received — the Forge is on it.")}
+        verdict = {"answer": (True, "Received. The Forge is on it.")}
 
         def slot(text, holder):
             holder["result"] = verdict["answer"]
@@ -9446,7 +9465,7 @@ class DeckPlanActionTests(unittest.TestCase):
         self.win._deck_plan_action("approve", holder)
         self.assertTrue(holder["event"].is_set())
         self.assertEqual(holder["result"],
-                         (True, "Plan approved — working the steps."))
+                         (True, "Plan approved: working the steps."))
         self.assertEqual(self.win.plan_state["status"], "running")
         self.assertEqual(worker.calls, [("approve", ["Step A", "Step B"])])
 
@@ -9459,7 +9478,7 @@ class DeckPlanActionTests(unittest.TestCase):
         self.win._deck_plan_action("kill", holder)
         self.assertTrue(holder["event"].is_set())
         self.assertEqual(holder["result"],
-                         (True, "Plan killed — nothing was executed."))
+                         (True, "Plan killed: nothing was executed."))
         self.assertEqual(self.win.plan_state["status"], "killed")
         self.assertEqual(worker.calls, [("kill", None)])
 
@@ -9490,7 +9509,7 @@ class DeckPlanActionTests(unittest.TestCase):
         from forge.deck import DeckServer
         server = DeckServer()
         seen = []
-        verdict = {"answer": (True, "Plan approved — working the steps.")}
+        verdict = {"answer": (True, "Plan approved: working the steps.")}
 
         def slot(action, holder):
             seen.append(action)
@@ -9715,7 +9734,7 @@ class DeckFanOutTests(unittest.TestCase):
             self.assertEqual(len(seen), 1)
             # The window's own refusal rides back as the error.
             verdict["answer"] = (False,
-                                 "Fan-out refused — a fan-out is already running.")
+                                 "Fan-out refused. A fan-out is already running.")
             status, body = post({"items": ["a one"],
                                  "independent": True})
             self.assertEqual(status, 200)
@@ -9806,14 +9825,14 @@ class DeckProposalTests(unittest.TestCase):
             self.win._deck_proposal_decision(
                 {"id": "p-1", "accept": True}, holder)
             self.assertEqual(holder["result"],
-                             (True, "Proposal accepted — running "
+                             (True, "Proposal accepted: running "
                               "through the gate."))
             self.assertEqual(seen["args"], ("p-1", True))
             holder = self._holder()
             self.win._deck_proposal_decision(
                 {"id": "p-1", "accept": False}, holder)
             self.assertEqual(holder["result"],
-                             (True, "Proposal declined — nothing "
+                             (True, "Proposal declined: nothing "
                               "runs."))
             self.assertEqual(seen["args"], ("p-1", False))
             # An id that is not pending never reaches decide.
@@ -9843,7 +9862,7 @@ class DeckProposalTests(unittest.TestCase):
         from forge.deck import DeckServer
         server = DeckServer()
         seen = []
-        verdict = {"answer": (True, "Proposal declined — nothing runs.")}
+        verdict = {"answer": (True, "Proposal declined: nothing runs.")}
 
         def slot(payload, holder):
             seen.append(payload)
@@ -10125,7 +10144,7 @@ class AttachmentManagementTests(unittest.TestCase):
         self.win._append_pending_image("second.png", second)
         self.win._append_pending_upload(
             "notes.txt",
-            "[Owner attached a file: notes.txt — saved at "
+            "[Owner attached a file: notes.txt. Saved at "
             ".forge/uploads/notes.txt in this project.]")
         gone = self.win._remove_pending(0)
         self.assertEqual(gone["name"], "first.png")
@@ -11663,7 +11682,7 @@ class RunWindowTests(unittest.TestCase):
         # (item #50: "Run — <project name>", not a static title),
         # and starts hidden.
         self.assertEqual(self.win.run_win.windowTitle(),
-                         f"Run — {self.root.name}")
+                         f"Run: {self.root.name}")
         self.assertFalse(self.win.run_win.isVisible())
 
     def test_run_window_opens_and_reopen_raises_the_same_instance(self):
@@ -11726,7 +11745,7 @@ class RunWindowTests(unittest.TestCase):
         # Invariant kept: the streamed line and the exit trailer
         # are both in the surface's text.
         self.assertIn("run hello", self.win.run_win.blocks_text())
-        self.assertIn("— exited 0", self.win.run_win.blocks_text())
+        self.assertIn("- exited 0", self.win.run_win.blocks_text())
         self.assertTrue(self.win.run_start_btn.isEnabled())
         self.assertFalse(self.win.run_stop_btn.isEnabled())
 
@@ -11747,7 +11766,7 @@ class RunWindowTests(unittest.TestCase):
         other.mkdir()
         (other / "showpwd.sh").write_text("#!/bin/sh\npwd\n")
         self.win.set_project(str(other))
-        self.assertEqual(self.win.run_win.windowTitle(), "Run — other-project")
+        self.assertEqual(self.win.run_win.windowTitle(), "Run: other-project")
         # F16: refresh no longer auto-selects, so the test picks
         # the file explicitly before running it.
         self.win.run_file_list.setCurrentRow(0)
@@ -11922,7 +11941,7 @@ class RunWindowTests(unittest.TestCase):
         out = self.win.run_win.blocks_text()
         self.assertIn("$ bash hello.sh", out)
         self.assertIn("surface-marker", out)
-        self.assertIn("— exited 0", out)
+        self.assertIn("- exited 0", out)
 
     def test_rescan_picks_up_a_newly_created_file(self):
         self.assertNotIn("late.py", self._listed_rels())
@@ -12096,7 +12115,7 @@ class RunBlocksTests(unittest.TestCase):
                          "could not start: No such file or directory")
         self.assertEqual(
             self.win.run_win.blocks_text(),
-            "$ nope --run\nNo such file or directory\n— could not start")
+            "$ nope --run\nNo such file or directory\n- could not start")
 
     def test_manual_toggle_works_both_ways_at_any_time(self):
         self._start("printf 'x\\n'")
@@ -12125,8 +12144,8 @@ class RunBlocksTests(unittest.TestCase):
             lambda: self.win.run_status.text() == "exited 3"))
         self.assertEqual(
             self.win.run_win.blocks_text(),
-            "$ printf 'one\\n'\none\n— exited 0\n"
-            "$ printf 'two\\n'; exit 3\ntwo\n— exited 3")
+            "$ printf 'one\\n'\none\n- exited 0\n"
+            "$ printf 'two\\n'; exit 3\ntwo\n- exited 3")
 
     def test_cap_drops_oldest_finished_block_then_trims(self):
         from forge import runwindow
@@ -14384,7 +14403,7 @@ class ArchiveCleanupTests(unittest.TestCase):
         (self.ctx_dir / "fold-2.json").unlink()
         dlg2.archives_line.setText(dlg2._archives_text())
         self.assertEqual(dlg2.archives_line.text(),
-                         "0 files — nothing archived yet.")
+                         "0 files: nothing archived yet.")
 
     def test_dialog_defaults_auto_prune_off_days_30(self):
         from forge.main import SettingsDialog
@@ -18976,6 +18995,928 @@ class DebugReportButtonTests(unittest.TestCase):
             self.win.settings.pop("fake_provider_key", None)
 
 
+def _wait_for_history(predicate, timeout=5.0):
+    """Pump the event loop until `predicate` holds or the timeout
+    expires. The history search is debounced (150 ms) and runs
+    off-thread (GUIFX F6), so a setText needs the loop to run
+    before the list lands. Returns True if the predicate held."""
+    import time
+    from PySide6.QtWidgets import QApplication
+    deadline = time.monotonic() + timeout
+    while True:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+class HistorySearchOffThreadTests(unittest.TestCase):
+    """GUIFX F6: the Conversations search runs off the GUI thread,
+    debounced 150 ms, with a loading state while it runs. Results
+    land in the same list, same order; a stale search never
+    overwrites a newer one."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win.conversation_id = None
+        self.win.messages = []
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+        self.win.history_search.setText("")
+        self.win._history_signature = None
+        self.win.refresh_history()
+
+    def tearDown(self):
+        self.win.history_search.setText("")
+        timer = getattr(self.win, "_history_search_timer", None)
+        if timer is not None:
+            timer.stop()
+        _wait_for_history(
+            lambda: not getattr(self.win, "_history_search_threads", {}),
+            timeout=2.0)
+        self.win.deck._server = self._real_server
+        self.win.worker = None
+        self.temp.cleanup()
+
+    def _history_button_texts(self):
+        from PySide6.QtWidgets import QPushButton
+        texts = []
+        for i in range(self.win.history_list.count()):
+            widget = self.win.history_list.itemAt(i).widget()
+            if isinstance(widget, QPushButton):
+                texts.append(widget.text())
+        return texts
+
+    def _plant(self, count, body_words=30):
+        body = "filler text about widgets and plans " * body_words
+        for i in range(count):
+            self.win.store.save(None, [{"role": "user",
+                                        "content": f"planted chat {i:04d} {body}"}])
+
+    def test_typing_stays_responsive_during_a_search(self):
+        # Planted N=2000 store. This sandbox's tmpfs SQLite runs
+        # the real scan in ~5 ms, far under Round 2's measured
+        # 104.8 ms at N=2000 — so the search is wrapped with a
+        # 500 ms sleep standing in for the scan cost on the
+        # owner's HDD machine. The probe FAILS against current
+        # (synchronous) code two ways: setText blocks until the
+        # search completes (the list is already empty when it
+        # returns), and the timer cannot fire while the GUI
+        # thread is stuck in the scan. It asserts ordering, not
+        # wall-clock gaps — a gap probe is load-sensitive (a
+        # 383 ms scheduling stall was observed on this VM).
+        self._plant(2000)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertEqual(len(self._history_button_texts()), 200)
+        real_search = self.win.store.search
+
+        def slow_search(query, limit=200):
+            import time as _time
+            _time.sleep(0.5)
+            return real_search(query, limit=limit)
+
+        import time
+        from PySide6.QtCore import QTimer
+        fires = []
+        timer = QTimer()
+        timer.setInterval(20)
+        timer.timeout.connect(lambda: fires.append(time.monotonic()))
+        try:
+            self.win.store.search = slow_search
+            timer.start()
+            _wait_for_history(lambda: len(fires) >= 3, timeout=2.0)
+            fires_at_start = len(fires)
+            self.win.history_search.setText("zzz-no-match-anywhere")
+            # The search has not run yet: the old list is still
+            # showing. On synchronous code this fails — setText
+            # blocks until the scan finishes and the list is
+            # already empty here.
+            self.assertEqual(len(self._history_button_texts()), 200)
+            # The timer keeps firing while the search is in
+            # flight — the GUI thread is free.
+            self.assertTrue(_wait_for_history(
+                lambda: (len(fires) > fires_at_start
+                         and len(self._history_button_texts()) == 200),
+                timeout=5.0),
+                "timer never fired while the search was in flight")
+            # And the results still land.
+            self.assertTrue(_wait_for_history(
+                lambda: self._history_button_texts() == [],
+                timeout=5.0))
+        finally:
+            timer.stop()
+            self.win.store.search = real_search
+
+    def test_ten_rapid_keystrokes_produce_one_search(self):
+        self._plant(10)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        real_search = self.win.store.search
+        calls = {"n": 0}
+
+        def counting_search(query, limit=200):
+            calls["n"] += 1
+            return real_search(query, limit=limit)
+
+        try:
+            self.win.store.search = counting_search
+            for i in range(10):
+                self.win.history_search.setText(f"keystroke {i}")
+            _wait_for_history(lambda: calls["n"] >= 1, timeout=5.0)
+            _wait_for_history(
+                lambda: not self.win._history_search_threads,
+                timeout=5.0)
+        finally:
+            self.win.store.search = real_search
+        self.assertEqual(calls["n"], 1)
+
+    def test_off_thread_results_match_the_synchronous_path(self):
+        # Correctness, not mechanism: the same rows the sync path
+        # returns, in the same order. Passes on pristine by design
+        # (the sync path gives the same answers) — the mechanism
+        # is pinned by the other tests in this class.
+        self._plant(50)
+        self.win.store.save(None, [{"role": "user",
+                                    "content": "needle alpha one"}])
+        self.win.store.save(None, [{"role": "user",
+                                    "content": "needle alpha two"}])
+        self.win.store.save(None, [{"role": "user",
+                                    "content": "other beta"}])
+        self.win._history_signature = None
+        self.win.refresh_history()
+        expected_rows = self.win.store.search("needle", limit=100000)
+        expected = self.win._history_visible_rows(expected_rows)[:200]
+        expected_titles = [r.get("title") for r, _u in expected]
+        self.win.history_search.setText("needle")
+        _wait_for_history(
+            lambda: len(self._history_button_texts()) == len(expected_titles),
+            timeout=5.0)
+        texts = self._history_button_texts()
+        self.assertEqual(len(texts), len(expected_titles))
+        for title in expected_titles:
+            self.assertTrue(any(title in t for t in texts),
+                            f"missing {title!r} in {texts}")
+
+    def test_a_stale_search_never_overwrites_a_newer_one(self):
+        import threading
+        self._plant(10)
+        self.win.store.save(None, [{"role": "user",
+                                    "content": "zebra unique alpha"}])
+        self.win.store.save(None, [{"role": "user",
+                                    "content": "yak unique beta"}])
+        self.win._history_signature = None
+        self.win.refresh_history()
+        real_search = self.win.store.search
+        calls = {"n": 0}
+        release = threading.Event()
+
+        def gated_search(query, limit=200):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # The first search waits until the test releases
+                # it — so it lands AFTER the newer search.
+                release.wait(timeout=10.0)
+            return real_search(query, limit=limit)
+
+        try:
+            self.win.store.search = gated_search
+            self.win.history_search.setText("zebra")
+            self.win._start_history_search()
+            # Wait until the first worker is inside its search.
+            _wait_for_history(lambda: calls["n"] == 1, timeout=5.0)
+            self.win.history_search.setText("yak")
+            self.win._start_history_search()
+            self.win._history_search_timer.stop()
+            # The newer search lands while the older is stuck.
+            self.assertTrue(_wait_for_history(
+                lambda: any("yak unique beta" in t
+                            for t in self._history_button_texts()),
+                timeout=5.0))
+            # Now release the older search — its results must be
+            # discarded, not painted over the newer ones.
+            release.set()
+            _wait_for_history(
+                lambda: not self.win._history_search_threads,
+                timeout=5.0)
+        finally:
+            self.win.store.search = real_search
+        texts = self._history_button_texts()
+        self.assertEqual(len(texts), 1)
+        self.assertIn("yak unique beta", texts[0])
+
+    def test_a_slow_search_shows_the_loading_state(self):
+        self._plant(10)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        real_search = self.win.store.search
+
+        def slow_search(query, limit=200):
+            import time as _time
+            _time.sleep(0.3)
+            return real_search(query, limit=limit)
+
+        try:
+            self.win.store.search = slow_search
+            self.win.history_search.setText("zzz-no-match-anywhere")
+            seen_loading = _wait_for_history(
+                lambda: not self.win._history_loading_label.isHidden(),
+                timeout=5.0)
+            self.assertTrue(seen_loading, "loading state never showed")
+            _wait_for_history(
+                lambda: self.win._history_loading_label.isHidden(),
+                timeout=5.0)
+        finally:
+            self.win.store.search = real_search
+        self.assertTrue(self.win._history_loading_label.isHidden())
+
+
+class HistoryCapLabelTests(unittest.TestCase):
+    """GUIFX F21: the 200 cap gets its count — the exact number,
+    not "200+"."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win.conversation_id = None
+        self.win.messages = []
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+        self.win.history_search.setText("")
+        self.win._history_signature = None
+        self.win.refresh_history()
+
+    def tearDown(self):
+        self.win.history_search.setText("")
+        self.win.deck._server = self._real_server
+        self.win.worker = None
+        self.temp.cleanup()
+
+    def _plant(self, count):
+        for i in range(count):
+            self.win.store.save(None, [{"role": "user",
+                                        "content": f"cap chat {i:03d}"}])
+
+    def test_cap_label_reads_correctly_with_250_conversations(self):
+        self._plant(250)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertFalse(self.win._history_cap_label.isHidden())
+        self.assertEqual(self.win._history_cap_label.text(),
+                         "Showing 200 of 250. Search to find older chats.")
+
+    def test_cap_label_hides_at_exactly_200(self):
+        self._plant(200)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertTrue(self.win._history_cap_label.isHidden())
+
+    def test_cap_label_hides_with_a_few_conversations(self):
+        self._plant(3)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertTrue(self.win._history_cap_label.isHidden())
+
+    def test_cap_label_has_no_em_dash(self):
+        self._plant(250)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertNotIn("\u2014", self.win._history_cap_label.text())
+
+
+class HistoryEmptyStateTests(unittest.TestCase):
+    """GUIFX F22: the history list gets an empty state — one
+    wording for no conversations at all, another for a search
+    with no match."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self.win.worker = None
+        self.win.conversation_id = None
+        self.win.messages = []
+        self._real_server = self.win.deck._server
+        self.win.deck._server = object()
+        self.win.history_search.setText("")
+        self.win._history_signature = None
+        self.win.refresh_history()
+
+    def tearDown(self):
+        self.win.history_search.setText("")
+        timer = getattr(self.win, "_history_search_timer", None)
+        if timer is not None:
+            timer.stop()
+        _wait_for_history(
+            lambda: not getattr(self.win, "_history_search_threads", {}),
+            timeout=2.0)
+        self.win.deck._server = self._real_server
+        self.win.worker = None
+        self.temp.cleanup()
+
+    def _plant(self, count):
+        for i in range(count):
+            self.win.store.save(None, [{"role": "user",
+                                        "content": f"empty chat {i:03d}"}])
+
+    def test_no_conversations_shows_the_start_prompt(self):
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertFalse(self.win._history_empty_label.isHidden())
+        self.assertEqual(
+            self.win._history_empty_label.text(),
+            "No conversations yet. Start one with New conversation above.")
+
+    def test_search_with_no_match_names_the_query(self):
+        self._plant(5)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.win.history_search.setText("zzz-no-match")
+        _wait_for_history(
+            lambda: not self.win._history_empty_label.isHidden(),
+            timeout=5.0)
+        self.assertEqual(self.win._history_empty_label.text(),
+                         "No conversations match 'zzz-no-match'.")
+
+    def test_empty_state_hides_when_conversations_exist(self):
+        self._plant(5)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertTrue(self.win._history_empty_label.isHidden())
+
+    def test_empty_state_wordings_have_no_em_dash(self):
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.assertNotIn("\u2014", self.win._history_empty_label.text())
+        self._plant(5)
+        self.win._history_signature = None
+        self.win.refresh_history()
+        self.win.history_search.setText("zzz-no-match")
+        _wait_for_history(
+            lambda: not self.win._history_empty_label.isHidden(),
+            timeout=5.0)
+        self.assertNotIn("\u2014", self.win._history_empty_label.text())
+
+
+class ModelRoleLineTests(unittest.TestCase):
+    """F7 (U39): model rows say what the model does. The role
+    data already exists — forge/governor.py MODELS roster notes
+    — and the local row surfaces the note VERBATIM where the
+    roster knows the model. Unknown models get no invented line
+    (the same honesty the fit badge follows for typed tags).
+    The pull rows already carried the note; this is the local
+    rows catching up. The note gets its own objectName
+    ("role_note"): ModelFitTests counts exactly one
+    "provenance" label per row, and the note must not disturb
+    that. The roster text is read from governor.MODELS in the
+    tests, never hardcoded here — if the roster changes, the
+    test follows it."""
+
+    RAM_8GIB = 8 * 1024 ** 3
+
+    SEED = [
+        {"name": "maternion/minicpm5-heretic:2b",
+         "size": 2_700_000_000,
+         "digest": "3f9a1b2c4d5e6f708192a3b4c5d6e7f8"},
+        {"name": "dolphinlabs/qwen3.5-uncensored:latest",
+         "size": 2_100_000_000,
+         "digest": "aaaa5555cccc6666dddd7777"},
+        {"name": "eriktonon/bonsai-2-uncensored:2b",
+         "size": 1_000_000_000,
+         "digest": "1234567890abcdef1234"},
+        {"name": "bonsai-2:4b", "size": 1_500_000_000},
+        # Unknown: a different size variant of a roster repo
+        # (R150 exact-match honesty — "bonsai-2:2b" is NOT the
+        # 4B roster entry) and a model from nowhere.
+        {"name": "bonsai-2:2b", "size": 1_000_000_000},
+        {"name": "someone/else:1b", "size": 500_000_000},
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        # Drain the startup models thread (the ModelFitTests
+        # idiom) so a late apply can't stomp the seeded state.
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from unittest import mock
+        from forge import modelfit
+        self.win.settings["num_ctx"] = 8192
+        patcher = mock.patch.object(
+            modelfit, "total_ram_bytes", lambda: self.RAM_8GIB)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.win._apply_models(list(self.SEED))
+        self.room = self.win.models_win
+        self.room.refresh()
+
+    @staticmethod
+    def _labels(widget, object_name):
+        from PySide6.QtWidgets import QLabel
+        return [lab for lab in widget.findChildren(QLabel)
+                if lab.objectName() == object_name]
+
+    def _row_for(self, name):
+        for row in self.room._local_rows:
+            if row["entry"].get("name") == name:
+                return row
+        self.fail(f"no local row for {name!r}")
+
+    def test_role_lines_match_the_roster_verbatim(self):
+        from forge import governor
+        for key, info in governor.MODELS.items():
+            row = self._row_for(info["ollama"])
+            found = self._labels(row["widget"], "role_note")
+            self.assertEqual(len(found), 1)
+            # Verbatim: the rendered text IS the roster note.
+            self.assertEqual(found[0].text(), info["note"])
+            self.assertEqual(row["role_note"], info["note"])
+
+    def test_unknown_models_show_no_role_line(self):
+        for name in ("bonsai-2:2b", "someone/else:1b"):
+            row = self._row_for(name)
+            self.assertEqual(
+                self._labels(row["widget"], "role_note"), [])
+            self.assertEqual(row["role_note"], "")
+
+    def test_bare_latest_tag_gets_the_line(self):
+        # model_key_for: a tag with no variant means :latest
+        # (Ollama's own rule), so the bare repo name maps to
+        # the qwen-dolphin roster entry.
+        from forge import governor
+        self.win._apply_models([
+            {"name": "dolphinlabs/qwen3.5-uncensored",
+             "size": 2_100_000_000}])
+        self.room.refresh()
+        row = self._row_for("dolphinlabs/qwen3.5-uncensored")
+        found = self._labels(row["widget"], "role_note")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(
+            found[0].text(),
+            governor.MODELS["qwen-dolphin"]["note"])
+
+    def test_role_note_does_not_disturb_provenance(self):
+        # ModelFitTests counts exactly one provenance label per
+        # row; the role note is a second label with its own
+        # objectName, never a second provenance label.
+        for row in self.room._local_rows:
+            self.assertEqual(
+                len(self._labels(row["widget"], "provenance")), 1)
+
+
+class PullResumeNoteTests(unittest.TestCase):
+    """F15 (U24/U17): a stopped pull says it can be resumed. A
+    pull that ends stopped or failed leaves a partial download
+    behind — the pull note says the next step in plain words,
+    next to the field it came from: pull the same tag again to
+    pick up where it left off. The claim is true per Ollama's
+    own source (server/download.go: Prepare() restores the
+    -partial-* part files and the re-pull requests only the
+    missing byte ranges). The note appears ONLY on stopped /
+    failed pulls: never on a clean pull, never on another run,
+    never on a pull that never started (nothing to resume).
+    Tests drive _on_run_finished directly (the TerminalPullTests
+    idiom) — a real ollama never runs here."""
+
+    RAM_8GIB = 8 * 1024 ** 3
+
+    @classmethod
+    def setUpClass(cls):
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from unittest import mock
+        from forge import modelfit
+        self.win.settings["num_ctx"] = 8192
+        patcher = mock.patch.object(
+            modelfit, "total_ram_bytes", lambda: self.RAM_8GIB)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.room = self.win.models_win
+        self.room.refresh()
+        self.room.pull_note.setText("")
+
+    def _finish_a_run(self, command, code, stopped=False):
+        from unittest import mock
+        self.win.run_win.new_block(command, self.win.workspace)
+        fired = []
+        with mock.patch.object(
+                self.win, "refresh_models_async",
+                lambda: fired.append(True)):
+            self.win._on_run_finished(code, stopped)
+        return fired
+
+    def test_stopped_pull_shows_the_resume_line(self):
+        self._finish_a_run("ollama pull qwen3:4b", 0,
+                           stopped=True)
+        self.assertEqual(
+            self.room.pull_note.text(),
+            "Pull stopped. Pull qwen3:4b again to pick up "
+            "where it left off.")
+
+    def test_failed_pull_shows_the_resume_line(self):
+        self._finish_a_run("ollama pull qwen3:4b", 1)
+        self.assertEqual(
+            self.room.pull_note.text(),
+            "Pull failed. Pull qwen3:4b again to pick up "
+            "where it left off.")
+
+    def test_clean_pull_shows_no_resume_line(self):
+        fired = self._finish_a_run("ollama pull qwen3:4b", 0)
+        self.assertEqual(fired, [True])
+        self.assertEqual(self.room.pull_note.text(), "")
+
+    def test_other_runs_show_no_resume_line(self):
+        self._finish_a_run("python app.py", 1)
+        self.assertEqual(self.room.pull_note.text(), "")
+        self._finish_a_run("python app.py", 0, stopped=True)
+        self.assertEqual(self.room.pull_note.text(), "")
+
+    def test_failed_start_shows_no_resume_line(self):
+        # A pull that never started has no partial download to
+        # resume — the _on_run_failed path stays silent.
+        self.win.run_win.new_block("ollama pull qwen3:4b",
+                                   self.win.workspace)
+        self.win._on_run_failed("ollama: command not found")
+        self.assertEqual(self.room.pull_note.text(), "")
+
+    def test_resume_line_names_the_pulled_tag(self):
+        self._finish_a_run(
+            "ollama pull maternion/minicpm5-heretic:2b", 1)
+        self.assertEqual(
+            self.room.pull_note.text(),
+            "Pull failed. Pull maternion/minicpm5-heretic:2b "
+            "again to pick up where it left off.")
+
+    def test_resume_line_has_no_em_dash(self):
+        # U33: no em-dash in visible UI text — the pull note is
+        # visible text, so the wording uses periods.
+        self._finish_a_run("ollama pull qwen3:4b", 1)
+        self.assertNotIn("\u2014", self.room.pull_note.text())
+
+
+class EmDashGuardTests(unittest.TestCase):
+    """F8 (U33, 2026-11-14): no em-dash in visible text.
+
+    Scans the swept files (forge/main.py, forge/deck.py,
+    forge/debug_log.py) and fails if an em-dash appears in any string
+    literal that is not a docstring or a comment. Docstrings and
+    comments are not visible text (F3 ruling) and are excluded.
+
+    The six allowlisted lines are machine-read split delimiters, not
+    visible text: message.split(" — ")[0] parses the first clause of
+    a message built in forge/create_ext.py (out of scope for F8).
+    The second test pins each allowlisted line to that exact call so
+    the allowlist cannot silently cover a new dash.
+    """
+
+    SWEPT = ("forge/main.py", "forge/deck.py", "forge/debug_log.py")
+    # (relative path, line): the split-delimiter sites, and only those.
+    ALLOWED = {
+        ("forge/main.py", 12747), ("forge/main.py", 12886),
+        ("forge/main.py", 17256), ("forge/main.py", 17264),
+        ("forge/main.py", 17280), ("forge/main.py", 17301),
+    }
+
+    @staticmethod
+    def _docstring_spans(src):
+        import ast
+        tree = ast.parse(src)
+        spans = []
+
+        def visit(node):
+            if isinstance(node, (ast.Module, ast.ClassDef,
+                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+                if (node.body and isinstance(node.body[0], ast.Expr)
+                        and isinstance(node.body[0].value, ast.Constant)
+                        and isinstance(node.body[0].value.value, str)):
+                    n = node.body[0].value
+                    spans.append((n.lineno, n.end_lineno))
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+
+        visit(tree)
+        return spans
+
+    @classmethod
+    def _scan(cls, path):
+        import io
+        import tokenize
+        src = path.read_text(encoding="utf-8")
+        spans = cls._docstring_spans(src)
+        fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
+        found = []
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if "—" not in tok.string:
+                continue
+            if tok.type == tokenize.COMMENT:
+                continue
+            if tok.type == tokenize.STRING:
+                if any(a <= tok.start[0] <= b for a, b in spans):
+                    continue
+                found.append((tok.start[0], tok.string[:120]))
+            elif fstring_middle is not None and tok.type == fstring_middle:
+                found.append((tok.start[0], tok.string[:120]))
+        return found
+
+    def test_no_em_dash_in_visible_strings(self):
+        root = Path(__file__).resolve().parent.parent
+        offenders = []
+        for rel in self.SWEPT:
+            path = root / rel
+            if not path.exists():
+                continue
+            for line, snippet in self._scan(path):
+                if (rel, line) in self.ALLOWED:
+                    continue
+                offenders.append(f"{rel}:{line}: {snippet!r}")
+        self.assertEqual(offenders, [])
+
+    def test_allowlist_is_only_the_split_delimiters(self):
+        root = Path(__file__).resolve().parent.parent
+        for rel, line in sorted(self.ALLOWED):
+            text = (root / rel).read_text(encoding="utf-8").splitlines()
+            self.assertIn('split(" — ")', text[line - 1],
+                          f"{rel}:{line} is no longer a split delimiter")
+
+
+class PaletteNoMatchTests(unittest.TestCase):
+    """F9 (U29): the palette shows guidance when the search
+    finds nothing — naming the query, teaching a shorter query,
+    and pointing at the Menu — instead of a bare empty list.
+    The dialog is never shown in these tests, so visibility is
+    asserted with isHidden(), the F7 pattern."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def _dialog(self):
+        from forge.main import PaletteDialog
+        entries, _ = self.win.palette_actions()
+        return PaletteDialog(self.win, entries, lambda eid: None)
+
+    def test_no_match_shows_guidance_naming_the_query(self):
+        dlg = self._dialog()
+        try:
+            dlg.filter_edit.setText("zzzqqq")
+            self.assertEqual(dlg._shown, [])
+            self.assertEqual(dlg.list.count(), 0)
+            self.assertFalse(dlg._no_match_label.isHidden())
+            self.assertIn("zzzqqq", dlg._no_match_label.text())
+        finally:
+            dlg.close()
+
+    def test_guidance_hides_when_matches_exist(self):
+        dlg = self._dialog()
+        try:
+            dlg.filter_edit.setText("zzzqqq")
+            self.assertFalse(dlg._no_match_label.isHidden())
+            dlg.filter_edit.setText("new")
+            self.assertTrue(dlg._shown)
+            self.assertTrue(dlg._no_match_label.isHidden())
+        finally:
+            dlg.close()
+
+    def test_guidance_hidden_on_empty_query(self):
+        dlg = self._dialog()
+        try:
+            self.assertEqual(dlg.filter_edit.text(), "")
+            self.assertTrue(dlg._shown)
+            self.assertTrue(dlg._no_match_label.isHidden())
+        finally:
+            dlg.close()
+
+    def test_guidance_wording_has_no_em_dash(self):
+        dlg = self._dialog()
+        try:
+            dlg.filter_edit.setText("zzzqqq")
+            self.assertNotIn("\u2014", dlg._no_match_label.text())
+        finally:
+            dlg.close()
+
+
+class BrokenSkillNoticeTests(unittest.TestCase):
+    """F10 (U19): a skill that fails to LOAD is named in the
+    Customize window's Skills lane, with the failure in plain
+    language — instead of vanishing silently from the scan."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def _skills_dir(self, base):
+        good = base / "good-skill"
+        good.mkdir(parents=True)
+        (good / "SKILL.md").write_text(
+            "name: good-skill\ndescription: Works fine.\n",
+            encoding="utf-8")
+        bad = base / "bad-skill"
+        bad.mkdir(parents=True)
+        (bad / "SKILL.md").write_text("BROKEN-MARKER\n", encoding="utf-8")
+        stray = base / "stray-folder"
+        stray.mkdir(parents=True)
+        return base
+
+    def _raising_parse(self, exc):
+        import forge.skills as skills_mod
+        real_parse = skills_mod._parse_header
+
+        def boom(text):
+            if "BROKEN-MARKER" in text:
+                raise exc
+            return real_parse(text)
+
+        return boom
+
+    def test_scan_report_names_an_unreadable_skill(self):
+        from unittest import mock
+        import forge.skills as skills_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._skills_dir(Path(tmp) / "skills")
+            with mock.patch.object(skills_mod, "_parse_header",
+                                   side_effect=self._raising_parse(
+                                       OSError("disk gone"))):
+                skills, broken = skills_mod.scan_skills_report(base)
+            self.assertEqual([s.name for s in skills], ["good-skill"])
+            self.assertEqual(broken, [("bad-skill", "could not be read")])
+
+    def test_scan_report_names_an_unparseable_skill(self):
+        from unittest import mock
+        import forge.skills as skills_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._skills_dir(Path(tmp) / "skills")
+            with mock.patch.object(skills_mod, "_parse_header",
+                                   side_effect=self._raising_parse(
+                                       ValueError("garbled"))):
+                _skills, broken = skills_mod.scan_skills_report(base)
+            self.assertEqual(broken,
+                             [("bad-skill", "could not be understood")])
+
+    def test_scan_skills_still_returns_survivors_only(self):
+        from unittest import mock
+        import forge.skills as skills_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._skills_dir(Path(tmp) / "skills")
+            with mock.patch.object(skills_mod, "_parse_header",
+                                   side_effect=self._raising_parse(
+                                       OSError("disk gone"))):
+                skills = skills_mod.scan_skills(base)
+            self.assertEqual([s.name for s in skills], ["good-skill"])
+
+    def test_folder_without_skill_md_is_not_broken(self):
+        import forge.skills as skills_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._skills_dir(Path(tmp) / "skills")
+            skills, broken = skills_mod.scan_skills_report(base)
+            self.assertEqual([s.name for s in skills],
+                             ["bad-skill", "good-skill"])
+            self.assertEqual(broken, [])
+
+    def test_rescan_records_broken_skills_on_the_window(self):
+        from unittest import mock
+        import forge.skills as skills_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            base = self._skills_dir(Path(tmp) / "skills")
+            old = self.win.app_skills_dir
+            self.win.app_skills_dir = base
+            try:
+                with mock.patch.object(
+                        skills_mod, "_parse_header",
+                        side_effect=self._raising_parse(
+                            OSError("disk gone"))):
+                    self.win.rescan_extensions()
+                self.assertIn(("bad-skill", "could not be read"),
+                              self.win._broken_skills)
+                self.assertIn("good-skill",
+                              [s.name for s in self.win.all_skills])
+            finally:
+                self.win.app_skills_dir = old
+                self.win.rescan_extensions()
+
+    def test_broken_skill_surfaces_in_the_skills_lane(self):
+        from PySide6.QtWidgets import QLabel
+        import forge.main as main_mod
+        dlg = main_mod.CustomizeDialog(
+            None, [], [], set(), set(), {},
+            broken_skills=[("bad-skill", "could not be read")])
+        try:
+            notice = dlg.findChild(QLabel, "broken_skills_notice")
+            self.assertIsNotNone(notice)
+            self.assertIn("bad-skill", notice.text())
+            self.assertIn("could not be read", notice.text())
+        finally:
+            dlg.close()
+
+    def test_no_notice_when_nothing_is_broken(self):
+        from PySide6.QtWidgets import QLabel
+        import forge.main as main_mod
+        dlg = main_mod.CustomizeDialog(None, [], [], set(), set(), {})
+        try:
+            self.assertIsNone(dlg.findChild(QLabel, "broken_skills_notice"))
+        finally:
+            dlg.close()
+
+    def test_broken_notice_wording_has_no_em_dash(self):
+        from PySide6.QtWidgets import QLabel
+        import forge.main as main_mod
+        dlg = main_mod.CustomizeDialog(
+            None, [], [], set(), set(), {},
+            broken_skills=[("bad-skill", "could not be read")])
+        try:
+            notice = dlg.findChild(QLabel, "broken_skills_notice")
+            self.assertNotIn("\u2014", notice.text())
+        finally:
+            dlg.close()
+
+
 class DeckAppLayoutTests(unittest.TestCase):
     """DECKAPP revamp (2026-11-09): the deck page became an app —
     fixed header, one screen at a time, bottom tab bar — by moving
@@ -20346,7 +21287,7 @@ class HintsPromptTests(unittest.TestCase):
         (self.root / ".forge" / "hints.md").write_text(
             "This codebase uses tabs.\nThe deploy script is deploy.sh.\n")
         prompt = self.win.build_system_prompt()
-        self.assertIn("Project hints — the owner's standing instructions for THIS project "
+        self.assertIn("Project hints: the owner's standing instructions for THIS project "
                       "(from .forge/hints.md). Follow them unless the owner's current "
                       "message says otherwise:", prompt)
         self.assertIn("This codebase uses tabs.\nThe deploy script is deploy.sh.", prompt)
@@ -27471,7 +28412,7 @@ class ParallelTurnsMissionControlTests(unittest.TestCase):
         self.assertEqual(self.win.conversation_id, self.cid_a)
         self.assertIs(self.win.worker, worker_a)
         self.assertFalse(self._stream(self.cid_a)["background"])
-        self.assertTrue(any("load ignored — a turn is running" in line
+        self.assertTrue(any("load ignored. A turn is running." in line
                             for line in self.win._log_lines))
         self.client.release_all()
         self.assertTrue(self._pump_until(lambda: self.win.worker is None))
@@ -28053,7 +28994,7 @@ class InlineCommentTests(unittest.TestCase):
         self.win._deck_plan_action("comment", holder)
         self.assertTrue(holder["event"].is_set())
         self.assertEqual(holder["result"],
-                         (True, "Comment sent — the driver is "
+                         (True, "Comment sent. The driver is "
                                 "revising the plan."))
         self.assertEqual(worker.calls,
                          [("revise", None, "Phone: shrink it")])
@@ -28078,8 +29019,8 @@ class InlineCommentTests(unittest.TestCase):
         holder = self._holder(comment="   ")
         self.win._deck_plan_action("comment", holder)
         self.assertEqual(holder["result"],
-                         (False, "Type the change you want first — "
-                                 "an empty comment can't revise "
+                         (False, "Type the change you want first. "
+                                 "An empty comment can't revise "
                                  "the plan."))
         self.assertEqual(worker.calls, [])
         self.assertEqual(self.win.plan_state["comments"], [])
@@ -28100,7 +29041,7 @@ class InlineCommentTests(unittest.TestCase):
 
         def slot(action, holder):
             seen.append((action, holder.get("comment")))
-            holder["result"] = (True, "Comment sent — the driver "
+            holder["result"] = (True, "Comment sent. The driver "
                                        "is revising the plan.")
             holder["event"].set()
 
@@ -31603,7 +32544,16 @@ class ChunkCWindowGapTests(unittest.TestCase):
     # -- G16: the history list at its full 200-conversation scale -------
     def test_history_list_scales_to_two_hundred_conversations(self):
         from forge.storage import ConversationStore
+        from PySide6.QtWidgets import QPushButton
         win = self.win
+
+        def _buttons():
+            # F22: the empty-state label lives in the same layout
+            # — count history buttons only.
+            return [w for w in
+                    (win.history_list.itemAt(i).widget()
+                     for i in range(win.history_list.count()))
+                    if isinstance(w, QPushButton)]
         old_store = win.store
         temp = tempfile.TemporaryDirectory()
         try:
@@ -31613,9 +32563,7 @@ class ChunkCWindowGapTests(unittest.TestCase):
                                        "content": f"scale chat {i:03d}"}])
             win._history_signature = None
             win.refresh_history()
-            buttons = [win.history_list.itemAt(i).widget()
-                       for i in range(win.history_list.count())]
-            buttons = [b for b in buttons if b is not None]
+            buttons = _buttons()
             self.assertEqual(len(buttons), 200)
             self.assertIn("scale chat 199", buttons[0].text())
             self.assertIn("scale chat 000", buttons[-1].text())
@@ -31624,9 +32572,7 @@ class ChunkCWindowGapTests(unittest.TestCase):
             win.store.save(None, [{"role": "user",
                                    "content": "scale chat 200"}])
             win.refresh_history()
-            buttons = [win.history_list.itemAt(i).widget()
-                       for i in range(win.history_list.count())]
-            buttons = [b for b in buttons if b is not None]
+            buttons = _buttons()
             self.assertEqual(len(buttons), 200)
             self.assertIn("scale chat 200", buttons[0].text())
             self.assertIn("scale chat 001", buttons[-1].text())
@@ -31634,17 +32580,15 @@ class ChunkCWindowGapTests(unittest.TestCase):
             # narrows the list to the matches, clearing restores it.
             win.history_search.setText("scale chat 19")
             win.refresh_history()
-            buttons = [win.history_list.itemAt(i).widget()
-                       for i in range(win.history_list.count())]
-            buttons = [b for b in buttons if b is not None]
+            # F6: the search is debounced + off-thread.
+            _wait_for_history(lambda: len(_buttons()) == 10)
+            buttons = _buttons()
             self.assertEqual(len(buttons), 10)
             self.assertIn("scale chat 199", buttons[0].text())
             self.assertIn("scale chat 190", buttons[-1].text())
             win.history_search.setText("")
             win.refresh_history()
-            buttons = [win.history_list.itemAt(i).widget()
-                       for i in range(win.history_list.count())]
-            buttons = [b for b in buttons if b is not None]
+            buttons = _buttons()
             self.assertEqual(len(buttons), 200)
         finally:
             win.history_search.setText("")
@@ -32204,7 +33148,7 @@ class WindowHeaderStandardTests(unittest.TestCase):
         aw.setWindowTitle("stale")
         actions[0].trigger()
         self.assertEqual(aw.windowTitle(),
-                         f"Artifacts — {Path(self.win.workspace).name}")
+                         f"Artifacts: {Path(self.win.workspace).name}")
         self.assertEqual(aw.header.title_label.text(), aw.windowTitle())
 
     def test_maintenance_window_providers_moved_to_overflow(self):
@@ -32359,12 +33303,12 @@ class SessionsWindowTests(unittest.TestCase):
         self.assertTrue(row["active"])
         self.assertEqual(row["title"], "New chat")
         combo_text = self.win.model_combo.currentText().strip()
-        self.assertEqual(row["model"], combo_text or "—")
+        self.assertEqual(row["model"], combo_text or "-")
         self.assertEqual(row["project"],
                          Path(self.win.workspace).name)
         # No turn yet -> no activity; a turn start becomes it, in
         # the store's own timestamp shape (SQLite CURRENT_TIMESTAMP).
-        self.assertEqual(row["activity"], "—")
+        self.assertEqual(row["activity"], "-")
         self.win._turn_started = 1762000000.0
         row = self.win._session_rows()[0]
         self.assertEqual(row["activity"],
@@ -32546,7 +33490,7 @@ class AdaptiveDiffTests(unittest.TestCase):
 
     def test_pairing_marker_and_notes_pass_through(self):
         from forge.main import paired_diff_rows
-        marker = "… diff truncated — showing 400 of 900 lines (+5 −5 total)"
+        marker = "… diff truncated: showing 400 of 900 lines (+5 −5 total)"
         rows = paired_diff_rows(["+x", "\\ No newline at end of file", marker])
         self.assertEqual(rows[0], (None, "x", "filler", "add"))
         self.assertEqual(rows[1], ("\\ No newline at end of file",
@@ -33472,7 +34416,7 @@ class SessionNotesTests(unittest.TestCase):
         self.assertIn("Context was summarized", content)
         # The entry is on disk too, and the stored record carries
         # the block — the next send sees it as well.
-        self.assertIn("Context was summarized — older turns folded. "
+        self.assertIn("Context was summarized. Older turns folded. "
                       "Notes kept on disk.", self._notes(cid))
         stored = self.win.store.load(cid)
         self.assertTrue(any(ctx.is_notes(m) for m in stored))
@@ -33504,16 +34448,16 @@ class SessionNotesTests(unittest.TestCase):
         self.win.messages = self._seed_folded_messages()
         self.win.sees_win.refresh()
         text = self.win.sees_win.view.toPlainText()
-        self.assertIn("— System prompt —", text)
+        self.assertIn("- System prompt -", text)
         self.assertIn("standing orders", text)
-        self.assertIn("— Summary of earlier turns "
-                      "(context was folded) —", text)
+        self.assertIn("- Summary of earlier turns "
+                      "(context was folded) -", text)
         self.assertIn("Earlier stuff happened.", text)
-        self.assertIn("— Session notes", text)
+        self.assertIn("- Session notes", text)
         self.assertIn("a kept decision", text)
-        self.assertIn("— You —", text)
+        self.assertIn("- You -", text)
         self.assertIn("question?", text)
-        self.assertIn("— Assistant —", text)
+        self.assertIn("- Assistant -", text)
         self.assertIn("answer.", text)
         self.assertIn("8,192 tokens",
                       self.win.sees_win.usage_label.text())
@@ -33872,7 +34816,7 @@ class ModelFitTests(unittest.TestCase):
         texts = [lab.text() for lab in
                  self.room.findChildren(QLabel)]
         self.assertIn(
-            "Local models are files on this PC — they work "
+            "Local models are files on this PC. They work "
             "offline and can't be retired or taken away.", texts)
         line = self.room.machine_line.text()
         self.assertIn("8.0 GB RAM", line)
@@ -36626,7 +37570,7 @@ class ResearchRoomTests(unittest.TestCase):
                             for t in notes), notes)
         # Gate, run and report surfaces all exist.
         self.assertEqual(win.gate_approve_btn.text(),
-                         "✓ Approve — start the research")
+                         "✓ Approve · start the research")
         self.assertFalse(win.gate_box.isVisible())
         self.assertFalse(win.stop_btn.isEnabled())
         self.assertIsNotNone(win.report_editor)
@@ -44232,7 +45176,7 @@ class TurnTimelineWindowTests(unittest.TestCase):
         self.win.open_timeline()
         win = self.win.timeline_win
         try:
-            self.assertIn("no turns recorded", win.head.text())
+            self.assertIn("No turns recorded", win.head.text())
             self.assertEqual(win.rows_list.count(), 1)
             self._seed_turn("ask", 120, 30)
             self._settle("ask")
@@ -44825,7 +45769,7 @@ class DesignCanvasWindowTests(unittest.TestCase):
     def test_header_is_the_g4_standard(self):
         view = self.win.design_canvas_win
         self.assertEqual(view.header.title_label.text(),
-                         "Design Canvas — Code Forge")
+                         "Design Canvas · Code Forge")
         labels = [a.text() for a in view.header.overflow_menu.actions()]
         self.assertIn("Refresh", labels)
         self.assertIn("File summary as design artifact", labels)
@@ -46052,7 +46996,7 @@ class EditMessageTests(unittest.TestCase):
         self.win.send_message()
         self.assertEqual(
             self.win._send_refusal,
-            "A turn is running — your edit stays in the box; send "
+            "A turn is running. Your edit stays in the box; send "
             "it when the turn ends.")
         self.assertEqual(self.win._edit_target, 1)
         self.assertEqual(self.win.input.toPlainText(), "reworded")
@@ -46191,7 +47135,7 @@ class FoldCapTests(unittest.TestCase):
         lines = [line for line in self.win._log_lines
                  if "Still over the context limit" in line]
         self.assertEqual(len(lines), 1, "said plainly ONCE")
-        self.assertIn("the turn runs anyway", lines[0])
+        self.assertIn("The turn runs anyway", lines[0])
         self.assertIn("fresh conversation", lines[0])
         # The gauge reads the post-fold estimate honestly.
         parts = ctx.breakdown(self.win.messages,
@@ -46649,7 +47593,7 @@ class WalkthroughTests(unittest.TestCase):
         # as Critical, its mapped severity.
         self.assertEqual(
             win.findings_label.text(),
-            "Findings — 2 Critical · 1 Major · 0 Minor · 0 Trivial")
+            "Findings: 2 Critical · 1 Major · 0 Minor · 0 Trivial")
         win.close()
 
 
@@ -46854,7 +47798,7 @@ class GuidelineTests(unittest.TestCase):
         win = ArtifactsWindow(owner)
         win._refresh_guidelines()
         self.assertEqual(win.guidelines_label.text(),
-                         "Guideline files — 1 waiting · 0 approved")
+                         "Guideline files: 1 waiting · 0 approved")
         self.assertEqual(win.guidelines_list.count(), 1)
         # Reading before approving: the head shows in the viewer.
         win.guidelines_list.setCurrentRow(0)
@@ -46863,7 +47807,7 @@ class GuidelineTests(unittest.TestCase):
         # Approve from the list, the way the owner would.
         win._approve_guideline()
         self.assertEqual(win.guidelines_label.text(),
-                         "Guideline files — 0 waiting · 1 approved")
+                         "Guideline files: 0 waiting · 1 approved")
         self.assertIn("Approved", win.guidelines_status.text())
         self.assertEqual(g_mod.list_approved(self.root), ["AGENTS.md"])
         self.assertIn("never use recursion",
@@ -46872,7 +47816,7 @@ class GuidelineTests(unittest.TestCase):
         win.guidelines_list.setCurrentRow(0)
         win._revoke_guideline()
         self.assertEqual(win.guidelines_label.text(),
-                         "Guideline files — 1 waiting · 0 approved")
+                         "Guideline files: 1 waiting · 0 approved")
         self.assertEqual(g_mod.guidelines_block(self.root), "")
         win.close()
         owner.close()
@@ -47860,7 +48804,7 @@ class FixWithDriverTests(unittest.TestCase):
             # The other finding is untouched.
             self.assertNotIn("fix requested",
                              win.findings_list.item(1).text())
-            self.assertIn("recorded in the review",
+            self.assertIn("Recorded in the review",
                           win.composer_status.text())
         finally:
             win.close()
@@ -55355,7 +56299,7 @@ class AutofixLoopTests(unittest.TestCase):
                 "Reviews",
                 self.root / ".forge" / "reviews" / "loop-review.md")
             self.assertEqual(win.autofix_btn.text(),
-                             "Autofix — capped")
+                             "Autofix · capped")
             win.autofix_btn.click()
             self.assertEqual(owner.send_calls, [])
             self.assertIn("capped at 3 rounds",
@@ -57075,7 +58019,7 @@ class PresendQueueTests(unittest.TestCase):
         stream = self._stream(None)
         stream["secret"] = {"queued": False}
         self.assertEqual(self.win._stream_state_text(stream),
-                         "Paused — secret scan")
+                         "Paused · secret scan")
 
 
 class PresendAllowlistTests(unittest.TestCase):

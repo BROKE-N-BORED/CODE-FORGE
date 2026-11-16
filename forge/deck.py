@@ -176,7 +176,7 @@ POST_BODY_MAX = 1_048_576
 
 _PAGE_TEMPLATE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CODE FORGE — phone deck</title>
+<title>CODE FORGE · phone deck</title>
 <style>body{background:@{surface_base}@;color:@{text_base}@;font-family:system-ui;margin:0;padding:76px 12px 96px}
 h1{font-size:16px;color:@{accent_amber}@;letter-spacing:.1em;margin:2px 0 0}
 .stamp{color:@{text_muted}@;font-size:11px;letter-spacing:.06em;margin-bottom:10px}
@@ -223,7 +223,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 .attachitem img{width:54px;height:54px;object-fit:cover;border-radius:8px;border:1px solid @{rim}@;display:block}
 .attachitem .aname{font-size:11px;color:@{text_muted}@;max-width:76px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
 .attachitem .ax{position:absolute;top:-7px;right:-7px;width:22px;height:22px;padding:0;border-radius:11px;background:@{surface_danger}@;border:1px solid @{state_error}@;color:@{text_white}@;font-size:13px;line-height:1}
-/* T13 (2026-11-13): the × is a 22px button (24px border box) — too small a touch target. This transparent ::after extends its hit area to 44x44 (24 + 10 each side) without touching the button: literal padding would paint the red disc and border over the full 44px box, a visual change, so the hit area grows here, invisibly. */
+/* T13 (2026-11-13): the × is a 22px button (24px border box). Too small a touch target. This transparent ::after extends its hit area to 44x44 (24 + 10 each side) without touching the button: literal padding would paint the red disc and border over the full 44px box, a visual change, so the hit area grows here, invisibly. */
 .attachitem .ax::after{content:'';position:absolute;top:-10px;right:-10px;bottom:-10px;left:-10px}
 .afile{display:inline-flex;align-items:center;background:@{surface_input}@;border:1px solid @{rim}@;border-radius:8px;padding:9px 10px;font-size:13px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style></head><body>
@@ -231,7 +231,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <div class="brandrow"><span class="wordmark">CODE FORGE · PHONE DECK</span><span class="stamp">B/N/B STUDIO · EST. 2026</span></div>
 <div class="hstatus"><span class="dot amber">●</span> <b id="hstate">…</b> <span class="dim" id="hmodel"></span></div>
 </header>
-<div class="card" id="disc" style="display:none;border-color:@{state_error}@;color:@{text_white}@">⚠ Deck disconnected — the Forge restarted or this link expired. Reopen the deck from the Forge to reconnect.</div>
+<div class="card" id="disc" style="display:none;border-color:@{state_error}@;color:@{text_white}@">⚠ Deck disconnected. The Forge restarted or this link expired. Reopen the deck from the Forge to reconnect.</div>
 
 <main>
 <section class="screen" id="scr-chat">
@@ -268,7 +268,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 
 <section class="screen" id="scr-plan" style="display:none">
 <div class="card" id="pending" style="display:none">
-<div class="sec">[ 03 ] APPROVAL — PAUSED, NO CLOCK RUNNING</div>
+<div class="sec">[ 03 ] APPROVAL · PAUSED, NO CLOCK RUNNING</div>
 <div id="ptool" style="margin:6px 0"></div>
 <div id="prisk" style="margin:6px 0"></div>
 <pre id="pdesc"></pre>
@@ -285,12 +285,12 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <button id="planabandonbtn" class="stop" onclick="abandonPlan()">⚑ Abandon plan</button>
 </div>
 <div class="row" id="plancomment" style="display:none">
-<input id="plancommenttext" type="text" placeholder="Comment on the draft — the driver revises it" style="flex:1">
+<input id="plancommenttext" type="text" placeholder="Comment on the draft. The driver revises it" style="flex:1">
 <button onclick="planComment()">💬 Comment</button>
 </div>
 <div id="planmsg" style="margin-top:8px;font-size:13px"></div>
-<details id="planfish" style="display:none;margin-top:8px"><summary class="dim" style="cursor:pointer">GoFish review — tap to read the findings</summary><pre id="planfishtext"></pre></details>
-<div class="dim">Approve, comment, kill, or abandon from here — editing the steps happens at the PC.</div></div>
+<details id="planfish" style="display:none;margin-top:8px"><summary class="dim" style="cursor:pointer">GoFish review: tap to read the findings</summary><pre id="planfishtext"></pre></details>
+<div class="dim">Approve, comment, kill, or abandon from here. Editing the steps happens at the PC.</div></div>
 
 <div class="card"><div class="sec">[ 12 ] PROPOSALS</div><div id="proposals"><span class="dim">No proposals.</span></div>
 <div id="proposalmsg" style="margin-top:8px;font-size:13px"></div>
@@ -318,14 +318,14 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 <div class="collapbody"><pre id="log"></pre></div>
 </div>
 <div class="card collap closed" id="monitorbox">
-<button class="collaphead" onclick="toggleCollap('monitorbox')"><span class="sec">[ 10 ] WATCH — RUN ALERTS</span><span class="chev">▸</span></button>
-<div class="collapbody"><pre id="monitor">No alerts — the Watch seat is quiet.</pre></div>
+<button class="collaphead" onclick="toggleCollap('monitorbox')"><span class="sec">[ 10 ] WATCH · RUN ALERTS</span><span class="chev">▸</span></button>
+<div class="collapbody"><pre id="monitor">No alerts. The Watch seat is quiet.</pre></div>
 </div>
 <div class="card collap closed" id="fanoutbox">
-<button class="collaphead" onclick="toggleCollap('fanoutbox')"><span class="sec">[ 11 ] FAN-OUT — RUN ITEMS IN PARALLEL</span><span class="chev">▸</span></button>
+<button class="collaphead" onclick="toggleCollap('fanoutbox')"><span class="sec">[ 11 ] FAN-OUT · RUN ITEMS IN PARALLEL</span><span class="chev">▸</span></button>
 <div class="collapbody">
-<textarea id="fanoutitems" rows="4" placeholder="One item per line — similar jobs, each on its own" style="width:100%"></textarea>
-<div class="row" style="margin-top:8px"><label><input id="fanoutindep" type="checkbox"> These items are independent — none waits on another</label></div>
+<textarea id="fanoutitems" rows="4" placeholder="One item per line. Similar jobs, each on its own" style="width:100%"></textarea>
+<div class="row" style="margin-top:8px"><label><input id="fanoutindep" type="checkbox"> These items are independent. None waits on another</label></div>
 <div class="row" style="margin-top:8px"><button class="ok" onclick="fanOut()">Fan out</button></div>
 <div id="fanoutmsg" style="margin-top:8px;font-size:13px"></div>
 <div class="dim">Each item runs as its own fresh-context turn, in parallel under the parallel-turns cap. Dependent steps are never fanned out.</div>
@@ -334,7 +334,7 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 </section>
 
 <section class="screen" id="scr-docs" style="display:none">
-<div class="card"><div class="sec">[ 09 ] DOCUMENTS</div><div id="docs"><span class="dim">No documents yet — plans, designs and other filed documents appear here as downloads.</span></div></div>
+<div class="card"><div class="sec">[ 09 ] DOCUMENTS</div><div id="docs"><span class="dim">No documents yet: plans, designs and other filed documents appear here as downloads.</span></div></div>
 </section>
 
 <section class="screen" id="scr-project" style="display:none">
@@ -424,7 +424,7 @@ async function tick(){
       const b = document.createElement('div'); b.className = 'body'; b.textContent = m.text;
       d.appendChild(w); d.appendChild(b); convo.appendChild(d);
     }
-    document.getElementById('receipts').textContent = s.receipts.length ? s.receipts.join('\\n') : 'No tool calls yet — receipts appear here when the agent uses a tool.';
+    document.getElementById('receipts').textContent = s.receipts.length ? s.receipts.join('\\n') : 'No tool calls yet. Receipts appear here when the agent uses a tool.';
     document.getElementById('log').textContent = s.log.join('\\n');
     renderPlan(s);
     renderProposals(s);
@@ -452,14 +452,14 @@ function renderMonitor(s){
   const el = document.getElementById('monitor'); if(!el) return;
   const m = s.monitor || {alerts: [], watching: false};
   const alerts = m.alerts || [];
-  if(!alerts.length){ el.textContent = m.watching ? 'Watching this run — no alerts yet.' : 'No alerts — the Watch seat is quiet.'; return; }
+  if(!alerts.length){ el.textContent = m.watching ? 'Watching this run. No alerts yet.' : 'No alerts. The Watch seat is quiet.'; return; }
   el.textContent = alerts.map(a => (a.when || '') + ' · ' + a.kind + ' · ' + a.detail + (a.count > 1 ? ' (x' + a.count + ')' : '') + '\\n  ' + (a.evidence || '')).join('\\n');
 }
 function renderDocs(s){
   const box = document.getElementById('docs'); if(!box) return;
   const docs = s.documents || [];
   box.innerHTML = '';
-  if(!docs.length){ box.innerHTML = '<span class="dim">No documents yet — plans, designs and other filed documents appear here as downloads.</span>'; return; }
+  if(!docs.length){ box.innerHTML = '<span class="dim">No documents yet: plans, designs and other filed documents appear here as downloads.</span>'; return; }
   for(const d of docs){
     const row = document.createElement('div'); row.style.margin = '6px 0';
     const a = document.createElement('a');
@@ -488,14 +488,14 @@ function renderPlan(s){
   else { fish.style.display = 'none'; }
   btns.style.display = (p.status === 'draft') ? '' : 'none';
   crow.style.display = (p.status === 'draft') ? '' : 'none';
-  // Remainder R2: Abandon shows for a plan that RAN — running
+  // Remainder R2: Abandon shows for a plan that RAN, running
   // or interrupted. A draft has Kill; a finished plan has
   // nothing left to end.
   aban.style.display = (p.status === 'running' || p.status === 'interrupted') ? '' : 'none';
 }
 let abandonArmed = null;
 function abandonPlan(){
-  // F20: the deck's confirm for abandoning a running plan — a
+  // F20: the deck's confirm for abandoning a running plan: a
   // two-tap arm, not a native confirm dialog (which would block
   // the poll loop's cadence and read as a browser error on a
   // phone). First tap arms the button for 5 seconds; second tap
@@ -533,7 +533,7 @@ function renderProposals(s){
   for(const p of list){
     const row = document.createElement('div'); row.style.margin = '8px 0';
     const text = document.createElement('div');
-    text.textContent = (p.kind || '') + ' · ' + (p.event || '') + ' — ' + (p.action || '') + ' (' + (p.touches || '') + ')';
+    text.textContent = (p.kind || '') + ' · ' + (p.event || '') + ' · ' + (p.action || '') + ' (' + (p.touches || '') + ')';
     row.appendChild(text);
     const btns = document.createElement('div'); btns.className = 'row'; btns.style.marginTop = '4px';
     const ok = document.createElement('button'); ok.className = 'ok'; ok.textContent = '✓ Accept';
@@ -558,7 +558,7 @@ async function planComment(){
   const msg = document.getElementById('planmsg');
   const box = document.getElementById('plancommenttext');
   const text = (box.value || '').trim();
-  if(!text){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Type the change you want first — an empty comment cannot revise the plan.'; return; }
+  if(!text){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Type the change you want first. An empty comment cannot revise the plan.'; return; }
   try{
     const r = await fetch('/plan?k='+K, {method:'POST', body: JSON.stringify({action: 'comment', comment: text})});
     const d = await r.json();
@@ -614,18 +614,18 @@ async function uploadAttach(input){
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Attached'); }
     else { msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Attach failed'); }
-  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed — nothing was attached'; }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed: nothing was attached'; }
   tick();
 }
 function renderProjects(s){
   const proj = s.project || {}, list = s.projects || [], cur = proj.path || '';
-  document.getElementById('projname').textContent = proj.name || '—';
+  document.getElementById('projname').textContent = proj.name || '-';
   document.getElementById('projpath').textContent = cur;
   const sel = document.getElementById('projsel');
   const sig = list.map(p => p.path).join('|') + '::' + cur;
   if(sel.dataset.sig === sig) return;  // don't clobber a selection in progress
   sel.dataset.sig = sig; sel.innerHTML = '';
-  if(!list.length){ const o = document.createElement('option'); o.value=''; o.textContent='(no projects yet — type a path below)'; sel.appendChild(o); }
+  if(!list.length){ const o = document.createElement('option'); o.value=''; o.textContent='(no projects yet. Type a path below)'; sel.appendChild(o); }
   for(const p of list){
     const o = document.createElement('option'); o.value = p.path; o.textContent = p.name;
     if(p.path === cur) o.selected = true;
@@ -651,7 +651,7 @@ async function postPrompt(text){
     const d = await r.json();
     if(d.ok){ msg.style.color = '@{text_amber_light}@'; msg.textContent = '✓ ' + (d.message || 'Sent'); return true; }
     msg.style.color = '@{state_error}@'; msg.textContent = '✗ ' + (d.error || 'Not sent'); return false;
-  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed — the prompt was NOT sent'; return false; }
+  }catch(e){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Deck request failed. The prompt was NOT sent'; return false; }
 }
 async function sendPrompt(){ const el = document.getElementById('prompt'); const v = el.value; if(!v.trim()) return; if(await postPrompt(v)) el.value=''; tick(); }
 async function chip(t){ await postPrompt(t); tick(); }
@@ -659,9 +659,9 @@ async function fanOut(){
   const msg = document.getElementById('fanoutmsg');
   const box = document.getElementById('fanoutitems');
   const items = (box.value || '').split('\\n').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
-  if(!items.length){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Type at least one item — one per line.'; return; }
+  if(!items.length){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Type at least one item. One per line.'; return; }
   const indep = document.getElementById('fanoutindep').checked;
-  if(!indep){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Fan-out needs independent items — tick the box to confirm none of these waits on another.'; return; }
+  if(!indep){ msg.style.color = '@{state_error}@'; msg.textContent = '✗ Fan-out needs independent items. Tick the box to confirm none of these waits on another.'; return; }
   try{
     const r = await fetch('/fanout?k='+K, {method:'POST', body: JSON.stringify({items: items, independent: indep})});
     const d = await r.json();
@@ -802,7 +802,7 @@ def resolve_project(target: str, projects: list[dict]):
     """
     target = (target or "").strip()
     if not target:
-        return None, "No project given — pick one from the list or type a name or folder path."
+        return None, "No project given. Pick one from the list or type a name or folder path."
     lowered = target.lower()
     for entry in projects or []:
         if str(entry.get("name", "")).lower() == lowered and entry.get("path"):
@@ -1009,7 +1009,7 @@ class DeckServer(QObject):
         self.project_switch_requested.emit(str(target), holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Switch failed.")
         return bool(ok), str(message)
 
@@ -1024,7 +1024,7 @@ class DeckServer(QObject):
         self.prompt_delivery_requested.emit(str(text), holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Prompt failed.")
         return bool(ok), str(message)
 
@@ -1038,7 +1038,7 @@ class DeckServer(QObject):
         self.plan_action_requested.emit(str(action), holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Plan action failed.")
         return bool(ok), str(message)
 
@@ -1054,7 +1054,7 @@ class DeckServer(QObject):
         self.plan_action_requested.emit("comment", holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Plan action failed.")
         return bool(ok), str(message)
 
@@ -1069,7 +1069,7 @@ class DeckServer(QObject):
             holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Fan-out failed.")
         return bool(ok), str(message)
 
@@ -1084,7 +1084,7 @@ class DeckServer(QObject):
             {"id": str(proposal_id), "accept": bool(accept)}, holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Proposal decision failed.")
         return bool(ok), str(message)
 
@@ -1097,7 +1097,7 @@ class DeckServer(QObject):
         self.attachment_remove_requested.emit(int(index), holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Remove failed.")
         return bool(ok), str(message)
 
@@ -1111,7 +1111,7 @@ class DeckServer(QObject):
         self.attachment_upload_requested.emit(str(name), bytes(data), holder)
         answered, result = self._await_result(holder)
         if not answered:
-            return False, "The bench didn't answer — is the Forge window responsive?"
+            return False, "The bench didn't answer. Is the Forge window responsive?"
         ok, message = result or (False, "Attach failed.")
         return bool(ok), str(message)
 
@@ -1229,7 +1229,7 @@ class DeckServer(QObject):
                     if length > ATTACH_UPLOAD_MAX:
                         _answer(False,
                                 "That file is over the deck's 25 MB "
-                                "attachment limit — nothing was attached.")
+                                "attachment limit: nothing was attached.")
                         return
                     from urllib.parse import parse_qs
                     qs = parse_qs(urlparse(self.path).query)
@@ -1290,7 +1290,7 @@ class DeckServer(QObject):
                     # prompt was received, queued, or refused.
                     text = str(data.get("text", "")).strip()
                     if not text:
-                        ok, message = False, "Empty prompt — nothing to send."
+                        ok, message = False, "Empty prompt: nothing to send."
                     else:
                         ok, message = deck.request_prompt_delivery(text)
                     payload = {"ok": True, "message": message} if ok \
@@ -1316,7 +1316,7 @@ class DeckServer(QObject):
                         comment = str(data.get("comment", "")).strip()
                         if not comment:
                             ok, message = False, (
-                                "Type the change you want first — an "
+                                "Type the change you want first. An "
                                 "empty comment can't revise the plan.")
                         else:
                             ok, message = deck.request_plan_comment(comment)
@@ -1350,12 +1350,12 @@ class DeckServer(QObject):
                     if not isinstance(items, list) or not any(
                             str(item).strip() for item in items):
                         ok, message = False, (
-                            "Type at least one item — one per line.")
+                            "Type at least one item. One per line.")
                     elif data.get("independent") is not True:
                         ok, message = False, (
                             "Fan-out needs independent items: "
                             "confirm none of these waits on "
-                            "another — dependent steps are never "
+                            "another. Dependent steps are never "
                             "fanned out.")
                     else:
                         ok, message = deck.request_fan_out(
@@ -1383,7 +1383,7 @@ class DeckServer(QObject):
                         ok, message = False, "No proposal id."
                     elif not isinstance(accept, bool):
                         ok, message = False, (
-                            "Accept or decline — no decision was "
+                            "Accept or decline. No decision was "
                             "sent.")
                     else:
                         ok, message = deck.request_proposal_decision(
@@ -1453,7 +1453,7 @@ class DeckServer(QObject):
         except OSError as exc:
             self._server = None
             raise DeckError(
-                f"The phone deck couldn't start — port {self.port} "
+                f"The phone deck couldn't start: port {self.port} "
                 f"is already in use ({exc}). Close whatever holds "
                 "it, then toggle the deck again.") from exc
         threading.Thread(target=self._server.serve_forever, daemon=True).start()

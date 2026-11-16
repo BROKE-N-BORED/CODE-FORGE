@@ -106,7 +106,7 @@ def scrub_value(value):
     """Redact one setting value, keeping only present/absent."""
     if value is None or value == "":
         return "[absent]"
-    return REDACTED + " — present"
+    return REDACTED + ": present"
 
 
 def scrub_dict(data):
@@ -356,7 +356,7 @@ class DebugLogger:
             services=self.services, dependencies=self.dependencies,
             path=self.log_dir)
         sections = []
-        sections.append("DEBUG REPORT — %s %s"
+        sections.append("DEBUG REPORT: %s %s"
                         % (self.app_name, self.version))
         sections.append("Generated: %s" % context["generated"])
         sections.append("")

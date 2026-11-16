@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-16 — History search, model notes, chat follow, and dead-end guidance
+
+- History search now runs off the UI thread (150 ms debounce), so typing in the history box no longer freezes the chat. The 200-result cap shows its real count, and the history pane says plainly when there is nothing to show.
+- Model rows say what each model does, and a stopped pull says it can be resumed ("Pull {tag} again to pick up where it left off.").
+- The chat now keeps following new output when you are pinned to the bottom, instead of silently stopping.
+- The command palette says plainly when nothing matches and how to find the action, and broken skills are named in Customize instead of being silently dropped.
+- Full test suite: 2,983 tests. Five known items, none a regression: two ParallelTurns timing failures (pre-existing, also in the last build), one pre-existing FFmpeg probe failure (its premise is stale), and two CheckpointEngine errors that were disk-full on the test machine and pass on their own.
+
 ## 2026-11-15 — How to Use, safety confirmations, no auto-select, single instance, debug report
 
 - The Menu now has a "How to use Code Forge" index: 11 sections, each indexed by the task you want to do, in its own window.

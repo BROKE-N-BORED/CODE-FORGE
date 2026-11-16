@@ -665,7 +665,7 @@ class UnloadAllModelsTests(unittest.TestCase):
     def test_window_verb_receipts(self):
         line, lines = self._verb(
             _UnloadAllClient(resident=("a:2b", "b:2b")))
-        self.assertEqual(line, "Unloaded 2 models — RAM freed.")
+        self.assertEqual(line, "Unloaded 2 models. RAM freed.")
         self.assertEqual(lines, [line])
         line, _lines = self._verb(_UnloadAllClient(resident=()))
         self.assertEqual(line, "No models were loaded.")

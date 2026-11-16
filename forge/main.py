@@ -48,7 +48,7 @@ except Exception:
     # degrade to placeholder boxes on the canvas instead of breaking
     # this module's import. Sweep R96: say so where a human can see
     # it — the degradation used to be completely silent.
-    print("note: PySide6 QtSvg is unavailable — UI-builder SVG "
+    print("note: PySide6 QtSvg is unavailable. UI-builder SVG "
           "widgets will show as placeholder boxes.", file=sys.stderr)
     QSvgRenderer = None
 
@@ -119,7 +119,7 @@ from .plugins import (BUNDLED_PLUGIN_IDS, PluginContext,
                       plugin_fingerprint)
 from .skills import LOAD_SKILL_SCHEMA, index_text as skills_index_text
 from .skills import (make_load_skill_handler, scan_skills,
-                     skill_fingerprint)
+                     scan_skills_report, skill_fingerprint)
 from .storage import ConversationStore
 from .tools import describe_tool_full, describe_tool_short, TOOL_SCHEMAS
 from .worker import LONG_TURN_TOOL, AgentWorker
@@ -159,7 +159,7 @@ SYSTEM_PROMPT = """You are LINUX FORGE, a capable local Linux desktop agent. Be 
 HOUSE_RULES = """House rules (set by the owner, always in force):
 1. Answer in chat. Only write a file when the owner explicitly asks for a file.
 2. Announce a tool before you use it: say what you are about to do, then call it.
-3. Show the full answer in chat — never hide the substance inside a file.
+3. Show the full answer in chat. Never hide the substance inside a file.
 4. When you deliver a file, state its name and location. The shell issues its own receipt from the tool result; never invent one."""
 
 # Dark Glass Minimal (E1 + theme pass, locked 2026-11-07;
@@ -982,7 +982,7 @@ def models_readout(snap):
     residency is read, so provider models can never appear:
     they don't live in this PC's RAM."""
     if not snap.get("ollama_running"):
-        return "—", "Ollama isn't answering — this readout recovers on its own."
+        return "-", "Ollama isn't answering. This readout recovers on its own."
     loaded = snap.get("ollama_loaded") or []
     if not loaded:
         return "none loaded", "No local models are loaded in RAM right now."
@@ -1240,7 +1240,7 @@ class ApprovalDialog(QDialog):
     def __init__(self, parent, model: str, tool_name: str, target: str, description: str,
                  show_remember: bool = True, diff=None, workspace: str | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Tool approval — PAUSED")
+        self.setWindowTitle("Tool approval · PAUSED")
         self.setMinimumWidth(560)
         self.approved = False
         self.remember = False
@@ -1272,7 +1272,7 @@ class ApprovalDialog(QDialog):
         self._diff_expanded = False
         self._diff_expand_btn = None
         lay = QVBoxLayout(self)
-        state = QLabel("⏸  PAUSED — waiting on you. No clock is running on your decision.")
+        state = QLabel("⏸  PAUSED: waiting on you. No clock is running on your decision.")
         state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
         lay.addWidget(state)
         who = QLabel(f"{model}  requests:  {tool_name}")
@@ -1319,8 +1319,8 @@ class ApprovalDialog(QDialog):
                  "Choose by width: side by side when the diff area is "
                  f"at least {DIFF_SIDE_MIN_WIDTH} px wide, inline below that."),
                 ("side", "Side by side",
-                 "Always show the diff as two panes — old on the left, "
-                 "new on the right — whatever the window width."),
+                 "Always show the diff as two panes. Old on the left, "
+                 "new on the right. Whatever the window width."),
                 ("inline", "Inline",
                  "Always show the diff as one unified list, exactly "
                  "the classic view."),
@@ -1342,7 +1342,7 @@ class ApprovalDialog(QDialog):
             self._diff_expand_btn.setCheckable(True)
             self._diff_expand_btn.setToolTip(
                 "Show every line: long runs of unchanged lines fold "
-                "into a one-line count by default — expand to see "
+                "into a one-line count by default. Expand to see "
                 "them all.")
             self._diff_expand_btn.clicked.connect(
                 self._on_diff_expand_clicked)
@@ -1413,7 +1413,7 @@ class ApprovalDialog(QDialog):
             # H2: a sensitive call can never become a remembered
             # rule — the affordance is replaced by the reason, in
             # the row where the button would have sat.
-            self.sensitive_note = QLabel("Sensitive files always ask — "
+            self.sensitive_note = QLabel("Sensitive files always ask: "
                                          "this can't be remembered.")
             self.sensitive_note.setStyleSheet(
                 f"color:{TOKENS['text_amber_light']};")
@@ -1424,11 +1424,11 @@ class ApprovalDialog(QDialog):
                 # H2: the copy says what is actually remembered now —
                 # this exact command, in this project only.
                 remember_btn.setToolTip("Approve, and stop asking for this exact command in "
-                                        "this project (saved as a rule — manage rules in "
+                                        "this project (saved as a rule: manage rules in "
                                         "Customize → Permissions)")
             else:
                 remember_btn.setToolTip("Approve, and stop asking for this exact tool + target "
-                                        "(saved as a rule — manage rules in Customize → Permissions)")
+                                        "(saved as a rule: manage rules in Customize → Permissions)")
             remember_btn.clicked.connect(self._approve_remember)
             self.remember_btn = remember_btn
             row.addWidget(remember_btn)
@@ -1468,7 +1468,7 @@ class ApprovalDialog(QDialog):
         lines = list(self.diff.body)
         if self.diff.truncated:
             lines.append(
-                f"… diff truncated — showing {len(self.diff.body)} of "
+                f"… diff truncated: showing {len(self.diff.body)} of "
                 f"{self.diff.total_lines} lines "
                 f"(+{self.diff.added} −{self.diff.removed} total)")
         return lines
@@ -1739,7 +1739,7 @@ class SecretScanDialog(QDialog):
 
     def __init__(self, parent, payload, context=""):
         super().__init__(parent)
-        self.setWindowTitle("Cloud send blocked — PAUSED")
+        self.setWindowTitle("Cloud send blocked · PAUSED")
         self.setMinimumWidth(560)
         self.choice = "cancel"
         self.allow_reason = ""
@@ -1749,7 +1749,7 @@ class SecretScanDialog(QDialog):
         count = payload.get("message_count") or 0
         preview = str(payload.get("preview") or "")
         lay = QVBoxLayout(self)
-        state = QLabel("⏸  PAUSED — waiting on you. No clock is running on your decision.")
+        state = QLabel("⏸  PAUSED: waiting on you. No clock is running on your decision.")
         state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
         lay.addWidget(state)
         who = QLabel(f"{provider} · {model} was about to send "
@@ -1765,7 +1765,7 @@ class SecretScanDialog(QDialog):
             ctx.setWordWrap(True)
             lay.addWidget(ctx)
         intro = QLabel("The scan found something that looks like a "
-                       "secret. Nothing has been sent — the matches "
+                       "secret. Nothing has been sent. The matches "
                        "below are redacted, never shown in full.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -1773,7 +1773,7 @@ class SecretScanDialog(QDialog):
         matches.setReadOnly(True)
         lines = []
         for found in findings:
-            lines.append(f"• {found.get('pattern')} — "
+            lines.append(f"• {found.get('pattern')} · "
                          f"{found.get('evidence')} "
                          f"({found.get('where')})")
             line = found.get("line") or ""
@@ -1849,7 +1849,7 @@ class AllowListDialog(QDialog):
         self.setMinimumWidth(560)
         self.workspace = workspace
         lay = QVBoxLayout(self)
-        head = QLabel("Allowed matches in this project — the scan "
+        head = QLabel("Allowed matches in this project. The scan "
                       "will not stop these again.")
         head.setWordWrap(True)
         lay.addWidget(head)
@@ -1891,7 +1891,7 @@ class AllowListDialog(QDialog):
             row_widget = QWidget()
             row = QHBoxLayout(row_widget)
             row.setContentsMargins(0, 0, 0, 0)
-            text = f"{entry['pattern']} — {entry['anchor']}"
+            text = f"{entry['pattern']} · {entry['anchor']}"
             if entry.get("reason"):
                 text += f"\nReason: {entry['reason']}"
             label = QLabel(text)
@@ -1924,9 +1924,10 @@ class CustomizeDialog(QDialog):
                  tools=None, disabled_tools=None, gofish_review=True,
                  offer_save_run_as_skill=False, skribe_decisions=False,
                  fingerprint_changed_skills=None,
-                 fingerprint_changed_plugins=None):
+                 fingerprint_changed_plugins=None,
+                 broken_skills=None):
         super().__init__(parent)
-        self.setWindowTitle("Customize — skills · plugins · connectors")
+        self.setWindowTitle("Customize · skills · plugins · connectors")
         self.setMinimumWidth(600)
         self.config = dict(config or {})
         self._rules = [dict(r) for r in (rules or [])]
@@ -1964,7 +1965,7 @@ class CustomizeDialog(QDialog):
         # skills
         skills_page = QWidget(); sk_lay = QVBoxLayout(skills_page)
         for s in skills:
-            box = QCheckBox(f"{s.name} — {s.description}")
+            box = QCheckBox(f"{s.name} · {s.description}")
             box.setChecked(s.name not in disabled_skills)
             self._skill_boxes[s.name] = box
             row = QHBoxLayout()
@@ -1988,9 +1989,25 @@ class CustomizeDialog(QDialog):
                                f"until you re-enable them here: {changed}.")
             sk_notice.setWordWrap(True)
             sk_lay.addWidget(sk_notice)
+        # F10 (U19): skills that failed to LOAD — their SKILL.md
+        # could not be read or parsed, so the scan dropped them
+        # silently and the owner never learned they existed.
+        # Named here, in the Skills lane, beside the C16 notice
+        # for changed skills: same surface, same pattern, with
+        # the next step (fix the folder, then rescan from the
+        # Menu) instead of a dead end.
+        if broken_skills:
+            broken = "; ".join(f"{name} ({reason})"
+                               for name, reason in broken_skills)
+            broken_notice = QLabel("⚠ Could not load these skills: "
+                                   f"{broken}. Fix the folder, then "
+                                   "rescan from the Menu.")
+            broken_notice.setObjectName("broken_skills_notice")
+            broken_notice.setWordWrap(True)
+            sk_lay.addWidget(broken_notice)
         new_skill_row = QHBoxLayout()
         self._new_skill_btn = QPushButton("New skill…")
-        self._new_skill_btn.setToolTip("Open the New Skill window — a roomy editor "
+        self._new_skill_btn.setToolTip("Open the New Skill window. A roomy editor "
                                        "that creates the skill in the Forge's own "
                                        "skills folder, available in every project.")
         self._new_skill_btn.clicked.connect(lambda: self._request_editor("skill", None))
@@ -2001,12 +2018,12 @@ class CustomizeDialog(QDialog):
                       "the Skill Creator skill makes new ones.")
         note.setObjectName("muted"); note.setWordWrap(True); sk_lay.addWidget(note)
         # Note 20: SKRIBE-gated writes toggle.
-        self._skribe_box = QCheckBox("SKRIBE-gated writes — grade every file the agent writes "
+        self._skribe_box = QCheckBox("SKRIBE-gated writes. Grade every file the agent writes "
                                      "before the turn counts as done")
         self._skribe_box.setChecked(bool(skribe_writes))
         sk_lay.addWidget(self._skribe_box)
-        skribe_note = QLabel("Grading runs on the session model itself — no other model judges "
-                             "(governing-seat rule) — unless the Decisions lane below is on. One "
+        skribe_note = QLabel("Grading runs on the session model itself. No other model judges "
+                             "(governing-seat rule). Unless the Decisions lane below is on. One "
                              "batched pass per turn that writes; a \"revise\" verdict bounces the "
                              "file back once, then unverified files are reported, never dropped. "
                              "Off = writes behave as before. Turning the SKRIBE skill itself off "
@@ -2015,14 +2032,14 @@ class CustomizeDialog(QDialog):
         # Decisions fast lane (2026-11-12): grade through the Gemini
         # Decisions API instead of a local generation. Default off —
         # opt-in only, like the save-run-as-skill offer.
-        self._decisions_box = QCheckBox("SKRIBE Decisions lane — grade written files with the "
+        self._decisions_box = QCheckBox("SKRIBE Decisions lane. Grade written files with the "
                                         "Gemini Decisions API instead of a local grading pass")
         self._decisions_box.setChecked(bool(skribe_decisions))
         sk_lay.addWidget(self._decisions_box)
         decisions_note = QLabel("Uses your Gemini key; each written file's contents go to "
                                 "Google's free tier (Google may use free-tier data to improve "
                                 "its products). Scores come back as numbers in ~250 ms a file "
-                                "instead of minutes of local generation — and the shell still "
+                                "instead of minutes of local generation, and the shell still "
                                 "makes the finalize call from the score. Any failure falls back "
                                 "to the local grading pass.")
         decisions_note.setObjectName("muted"); decisions_note.setWordWrap(True); sk_lay.addWidget(decisions_note)
@@ -2030,16 +2047,16 @@ class CustomizeDialog(QDialog):
         # SKRIBE gate above (a skill + this toggle; the values()
         # tuple keeps its shape, so the state rides gofish_on(),
         # the same side door requested_editor uses).
-        self._gofish_box = QCheckBox("GoFish plan review — a fresh reviewer-seat pass "
+        self._gofish_box = QCheckBox("GoFish plan review. A fresh reviewer-seat pass "
                                        "reads each Plan-mode draft before the approval gate")
         self._gofish_box.setChecked(bool(gofish_review))
         sk_lay.addWidget(self._gofish_box)
-        gofish_note = QLabel("The reviewer sees ONLY the plan and the files it names — no "
+        gofish_note = QLabel("The reviewer sees ONLY the plan and the files it names. No "
                                "conversation (the firewall that makes the review worth having). "
                                "Two stages (Zoom Out, Comprehension) plus a mechanical check that "
                                "named files/functions exist; findings are advisory and never block "
-                               "approval. Cost: each stage is a full extra local generation — "
-                               "minutes on this PC — and a Blocker/Major earns one revision "
+                               "approval. Cost: each stage is a full extra local generation: "
+                               "minutes on this PC, and a Blocker/Major earns one revision "
                                "round. Turning the gofish skill itself off above also "
                                "disables the pass.")
         gofish_note.setObjectName("muted"); gofish_note.setWordWrap(True); sk_lay.addWidget(gofish_note)
@@ -2048,10 +2065,10 @@ class CustomizeDialog(QDialog):
         # checkbox + this accessor; the values() tuple keeps its
         # shape). The offer fires only after a plan completes, and
         # the draft lands DISABLED until the owner enables it.
-        self._save_skill_box = QCheckBox("Offer to save a finished run as a skill — after a plan completes, ask whether to draft it as a new skill")
+        self._save_skill_box = QCheckBox("Offer to save a finished run as a skill. After a plan completes, ask whether to draft it as a new skill")
         self._save_skill_box.setChecked(bool(offer_save_run_as_skill))
         sk_lay.addWidget(self._save_skill_box)
-        save_skill_note = QLabel("The draft is built from the run's own record — goal, steps, files touched — with no extra generation, and it starts disabled. Declining writes nothing. Off = nothing changes at all: no offer, no draft, no extra generation.")
+        save_skill_note = QLabel("The draft is built from the run's own record: goal, steps, files touched, with no extra generation, and it starts disabled. Declining writes nothing. Off = nothing changes at all: no offer, no draft, no extra generation.")
         save_skill_note.setObjectName("muted"); save_skill_note.setWordWrap(True); sk_lay.addWidget(save_skill_note)
         sk_lay.addStretch()
         tabs.addTab(skills_page, "Skills")
@@ -2062,7 +2079,7 @@ class CustomizeDialog(QDialog):
                 if p.kind != kind:
                     continue
                 tools = ", ".join(t.get("name", "") for t in p.tools) or "no tools"
-                box = QCheckBox(f"{p.name} — {p.description}")
+                box = QCheckBox(f"{p.name} · {p.description}")
                 box.setChecked(p.pid not in disabled_plugins)
                 box.setToolTip("Tools: " + tools)
                 self._plugin_boxes[p.pid] = box
@@ -2110,7 +2127,7 @@ class CustomizeDialog(QDialog):
                 new_plugin_row = QHBoxLayout()
                 self._new_plugin_btn = QPushButton("New plugin…")
                 self._new_plugin_btn.setToolTip(
-                    "Open the New Plugin window — a roomy editor that creates the "
+                    "Open the New Plugin window. A roomy editor that creates the "
                     "plugin in the Forge's own plugins folder. A new plugin starts "
                     "DISABLED; tick its box here to enable it.")
                 self._new_plugin_btn.clicked.connect(
@@ -2128,7 +2145,7 @@ class CustomizeDialog(QDialog):
         tools_page = QWidget(); tl_lay = QVBoxLayout(tools_page)
         disabled_tools = set(disabled_tools or ())
         for name, group in self._tool_rows:
-            box = QCheckBox(f"{name} — {group}")
+            box = QCheckBox(f"{name} · {group}")
             box.setChecked(name not in disabled_tools)
             self._tool_boxes[name] = box
             tl_lay.addWidget(box)
@@ -2165,7 +2182,7 @@ class CustomizeDialog(QDialog):
         self.maintenance_groq_model_edit = QLineEdit(
             self.config.get("maintenance_groq_model", ""))
         self.maintenance_groq_model_edit.setPlaceholderText(
-            "e.g. llama-3.3-70b-versatile — the Groq model the "
+            "e.g. llama-3.3-70b-versatile. The Groq model the "
             "maintenance engineer drives")
         prov_form.addRow("Maintenance Groq model",
                          self.maintenance_groq_model_edit)
@@ -2189,7 +2206,7 @@ class CustomizeDialog(QDialog):
         self.maintenance_gemini_model_edit = QLineEdit(
             self.config.get("maintenance_gemini_model", ""))
         self.maintenance_gemini_model_edit.setPlaceholderText(
-            "e.g. gemini-2.5-flash — the Gemini model the "
+            "e.g. gemini-2.5-flash. The Gemini model the "
             "maintenance engineer drives")
         prov_form.addRow("Maintenance Gemini model",
                          self.maintenance_gemini_model_edit)
@@ -2213,7 +2230,7 @@ class CustomizeDialog(QDialog):
         self.maintenance_exaone_model_edit = QLineEdit(
             self.config.get("maintenance_exaone_model", ""))
         self.maintenance_exaone_model_edit.setPlaceholderText(
-            "e.g. k-exaone_v2.5 — the EXAONE model the "
+            "e.g. k-exaone_v2.5. The EXAONE model the "
             "maintenance engineer drives")
         prov_form.addRow("Maintenance EXAONE model",
                          self.maintenance_exaone_model_edit)
@@ -2225,7 +2242,7 @@ class CustomizeDialog(QDialog):
         self.sudo_password_edit = QLineEdit()
         self.sudo_password_edit.setEchoMode(QLineEdit.Password)
         self.sudo_password_edit.setPlaceholderText(
-            "PC (sudo) password — kept in the encrypted vault only")
+            "PC (sudo) password · kept in the encrypted vault only")
         sudo_status, sudo_clear = self._secret_widgets(
             "sudo_password", self.sudo_password_edit)
         sudo_row = QWidget(); sudo_row_lay = QHBoxLayout(sudo_row)
@@ -2237,12 +2254,12 @@ class CustomizeDialog(QDialog):
         sudo_note = QLabel(
             "Used only when you approve a command that runs with "
             "sudo: Forge feeds the password to sudo behind the "
-            "scenes — it is never shown to the model.")
+            "scenes. It is never shown to the model.")
         sudo_note.setObjectName("muted"); sudo_note.setWordWrap(True)
         prov_form.addRow(sudo_note)
         prov_lay.addLayout(prov_form)
         prov_lay.addWidget(QLabel(
-            "Model registry — one row per provider model "
+            "Model registry. One row per provider model "
             "(groq:… / gemini:… / exaone:…). Scope says where it may run; the "
             "role boxes say what it may do there. A provider model "
             "with no row is enabled for driving in both scopes, and "
@@ -2269,7 +2286,7 @@ class CustomizeDialog(QDialog):
         prov_lay.addLayout(registry_btns)
         providers_note = QLabel(
             "Keys and the PC password are stored in the app's "
-            "encrypted vault (vault.json in the app folder) — never "
+            "encrypted vault (vault.json in the app folder). Never "
             "in connectors.json. The vault's key file sits beside "
             "it on this PC, so this protects against casual reading "
             "and accidental leaks, not against someone who already "
@@ -2552,7 +2569,7 @@ class CustomizeDialog(QDialog):
         edit.textChanged.connect(
             lambda _text, k=key: self._clear_secrets.discard(k))
         if edit.text():
-            status.setText("● Stored — moves into the encrypted "
+            status.setText("● Stored. Moves into the encrypted "
                            "vault when you save")
             return status, clear_btn
         stored = False
@@ -2562,7 +2579,7 @@ class CustomizeDialog(QDialog):
             stored = False
         if stored:
             edit.setPlaceholderText(
-                "Stored in the vault — type a new value to replace "
+                "Stored in the vault. Type a new value to replace "
                 "it, or Clear to remove it")
             status.setText("● Stored in the vault")
         else:
@@ -2658,7 +2675,7 @@ class ForkDialog(QDialog):
 
     def __init__(self, parent, messages):
         super().__init__(parent)
-        self.setWindowTitle("Fork conversation — branch from…")
+        self.setWindowTitle("Fork conversation · branch from…")
         self.setMinimumWidth(560)
         self.index_by_row = []
         self.list = QListWidget(self)
@@ -2707,7 +2724,7 @@ class ScheduleDialog(QDialog):
         self.workspace = workspace
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel("Jobs fire when the bench is idle. Anything needing approval waits "
-                             "at the dialog for you — no timeout, by design."))
+                             "at the dialog for you. No timeout, by design."))
         self.list = QListWidget()
         self._refresh()
         lay.addWidget(self.list)
@@ -2736,7 +2753,7 @@ class ScheduleDialog(QDialog):
             when = f"every {j['every_minutes']} min" if j.get("every_minutes") else f"daily {j.get('daily', '?')}"
             # Sweep R83: a stored prompt of None (hand-edited
             # settings) sliced as None[:50] and raised.
-            self.list.addItem(QListWidgetItem(f"{'●' if j.get('enabled', True) else '○'}  {j.get('name', '?')} — {when} — {str(j.get('prompt') or '')[:50]}"))
+            self.list.addItem(QListWidgetItem(f"{'●' if j.get('enabled', True) else '○'}  {j.get('name', '?')} · {when} · {str(j.get('prompt') or '')[:50]}"))
 
     def _add(self):
         name = self.name_edit.text().strip() or "job"
@@ -2958,7 +2975,7 @@ class SettingsDialog(QDialog):
         self.context.setRange(2048, 32768); self.context.setSingleStep(1024)
         self.context.setValue(_int("num_ctx", 8192, 2048, 32768))
         form.addRow("Context window (tokens)", self.context)
-        form.addRow("", caption("How much the model can hold in mind at once. Bigger is not free — it eats RAM on this PC. 8192 is the tested size."))
+        form.addRow("", caption("How much the model can hold in mind at once. Bigger is not free. It eats RAM on this PC. 8192 is the tested size."))
         self.num_thread = QSpinBox()
         self.num_thread.setRange(0, 16)
         try:
@@ -2992,7 +3009,7 @@ class SettingsDialog(QDialog):
         form.addRow("", caption("Ollama cuts candidate tokens whose probability falls below this "
                                 "fraction of the top token's before sampling. Most models are fine "
                                 "left Not set (their own default). MiniCPM5: set 0 to stop runaway "
-                                "repetition. Local models only — the cloud providers take no min_p."))
+                                "repetition. Local models only. The cloud providers take no min_p."))
         # Item #53: sub-agent limits — the caps that govern the
         # Forge's sub-agent loops and per-result output size, in one
         # visible place. The defaults ARE today's hard-coded
@@ -3011,7 +3028,7 @@ class SettingsDialog(QDialog):
         form = form_seats
         form.addRow("Sub-agent limits", caption(
             "Bench/tester runs inside one turn are one-at-a-time. "
-            "The main turn itself has no cycle cap — these limits "
+            "The main turn itself has no cycle cap. These limits "
             "govern sub-agents and output size only."))
         self.bench_max_cycles = QSpinBox()
         self.bench_max_cycles.setRange(1, 50)
@@ -3050,7 +3067,7 @@ class SettingsDialog(QDialog):
         form.addRow("Auto-test after this many lines change",
                     self.test_cadence_lines)
         form.addRow("", caption("The Tester Seat runs on its own when untested changes since "
-                                "its last run reach either number — sooner when a plan step "
+                                "its last run reach either number. Sooner when a plan step "
                                 "finishes (2 files / 60 lines). One-line fixes never trigger "
                                 "it. A run that doesn't pass leaves the changes on the tab "
                                 "until a passing run. 'Test now' in the command palette "
@@ -3092,7 +3109,7 @@ class SettingsDialog(QDialog):
         form.addRow("", caption("How many main turns may run at once, across conversations. "
                                 "Parallel turns share the one Ollama: two turns on the same "
                                 "model share its resident copy, different models each take "
-                                "their RAM — on a small PC they will be slower. Plan turns "
+                                "their RAM. On a small PC they will be slower. Plan turns "
                                 "always run alone. Mission Control (View menu) shows every "
                                 "running turn and the gates waiting on you."))
         # Item C9: the per-conversation SOFT token budget. The Turn
@@ -3111,7 +3128,7 @@ class SettingsDialog(QDialog):
                     self.soft_token_budget)
         form.addRow("", caption("A soft budget for ONE conversation, counted in the worker's "
                                 "estimated tokens across all its turns this session. Crossing it "
-                                "only flags the conversation (bench note + Turn timeline) — "
+                                "only flags the conversation (bench note + Turn timeline): "
                                 "nothing is blocked, stopped, or sent anywhere."))
         # Remainder R6: context-archive housekeeping. The count/size
         # line reads the CURRENT project (the parent window's
@@ -3136,7 +3153,7 @@ class SettingsDialog(QDialog):
         form.addRow("", caption("Fold archives (.forge/context/fold-*.json) keep every folded span "
                                 "restorable; they grow by one per fold. Pruning deletes only "
                                 "archives older than the days above that the current trajectory "
-                                "does not point at — referenced archives are never deleted. "
+                                "does not point at. Referenced archives are never deleted. "
                                 "Automatic pruning is OFF unless you tick the box."))
         self.prune_archives_btn = QPushButton("Prune context archives")
         self.prune_archives_btn.clicked.connect(self._prune_archives)
@@ -3183,17 +3200,17 @@ class SettingsDialog(QDialog):
         self.watch = QLineEdit(_text("watch_model", ""))
         form.addRow("Watch model", self.watch)
         form.addRow("", caption("Which model the Watch Seat (C1 monitoring) uses when you ask it for a fix "
-                                "proposal for a run alert. It only ever PROPOSES — every proposal still "
+                                "proposal for a run alert. It only ever PROPOSES. Every proposal still "
                                 "passes your approval gate as a diff. Blank = the reviewer seat's roster "
                                 "default. Like the other governing seats, a non-roster name is refused "
                                 "to the default."))
-        form.addRow("", caption("Governing seats (reviewer, tester, SKRIBE grader) only accept roster models — "
+        form.addRow("", caption("Governing seats (reviewer, tester, SKRIBE grader) only accept roster models: "
                                 "others are refused at run time."))
         self.roster = QTextEdit()
         self.roster.setPlainText(_text("governing_roster", ""))
         self.roster.setMinimumHeight(54)
         form.addRow("Governing roster (extra models)", self.roster)
-        form.addRow("", caption("Models YOU vouch for as abliterated, one per line or comma-separated — they "
+        form.addRow("", caption("Models YOU vouch for as abliterated, one per line or comma-separated. They "
                                 "become eligible for governing seats. The built-in roster (MiniCPM Heretic, "
                                 "Erik's Bonsai, dolphin Qwen) is always eligible; stock models are not."))
         form = form_behavior
@@ -3220,14 +3237,14 @@ class SettingsDialog(QDialog):
         form.addRow("Fold style", self.fold_style)
         form.addRow("", caption("How the fold condenses older messages: a plain prose summary, or a "
                                 "structured scratchpad (Goal / Done / Files / Decisions / Open / Next) "
-                                "that keeps working state — what's done and what's next — explicit."))
+                                "that keeps working state, what's done and what's next, explicit."))
         self.auto_snapshot = QCheckBox("Snapshot before agent edits")
         self.auto_snapshot.setChecked(bool(settings.get("auto_snapshot_edits", True)))
         form.addRow("Auto-snapshot", self.auto_snapshot)
         form.addRow("", caption("Once per turn, right before the agent's first edit lands, the Forge "
                                 "snapshots the project (git), so the whole turn can be rolled back from "
                                 "the Snapshots panel. Only projects you started tracking there are "
-                                "snapshotted — tracking is never started for you. A snapshot that fails "
+                                "snapshotted: tracking is never started for you. A snapshot that fails "
                                 "never blocks an edit you approved. Off = snapshots are manual only."))
         # Contained run (owner directive, 2026-11-09): the cage from
         # the minimal-agent pattern — the tools may touch ONE folder.
@@ -3239,7 +3256,7 @@ class SettingsDialog(QDialog):
                                 "directory; a command whose written text reaches outside the project "
                                 "is refused before it runs. Honest limit: this is a command filter "
                                 "at the tool layer, NOT a sandbox. It reads the paths written in "
-                                "the call — a command can still reach files anywhere on this PC, "
+                                "the call. A command can still reach files anywhere on this PC, "
                                 "and the network, through anything the filter cannot see "
                                 "(variables, interpreters, paths it builds as it runs). It backs "
                                 "up your approvals; it does not replace them. "
@@ -3248,7 +3265,7 @@ class SettingsDialog(QDialog):
         self.contained_docker.setChecked(bool(settings.get("contained_docker", False)))
         form.addRow("Docker cage", self.contained_docker)
         form.addRow("", caption("Only matters when Contained run is on: commands run inside a Docker "
-                                "container with ONLY the project folder mounted (at /work) — a real "
+                                "container with ONLY the project folder mounted (at /work). A real "
                                 "filesystem cage: the container cannot see the rest of this PC's "
                                 "files. It still has network access; the cage is for files, not "
                                 "the network. If Docker isn't installed, contained commands just "
@@ -3267,7 +3284,7 @@ class SettingsDialog(QDialog):
         self.research_web_engine.addItem(
             "Browse connector (OpenCode Browse)", "browse")
         self.research_web_engine.addItem(
-            "Forge Browser (built into Forge — no key, no account)",
+            "Forge Browser (built into Forge · no key, no account)",
             "forge-browser")
         _web_engine_idx = self.research_web_engine.findData(
             str(settings.get("research_web_engine", "browse")
@@ -3276,7 +3293,7 @@ class SettingsDialog(QDialog):
             self.research_web_engine.setCurrentIndex(_web_engine_idx)
         form.addRow("Research web engine", self.research_web_engine)
         form.addRow("", caption("Which engine opens and reads web pages when the agent "
-                                "browses — this is Research mode's engine. The Browse connector drives "
+                                "browses. This is Research mode's engine. The Browse connector drives "
                                 "your real Chromium through the external Browse server (its own setup, "
                                 "in Customize → Connectors). Forge Browser is built into Forge: keyless "
                                 "page reading on this PC, nothing to install for reading. Clicking and "
@@ -3306,7 +3323,7 @@ class SettingsDialog(QDialog):
         # allow-list — matches the owner accepted, with reasons.
         self.allowlist_button = QPushButton("Secret allow-list…")
         self.allowlist_button.setToolTip(
-            "Matches you allowed in this project — remove one "
+            "Matches you allowed in this project. Remove one "
             "to block it again.")
         self.allowlist_button.clicked.connect(
             self._open_allowlist)
@@ -3327,19 +3344,19 @@ class SettingsDialog(QDialog):
         # review exactly. Quiet reports Critical/Major only;
         # Assertive reports everything including nitpicks.
         self.review_profile = QComboBox()
-        self.review_profile.addItem("Quiet — Critical and Major only",
+        self.review_profile.addItem("Quiet · Critical and Major only",
                                     "quiet")
-        self.review_profile.addItem("Chill — the usual review",
+        self.review_profile.addItem("Chill · the usual review",
                                     "chill")
         self.review_profile.addItem(
-            "Assertive — everything, including nitpicks", "assertive")
+            "Assertive · everything, including nitpicks", "assertive")
         _voice_idx = self.review_profile.findData(
             perm_mod.normalize_review_profile(
                 settings.get("review_profile", "chill")))
         if _voice_idx >= 0:
             self.review_profile.setCurrentIndex(_voice_idx)
         form.addRow("Review voice", self.review_profile)
-        form.addRow("", caption("Review voice — the voice Review "
+        form.addRow("", caption("Review voice: the voice Review "
                                 "turns use. The finding format, the "
                                 "Walkthrough and the severity scale "
                                 "never change, only how much the "
@@ -3358,14 +3375,14 @@ class SettingsDialog(QDialog):
         form.addRow("", caption(
             "Design Shell folder (blank = auto: FORGE_DESIGN_SHELL "
             "or ~/design-shell). The folder of the standalone "
-            "Design Shell install — the design_shell tool runs it "
+            "Design Shell install. The design_shell tool runs it "
             "from there. The shell stays a separate program; Forge "
             "only calls it."))
         form.addRow("", caption(
             "For small machines: one model in memory at a time. "
             "Helper models (reviewer, tester, and the other seats) "
             "unload as soon as they finish, and a different loaded "
-            "model is unloaded before another one runs — so models "
+            "model is unloaded before another one runs. So models "
             "never stack up in RAM. The trade: the main model may "
             "need a fresh load from disk after a helper has run. "
             "Local models also get a smaller context (4096), "
@@ -3383,11 +3400,11 @@ class SettingsDialog(QDialog):
             self.forge_browser_engine.setCurrentIndex(_fb_engine_idx)
         form.addRow("Forge Browser engine", self.forge_browser_engine)
         form.addRow("", caption("The local browser engine Forge Browser uses when it must "
-                                "RENDER a page — browser verification and screenshots. Auto uses an "
+                                "RENDER a page. Browser verification and screenshots. Auto uses an "
                                 "already-running engine endpoint when one is set (FORGE_CDP_URL / "
                                 "FORGE_LIGHTPANDA_URL), else Chromium. Lightpanda is the fast reader "
                                 "engine; Chromium is full-fidelity. Optional engines are installed by "
-                                "you, once, by running browser-setup.sh in the Forge folder — nothing "
+                                "you, once, by running browser-setup.sh in the Forge folder: nothing "
                                 "downloads or installs from this pane."))
         # G5 (GUIFX Research Brief #1, 2026-11-09): the density
         # toggle — a token swap over the global stylesheet (see
@@ -3451,7 +3468,7 @@ class SettingsDialog(QDialog):
             return "No project open."
         stats = context_mod.archive_stats(workspace)
         if stats["count"] == 0:
-            return "0 files — nothing archived yet."
+            return "0 files: nothing archived yet."
         noun = "file" if stats["count"] == 1 else "files"
         return (f"{stats['count']} {noun}, "
                 f"{human_size(stats['bytes'])}")
@@ -3648,7 +3665,7 @@ class MaintenanceRunThread(QThread):
                 proc.stdout.close()
             code = proc.wait()
             self.finished_ok.emit(code == 0,
-                                  f"exit {code}" + (f" — last line: {tail}" if tail else ""))
+                                  f"exit {code}" + (f". Last line: {tail}" if tail else ""))
         except Exception as exc:
             self.finished_ok.emit(False, f"could not run: {exc}")
 
@@ -3995,6 +4012,69 @@ class GitScanThread(QThread):
                 self.diff_loaded.emit(self.change.get("path", ""), str(exc))
             else:
                 self.scanned.emit(self.root, "no_git", [])
+
+
+# GUIFX F6 (2026-11-14): the history search is debounced 150 ms —
+# the search-box standard once the search is off-thread: snappy,
+# still coalesces fast typing. Round 1's 250–300 ms was chosen
+# when the search still ran on the GUI thread.
+_HISTORY_SEARCH_DEBOUNCE_MS = 150
+
+
+def _visible_history_rows(rows, workspace):
+    """The rows of `rows` visible in the Conversations panel for
+    `workspace`: a row is visible when its recorded project is the
+    current workspace, or when it belongs to no project at all — no
+    recorded project (older rows, NULL/empty), or its recorded
+    project folder no longer exists on disk (renamed/deleted: the
+    chat must stay reachable, so it shows everywhere).
+    Returns (row, unfiled) pairs; unfiled rows carry the marker
+    in the list. Matching is plain string equality, the same rule
+    load_conversation and refresh_projects already use. Pure —
+    no Qt, no window state — so the search worker can run it."""
+    visible = []
+    for row in rows:
+        project = row.get("project")
+        if not project:
+            visible.append((row, True))
+        elif project == workspace:
+            visible.append((row, False))
+        elif not Path(project).is_dir():
+            visible.append((row, True))
+    return visible
+
+
+class HistorySearchThread(QThread):
+    """The Conversations search, off the GUI thread (GUIFX F6,
+    2026-11-14: every keystroke ran a full LIKE scan over every
+    stored message's JSON on the GUI thread — Round 2 measured
+    104.8 ms per no-match keystroke at N=2000, so typing a
+    10-char query was ~1 s of freezes). One thread per search:
+    it fetches, project-filters, and counts, then hands the
+    first 200 visible rows plus the total to the window. The
+    store opens a fresh SQLite connection per call, so the
+    worker's search never shares a connection with the GUI
+    thread. A failed search reports failure instead of empty
+    results — a failed search is not an empty list."""
+
+    searched = Signal(int, str, list, int)  # token, query, visible[:200], total
+    failed = Signal(int, str)               # token, query
+
+    def __init__(self, store, query, workspace, token):
+        super().__init__()
+        self.store = store
+        self.query = query
+        self.workspace = workspace
+        self.token = token
+
+    def run(self):
+        try:
+            rows = self.store.search(self.query, limit=100000)
+            visible = _visible_history_rows(rows, self.workspace)
+            self.searched.emit(self.token, self.query,
+                               visible[:200], len(visible))
+        except Exception:
+            self.failed.emit(self.token, self.query)
 
 
 class AccordionSection(QWidget):
@@ -4399,15 +4479,15 @@ class UiBuilderDialog(QDialog):
 
     def __init__(self, parent, workspace):
         super().__init__(parent)
-        self.setWindowTitle("UI Builder — lay out a window")
+        self.setWindowTitle("UI Builder · lay out a window")
         self.resize(980, 700)
         self.workspace = str(workspace)
         self.design = uib_mod.new_design()
         self._preview = None
         lay = QVBoxLayout(self)
-        head = QLabel("UI BUILDER — LAYOUT"); head.setObjectName("section")
+        head = QLabel("UI BUILDER · LAYOUT"); head.setObjectName("section")
         lay.addWidget(head)
-        caption = QLabel("Layout only: the preview is a real window — its fields "
+        caption = QLabel("Layout only: the preview is a real window. Its fields "
                          "and buttons work as widgets, but no logic is wired. "
                          "Export writes a standalone .py that runs.")
         caption.setObjectName("muted"); caption.setWordWrap(True)
@@ -4605,7 +4685,7 @@ class UiBuilderDialog(QDialog):
             return
         if uib_mod.set_widget_style(self.design, entry["name"],
                                      **changes) is None:
-            self._refresh_status("style refused — invalid value")
+            self._refresh_status("style refused: invalid value")
             self._refresh_style_controls()
             return
         self.canvas.update()
@@ -4669,7 +4749,7 @@ class UiBuilderDialog(QDialog):
         if len(text) > uib_mod.MAX_SVG_CHARS:
             self._refresh_status(
                 f"SVG too large: {len(text)} chars (limit "
-                f"{uib_mod.MAX_SVG_CHARS}) — nothing imported")
+                f"{uib_mod.MAX_SVG_CHARS}). Nothing imported")
             return False
         entry = uib_mod.add_widget(self.design, "svg", 20, 20)
         if entry is None:
@@ -4727,7 +4807,7 @@ class UiBuilderDialog(QDialog):
             return
         new_name = self.prop_name.text().strip()
         if uib_mod.rename_widget(self.design, entry["name"], new_name) is None:
-            self._refresh_status("name refused — must be a plain identifier "
+            self._refresh_status("name refused. Must be a plain identifier "
                                  "(letters, digits, _) and not already used")
             self.prop_name.setText(entry["name"])
             return
@@ -4805,7 +4885,7 @@ class UiBuilderDialog(QDialog):
             self._preview.close()
         self._preview = build_ui_preview(self.design)
         self._preview.show()
-        self._refresh_status("preview open — a real window; no logic is wired")
+        self._refresh_status("preview open. A real window; no logic is wired")
 
     def closeEvent(self, event):
         # Sweep R88: the preview is a parentless top-level window —
@@ -4849,7 +4929,7 @@ class SnapshotsDialog(QDialog):
         self._snaps = []
         self._is_repo = False
         self._note = None
-        self.setWindowTitle("Snapshots — " + Path(self.workspace).name)
+        self.setWindowTitle("Snapshots: " + Path(self.workspace).name)
         self.setMinimumSize(580, 430)
         lay = QVBoxLayout(self)
         self.project_label = QLabel(self.workspace)
@@ -4910,7 +4990,7 @@ class SnapshotsDialog(QDialog):
             return
         if not self._is_repo:
             self.status_label.setText(
-                "Snapshots are restore points saved inside this project — "
+                "Snapshots are restore points saved inside this project: "
                 "local only, nothing leaves this PC. This project isn't "
                 "being tracked yet.")
             self.start_btn.setVisible(True)
@@ -4932,7 +5012,7 @@ class SnapshotsDialog(QDialog):
                 f"{len(self._snaps)} snapshot(s), newest first. Restoring one "
                 "first saves a safety snapshot of how things are right now.")
         else:
-            self.status_label.setText("Tracking is on. No snapshots yet — take the first one.")
+            self.status_label.setText("Tracking is on. No snapshots yet. Take the first one.")
         self._selection_changed(self.list.currentRow())
 
     def _selection_changed(self, row):
@@ -4967,7 +5047,7 @@ class SnapshotsDialog(QDialog):
                 "\n\n".join(warnings) + "\n\nTake the snapshot anyway?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
-                self._note = ("Snapshot not taken — check the warnings "
+                self._note = ("Snapshot not taken. Check the warnings "
                               "above when you're ready.")
                 self.refresh()
                 return
@@ -4982,7 +5062,7 @@ class SnapshotsDialog(QDialog):
         if result.get("created"):
             self._note = f"Snapshot saved: {result.get('label', '')}"
         else:
-            self._note = ("Nothing changed since the last snapshot — the "
+            self._note = ("Nothing changed since the last snapshot. The "
                           "current state is already captured.")
         self.refresh()
 
@@ -5013,7 +5093,7 @@ class SnapshotsDialog(QDialog):
             self._note = (f"Restored “{snap['label']}”. The safety snapshot "
                           "in the list is how things were just before.")
         else:
-            self._note = ("Already at that snapshot — nothing to change. "
+            self._note = ("Already at that snapshot: nothing to change. "
                           "A safety snapshot was still taken.")
         self.refresh()
 
@@ -5034,7 +5114,7 @@ class CheckpointsDialog(QDialog):
     MODES = (("off", "Off"),
              ("files", "Each file change"),
              ("task", "Each turn"),
-             ("both", "Both — file changes and turns"))
+             ("both", "Both · file changes and turns"))
 
     def __init__(self, parent, workspace, app_dir, settings=None,
                  save_settings=None, log=None, git="git", engine=None):
@@ -5048,7 +5128,7 @@ class CheckpointsDialog(QDialog):
         self._log_fn = log
         self._ckpts = []
         self._note = None
-        self.setWindowTitle("Checkpoints — " + Path(self.workspace).name)
+        self.setWindowTitle("Checkpoints: " + Path(self.workspace).name)
         self.setMinimumSize(580, 430)
         lay = QVBoxLayout(self)
         self.project_label = QLabel(self.workspace)
@@ -5114,10 +5194,10 @@ class CheckpointsDialog(QDialog):
         else:
             self.status_label.setText(
                 "No checkpoints yet. Shadow checkpoints live OUTSIDE this "
-                "project, in the Forge's own data folder — the project's own "
+                "project, in the Forge's own data folder. The project's own "
                 "git (if any) is never touched. Each checkpoint stores the "
                 "project's current files in that shadow history, so it costs "
-                "disk space — very roughly the project's size each time. "
+                "disk space. Very roughly the project's size each time. "
                 "Turn them on above and the agent's turns will lay them down.")
         self._selection_changed(self.list.currentRow())
 
@@ -5186,16 +5266,16 @@ class BenchDialog(QDialog):
         self.light_machine = bool(light_machine)
         self._thread = None
         self._row_by_id = {}
-        self.setWindowTitle("Forge Bench — fifteen fixed, scored tasks")
+        self.setWindowTitle("Forge Bench · fifteen fixed, scored tasks")
         self.setMinimumSize(640, 540)
         lay = QVBoxLayout(self)
         intro = QLabel(
             "Forge-bench runs 15 fixed tasks against the chosen model in "
             "throwaway folders and scores each one with a planted check. "
             "The bench runs the model's commands in those folders WITHOUT "
-            "per-command approvals — the model's tools run contained to "
+            "per-command approvals. The model's tools run contained to "
             "the task folder (contained-run rules: paths outside it are "
-            "refused — a tool-layer guardrail, not an OS sandbox), and "
+            "refused, a tool-layer guardrail, not an OS sandbox), and "
             "each task's folder is kept so you "
             "can inspect what the model did.")
         intro.setWordWrap(True)
@@ -5239,7 +5319,7 @@ class BenchDialog(QDialog):
         if not self.model_combo.count():
             self.run_btn.setEnabled(False)
             self.results.setPlainText(
-                "No installed models found — is Ollama running? "
+                "No installed models found. Is Ollama running? "
                 "Reopen the bench once the model list loads.")
 
     # ---------- run control ----------
@@ -5290,10 +5370,10 @@ class BenchDialog(QDialog):
     def _on_task_done(self, record):
         mark = ("✓" if record.get("passed") is True
                 else "✗" if record.get("passed") is False else "–")
-        line = (f"{mark}  {record.get('title', record.get('id', ''))} — "
+        line = (f"{mark}  {record.get('title', record.get('id', ''))} · "
                 f"{record.get('seconds', 0):.1f}s")
         if record.get("passed") is not True and record.get("note"):
-            line += f" — {record['note']}"
+            line += f" · {record['note']}"
         row = self._row_by_id.get(record.get("id"))
         if row is None:
             self._row_by_id[record.get("id")] = self.list.count()
@@ -5310,13 +5390,13 @@ class BenchDialog(QDialog):
         score = f"{report.get('passed', 0)}/{report.get('total', 0)}"
         if path is not None:
             self._log(f"🏁 Forge bench: {score} for {report.get('model')} "
-                      f"— report saved → {path}")
+                      f". Report saved → {path}")
         else:
             # Sweep R86: the reason rides along — "could not be
             # saved" with no cause sent the owner hunting blind.
             reason = getattr(self, "_save_error", "") or "unknown error"
             self._log(f"🏁 Forge bench: {score} for {report.get('model')} "
-                      f"— the report could not be saved ({reason}); "
+                      f". The report could not be saved ({reason}); "
                       f"the scorecard is in the Bench dialog.")
 
     def _on_bench_failed(self, message):
@@ -5372,13 +5452,13 @@ class RecipesDialog(QDialog):
         if self.problems and log_problems is not None:
             log_problems(self.problems)
         self._fields: dict[str, QLineEdit] = {}
-        self.setWindowTitle("Recipes — parameterized prompts")
+        self.setWindowTitle("Recipes · parameterized prompts")
         self.setMinimumSize(580, 460)
         lay = QVBoxLayout(self)
         intro = QLabel(
             "A recipe is a prompt you author once as a JSON file and "
             "run any time with fresh values. Running one goes through "
-            "the normal send path — every gate applies, exactly as if "
+            "the normal send path. Every gate applies, exactly as if "
             "you had typed the rendered prompt yourself.")
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -5422,7 +5502,7 @@ class RecipesDialog(QDialog):
             self.run_btn.setEnabled(False)
             self.desc_label.setText(
                 "No recipes yet. A recipe is one small JSON file per "
-                f"recipe in {self.app_dir / 'recipes'} — e.g. "
+                f"recipe in {self.app_dir / 'recipes'}: e.g. "
                 '{"name": "Release notes", "prompt": "Write release '
                 'notes for {{version}}.", "params": [{"name": '
                 '"version", "required": true}]}. Add the file and '
@@ -5452,7 +5532,7 @@ class RecipesDialog(QDialog):
         if recipe["mode"]:
             bits.append(f"Runs in {recipe['mode'].capitalize()} mode.")
         if not recipe["params"]:
-            bits.append("No parameters — Run sends the prompt as written.")
+            bits.append("No parameters. Run sends the prompt as written.")
         self.desc_label.setText(" ".join(bits))
         for param in recipe["params"]:
             edit = QLineEdit()
@@ -5476,7 +5556,7 @@ class RecipesDialog(QDialog):
             return
         if not text.strip():
             self.status_label.setText(
-                "The rendered prompt is empty — nothing to send.")
+                "The rendered prompt is empty: nothing to send.")
             return
         if recipe["mode"]:
             # The window's own mode-setting path: the mode combo is
@@ -5490,7 +5570,7 @@ class RecipesDialog(QDialog):
             if mode_title is None:
                 self.status_label.setText(
                     f"Unknown mode '{recipe['mode']}' in this recipe "
-                    "— nothing was sent.")
+                    ". Nothing was sent.")
                 return
             self.host.mode_combo.setCurrentText(mode_title)
         self.host.input.setPlainText(text)
@@ -5504,8 +5584,8 @@ class RecipesDialog(QDialog):
         else:
             reason = getattr(self.host, "_send_refusal", None)
             self.status_label.setText(
-                f"Not sent — {reason}" if reason else
-                "Not sent — see the bench log for why.")
+                f"Not sent: {reason}" if reason else
+                "Not sent. See the bench log for why.")
 
 
 class PaletteDialog(QDialog):
@@ -5557,9 +5637,22 @@ class PaletteDialog(QDialog):
         lay = QVBoxLayout(self)
         self.filter_edit = QLineEdit()
         self.filter_edit.setPlaceholderText(
-            "Type an action — a panel, a dialog, a project, a mode…")
+            "Type an action: a panel, a dialog, a project, a mode…")
         self.filter_edit.textChanged.connect(self._refilter)
         lay.addWidget(self.filter_edit)
+        # F9 (U29): no-match guidance — when the query matches
+        # nothing the list used to sit bare with no word of
+        # guidance. The label names the query, teaches a shorter
+        # query, and points at the Menu — the other door to the
+        # same actions. Hidden whenever there is anything to show.
+        self._no_match_label = QLabel()
+        self._no_match_label.setObjectName("palette_no_match")
+        self._no_match_label.setWordWrap(True)
+        self._no_match_label.setStyleSheet(
+            f"color:{TOKENS['text_muted']}; font-size:11px; "
+            "padding:4px 2px;")
+        self._no_match_label.hide()
+        lay.addWidget(self._no_match_label)
         self.list = QListWidget()
         # Q5 fix-in-place (2026-11-12): T3's global rule
         # QListWidget::item { padding:4px 8px; } insets every
@@ -5704,6 +5797,16 @@ class PaletteDialog(QDialog):
                     first_enabled = self.list.count() - 1
         if first_enabled >= 0:
             self.list.setCurrentRow(first_enabled)
+        # F9: a typed query with no match shows the guidance
+        # line; anything else (empty query, matches found) hides
+        # it again.
+        if query.strip() and not self._shown:
+            self._no_match_label.setText(
+                f"No match for \"{query.strip()}\". Try a shorter "
+                "word, or find the action in the Menu.")
+            self._no_match_label.show()
+        else:
+            self._no_match_label.hide()
 
     def _step_selection(self, step):
         # Move the selection to the next ENABLED entry row in
@@ -5778,8 +5881,8 @@ class FanOutDialog(QDialog):
         self.setMinimumWidth(460)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "One item per line — similar jobs, each on its own.\n"
-            "Every item runs as its own fresh-context turn — in "
+            "One item per line. Similar jobs, each on its own.\n"
+            "Every item runs as its own fresh-context turn. In "
             "parallel under the parallel-turns cap, or one at a "
             "time when the cap is 1 or the checkbox below is "
             "ticked."))
@@ -5788,7 +5891,7 @@ class FanOutDialog(QDialog):
             "Write the test for login.py\nWrite the test for billing.py\n…")
         layout.addWidget(self.items_edit)
         self.indep_check = QCheckBox(
-            "These items are independent — none of them waits on "
+            "These items are independent. None of them waits on "
             "another")
         layout.addWidget(self.indep_check)
         # Remainder R5: the sequential choice, off by default.
@@ -6125,7 +6228,7 @@ class RunWindow(QWidget):
         self.run_file_list = NoPreselectListWidget()
         self.run_file_list.setObjectName("run_file_list")
         self.run_file_list.setToolTip(
-            "What's runnable in this project — loaded automatically. "
+            "What's runnable in this project. Loaded automatically. "
             "Pick a file, then press Run.")
         self.run_file_list.currentRowChanged.connect(self._sync_run_enabled)
         lay.addWidget(self.run_file_list)
@@ -6146,7 +6249,7 @@ class RunWindow(QWidget):
         self.run_start_btn.clicked.connect(self._run_selected)
         btn_row.addWidget(self.run_start_btn)
         self.run_stop_btn = QPushButton("■ Stop")
-        self.run_stop_btn.setToolTip("Stop the run — kills the whole process group, children included")
+        self.run_stop_btn.setToolTip("Stop the run. Kills the whole process group, children included")
         self.run_stop_btn.setEnabled(False)
         self.run_stop_btn.clicked.connect(owner.stop_run)
         btn_row.addWidget(self.run_stop_btn)
@@ -6165,7 +6268,7 @@ class RunWindow(QWidget):
         self.run_blocks_layout.setContentsMargins(0, 0, 0, 0)
         self.run_blocks_layout.setSpacing(6)
         self.run_placeholder = QLabel(
-            "Program output will appear here — pick a file above and press Run.")
+            "Program output will appear here. Pick a file above and press Run.")
         self.run_placeholder.setObjectName("muted")
         self.run_placeholder.setWordWrap(True)
         self.run_blocks_layout.addWidget(self.run_placeholder)
@@ -6189,7 +6292,7 @@ class RunWindow(QWidget):
         git_state_row.addStretch()
         self.git_init_btn = QPushButton("Initialize git")
         self.git_init_btn.setToolTip(
-            "Start tracking this project with git (snapshots' init — "
+            "Start tracking this project with git (snapshots' init: "
             "the usual junk folders are excluded from history)")
         self.git_init_btn.setVisible(False)
         self.git_init_btn.clicked.connect(self._init_git)
@@ -6199,7 +6302,7 @@ class RunWindow(QWidget):
         self.git_changes_list.setObjectName("git_changes_list")
         self.git_changes_list.setMaximumHeight(120)
         self.git_changes_list.setToolTip(
-            "Uncommitted changes in this project — select one to see its diff")
+            "Uncommitted changes in this project. Select one to see its diff")
         self.git_changes_list.currentRowChanged.connect(
             self._on_git_selection)
         lay.addWidget(self.git_changes_list)
@@ -6238,7 +6341,7 @@ class RunWindow(QWidget):
         # selected alert, which then goes through the normal
         # approval gate — nothing here applies anything itself.
         watch_head = QHBoxLayout()
-        watch_title = QLabel("WATCH — MONITORING"); watch_title.setObjectName("section")
+        watch_title = QLabel("WATCH · MONITORING"); watch_title.setObjectName("section")
         watch_head.addWidget(watch_title); watch_head.addStretch()
         self.watch_state_label = QLabel("Watch seat: watching runs in this project")
         self.watch_state_label.setObjectName("muted")
@@ -6248,7 +6351,7 @@ class RunWindow(QWidget):
         self.watch_alerts_list.setObjectName("watch_alerts_list")
         self.watch_alerts_list.setMaximumHeight(110)
         self.watch_alerts_list.setToolTip(
-            "Problems the Watch seat spotted in this run's output — "
+            "Problems the Watch seat spotted in this run's output: "
             "select one and ask for a fix proposal")
         self.watch_alerts_list.currentRowChanged.connect(
             self._sync_watch_controls)
@@ -6257,7 +6360,7 @@ class RunWindow(QWidget):
         self.watch_propose_btn = QPushButton("Ask Watch seat for a fix…")
         self.watch_propose_btn.setToolTip(
             "Ask the Watch seat to propose a fix for the selected "
-            "alert — the proposal arrives as a normal approval diff; "
+            "alert. The proposal arrives as a normal approval diff; "
             "nothing is applied without your approval")
         self.watch_propose_btn.clicked.connect(self._propose_selected)
         watch_row.addWidget(self.watch_propose_btn)
@@ -6283,7 +6386,7 @@ class RunWindow(QWidget):
         self.watch_alerts_list.clear()
         for alert in monitor.active():
             label = (f"{alert['when']} · {alert['kind']} · "
-                     f"{alert['detail']} — {alert['evidence'][:80]}")
+                     f"{alert['detail']} · {alert['evidence'][:80]}")
             if alert["count"] > 1:
                 label += f" (x{alert['count']})"
             self.watch_alerts_list.addItem(QListWidgetItem(label))
@@ -6334,14 +6437,14 @@ class RunWindow(QWidget):
         if owner is None:
             return
         name = Path(owner.workspace).name or owner.workspace
-        self.setWindowTitle(f"Run — {name}")
-        self.run_title.setText(f"RUN — {name.upper()}")
+        self.setWindowTitle(f"Run: {name}")
+        self.run_title.setText(f"RUN: {name.upper()}")
         self._entries = runfiles_mod.scan_runnables(owner.workspace)
         self.run_file_list.clear()
         for entry in self._entries:
             label = entry["rel"] if "/" in entry["rel"] else entry["name"]
             self.run_file_list.addItem(
-                QListWidgetItem(f"{label} — {entry['kind']}"))
+                QListWidgetItem(f"{label} · {entry['kind']}"))
         empty = not self._entries
         self.run_empty_label.setVisible(empty)
         self.run_file_list.setVisible(not empty)
@@ -6465,13 +6568,13 @@ class RunWindow(QWidget):
     def blocks_text(self):
         """The transcript the old shared pane would have held:
         per block, in order — '$ {command}', its output lines,
-        and its '— {label}' trailer once the run has ended."""
+        and its '- {label}' trailer once the run has ended."""
         lines = []
         for block in self.run_blocks:
             lines.append(f"$ {block.command}")
             lines.extend(block.body_lines())
             if block.end_label is not None:
-                lines.append(f"— {block.end_label}")
+                lines.append(f"- {block.end_label}")
         return "\n".join(lines)
 
     # ---------- item #51: the git panel ----------
@@ -6756,11 +6859,11 @@ class DebugWindow(QWidget):
         self.debug_file_list = QListWidget()
         self.debug_file_list.setObjectName("debug_file_list")
         self.debug_file_list.setToolTip(
-            "The project's Python files — pick the one to debug, then press Debug.")
+            "The project's Python files. Pick the one to debug, then press Debug.")
         self.debug_file_list.currentRowChanged.connect(self._sync_controls)
         lay.addWidget(self.debug_file_list)
         self.debug_empty_label = QLabel(
-            "No Python files found in this project yet — the debugger "
+            "No Python files found in this project yet. The debugger "
             "runs Python targets.")
         self.debug_empty_label.setObjectName("muted")
         self.debug_empty_label.setWordWrap(True)
@@ -6771,7 +6874,7 @@ class DebugWindow(QWidget):
         self.debug_bp_edit = QPlainTextEdit()
         self.debug_bp_edit.setMaximumHeight(64)
         self.debug_bp_edit.setPlaceholderText(
-            "One per line: 12   or   util.py:9 — bare lines belong to the selected file")
+            "One per line: 12   or   util.py:9. Bare lines belong to the selected file")
         lay.addWidget(self.debug_bp_edit)
         btn_row = QHBoxLayout()
         self.debug_start_btn = QPushButton("▶ Debug")
@@ -6793,7 +6896,7 @@ class DebugWindow(QWidget):
         self.debug_continue_btn.clicked.connect(lambda: self._drive("continue"))
         btn_row.addWidget(self.debug_continue_btn)
         self.debug_stop_btn = QPushButton("■ Stop")
-        self.debug_stop_btn.setToolTip("Stop the debug session — kills the whole process group")
+        self.debug_stop_btn.setToolTip("Stop the debug session. Kills the whole process group")
         self.debug_stop_btn.clicked.connect(self._stop_debug)
         btn_row.addWidget(self.debug_stop_btn)
         btn_row.addStretch()
@@ -6803,7 +6906,7 @@ class DebugWindow(QWidget):
         self.debug_output = QPlainTextEdit(); self.debug_output.setReadOnly(True)
         self.debug_output.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
         self.debug_output.setPlaceholderText(
-            "Program and debugger output will appear here — pick a file above and press Debug.")
+            "Program and debugger output will appear here. Pick a file above and press Debug.")
         lay.addWidget(self.debug_output, 1)
         locals_label = QLabel("LOCALS"); locals_label.setObjectName("section")
         lay.addWidget(locals_label)
@@ -6814,7 +6917,7 @@ class DebugWindow(QWidget):
         inspect_row = QHBoxLayout()
         self.debug_inspect_edit = QLineEdit()
         self.debug_inspect_edit.setPlaceholderText(
-            "Inspect an expression in the current frame — e.g. x, len(items), user.name")
+            "Inspect an expression in the current frame: e.g. x, len(items), user.name")
         self.debug_inspect_edit.returnPressed.connect(self._inspect)
         inspect_row.addWidget(self.debug_inspect_edit, 1)
         self.debug_inspect_btn = QPushButton("Inspect")
@@ -6834,8 +6937,8 @@ class DebugWindow(QWidget):
         if owner is None:
             return
         name = Path(owner.workspace).name or owner.workspace
-        self.setWindowTitle(f"Debug — {name}")
-        self.debug_title.setText(f"DEBUG — {name.upper()}")
+        self.setWindowTitle(f"Debug: {name}")
+        self.debug_title.setText(f"DEBUG: {name.upper()}")
         self._entries = [e for e in runfiles_mod.scan_runnables(owner.workspace)
                          if e["kind"] == "Python"]
         self.debug_file_list.clear()
@@ -6850,7 +6953,7 @@ class DebugWindow(QWidget):
         if owner.debug_session_live():
             session = owner._debug_session
             self.debug_status.setText(
-                f"session live — {Path(session.target).name} "
+                f"session live: {Path(session.target).name} "
                 f"(started by the agent or this window)")
         self._sync_controls()
 
@@ -6895,7 +6998,7 @@ class DebugWindow(QWidget):
     def _on_control_failed(self, message):
         self._control_thread = None
         self.debug_status.setText(f"debugger error: {message}")
-        self._append_output(f"— debugger error: {message}")
+        self._append_output(f". Debugger error: {message}")
         self._sync_controls()
 
     # ---------- actions ----------
@@ -6910,7 +7013,7 @@ class DebugWindow(QWidget):
             return
         if owner.run_is_running():
             self.debug_status.setText(
-                "a run is live — stop it before debugging (one program at a time)")
+                "a run is live. Stop it before debugging (one program at a time)")
             return
         try:
             breakpoints = debugger_mod.parse_breakpoints(
@@ -7061,24 +7164,24 @@ class ModeWindow(QWidget):
 
     BLURBS = {
         "code": "The builder's room: everything Code mode does "
-                "this session collects here — and the Changes tab "
+                "this session collects here, and the Changes tab "
                 "holds the walkthrough of each finished Code turn, "
                 "what it changed and how it was verified.",
         "design": "Everything Design mode produces this session "
-                  "collects here — and its filed artifacts live in "
+                  "collects here, and its filed artifacts live in "
                   "the kind tabs: layout, UI, flow, mechanics, "
                   "aesthetic, systems.",
         "architect": "Everything Architect mode produces this session "
-                     "collects here — architecture notes, decisions, specs.",
+                     "collects here: architecture notes, decisions, specs.",
         "review": "Everything Review mode produces this session "
-                  "collects here — findings by severity, with the fix "
+                  "collects here: findings by severity, with the fix "
                   "each one suggests.",
         "ask": "Everything Ask mode answers this session collects "
-               "here — read-only answers, cited from the code.",
+               "here: read-only answers, cited from the code.",
         "write": "The document workshop, Canvas-style "
                  "(Write/Research modes, 2026-11-09; Canvas build, "
                  "2026-11-11): the conversation sits beside one "
-                 "persistent document — type in it (it auto-saves), "
+                 "persistent document. Type in it (it auto-saves), "
                  "prompt the chat to edit it, rewrite a selected "
                  "passage alone, step its length or tone, and apply "
                  "the model's suggested edits one card at a time. "
@@ -7087,7 +7190,7 @@ class ModeWindow(QWidget):
         "research": "Deep research, gated and budgeted "
                     "(rebuilt 2026-11-11): ask a question in the "
                     "room, pick sources and depth, and the drafted "
-                    "plan waits at the gate in the room — nothing "
+                    "plan waits at the gate in the room: nothing "
                     "browses before you approve it. The run shows "
                     "its steps, pages, tokens and sites live; the "
                     "finished report opens in the room under "
@@ -7151,7 +7254,7 @@ class ModeWindow(QWidget):
         # one never did. Same cap, oldest exchanges fall off.
         self.transcript.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
         self.transcript.setPlaceholderText(
-            f"Nothing yet — run a {self.label} turn and its result "
+            f"Nothing yet. Run a {self.label} turn and its result "
             "lands here.")
         # Rooms-are-tools (2026-11-10): the Session tab is a page,
         # not just the transcript — the composer under the
@@ -7169,7 +7272,7 @@ class ModeWindow(QWidget):
         session_lay.addWidget(self.transcript, 1)
         self.composer = QPlainTextEdit()
         self.composer.setPlaceholderText(
-            f"Type here — Send runs a {self.label} turn on the "
+            f"Type here. Send runs a {self.label} turn on the "
             "bench; the result lands above.")
         self.composer.setMaximumHeight(72)
         session_lay.addWidget(self.composer)
@@ -7180,7 +7283,7 @@ class ModeWindow(QWidget):
         composer_row.addWidget(self.composer_status, 1)
         self.composer_send_btn = QPushButton("Send")
         self.composer_send_btn.setToolTip(
-            f"Run a {self.label} turn with what's typed above — "
+            f"Run a {self.label} turn with what's typed above: "
             "it runs on the bench, in this mode")
         self.composer_send_btn.clicked.connect(self.send_from_composer)
         composer_row.addWidget(self.composer_send_btn)
@@ -7199,7 +7302,7 @@ class ModeWindow(QWidget):
             listing = QListWidget(); listing.setMaximumWidth(240)
             viewer = QPlainTextEdit(); viewer.setReadOnly(True)
             viewer.setPlaceholderText(
-                "No documents filed here yet — this tab reads the "
+                "No documents filed here yet. This tab reads the "
                 "files this mode files in the project.")
             listing.currentRowChanged.connect(
                 lambda row, lbl=tab_label: self._show_doc(lbl, row))
@@ -7212,9 +7315,9 @@ class ModeWindow(QWidget):
     def set_project(self, workspace):
         self._workspace = workspace or ""
         name = Path(self._workspace).name or self._workspace
-        self.setWindowTitle(f"{self.label} — {name}" if name
-                            else f"{self.label} — Code Forge")
-        self.mode_title.setText(f"{self.label.upper()} — {name.upper()}"
+        self.setWindowTitle(f"{self.label} · {name}" if name
+                            else f"{self.label} · Code Forge")
+        self.mode_title.setText(f"{self.label.upper()} · {name.upper()}"
                                 if name else self.label.upper())
         self._load_session()
         self.refresh_documents()
@@ -7303,7 +7406,7 @@ class ModeWindow(QWidget):
                     viewer.setPlainText(
                         head + f"\n\n… (showing the first "
                         f"{self._DOC_VIEW_CAP // 1024} KB of "
-                        f"{size:,} bytes — open the file itself for "
+                        f"{size:,} bytes. Open the file itself for "
                         "the whole document)")
                 else:
                     viewer.setPlainText(
@@ -7331,13 +7434,13 @@ class ModeWindow(QWidget):
         ws = self._review_workspace()
         if not ws:
             self.review_state_status.setText(
-                "No project open — open one first.")
+                "No project open. Open one first.")
             return
         try:
             result = linters_mod.run_linters(ws)
         except Exception:
             self.review_state_status.setText(
-                "The linters could not run — try again, or run "
+                "The linters could not run. Try again, or run "
                 "them directly.")
             return
         tools = result.get("tools") or {}
@@ -7348,17 +7451,17 @@ class ModeWindow(QWidget):
         findings = result.get("findings") or []
         if not ran:
             self.review_state_status.setText(
-                "No linters installed — Ruff, ShellCheck and "
+                "No linters installed. Ruff, ShellCheck and "
                 "ESLint were all missing; install one to use this.")
             return
-        header = ("Linter findings — write each one up as a "
+        header = ("Linter findings. Write each one up as a "
                   "finding in your review, with the tool as its "
                   "Source; do not re-derive them:\n")
         self.composer.setPlainText(
             header + linters_mod.format_findings(findings))
         self.composer.setFocus()
         parts = [f"{len(findings)} finding(s) from "
-                 f"{', '.join(ran)} — loaded into the composer."]
+                 f"{', '.join(ran)}. Loaded into the composer."]
         if missing:
             parts.append(f"{', '.join(missing)} not installed.")
         self.review_state_status.setText(" ".join(parts))
@@ -7401,13 +7504,13 @@ class ModeWindow(QWidget):
         ok, why = self._bench_turn(self.label, text)
         if not ok:
             self.composer_status.setText(
-                "Type something first — there's nothing to send yet."
+                "Type something first. There's nothing to send yet."
                 if why == "empty" else
                 "The bench is not available to run the turn.")
             return
         self.composer.clear()
         self.composer_status.setText(
-            f"Sent as a {self.label} turn — it runs on the bench, "
+            f"Sent as a {self.label} turn. It runs on the bench, "
             "and the result lands above when the turn finishes.")
 
     def add_exchange(self, prompt, reply):
@@ -7417,15 +7520,15 @@ class ModeWindow(QWidget):
         if prompt:
             block.append(f"You:\n{prompt}")
         if reply:
-            block.append(f"Forge — {self.label}:\n{reply}")
+            block.append(f"Forge: {self.label}:\n{reply}")
         if block:
-            text = "\n\n".join(block) + "\n\n———\n"
+            text = "\n\n".join(block) + "\n\n---\n"
             self.transcript.appendPlainText(text)
             self._file_session(text)
 
     def add_note(self, text):
         if text:
-            block = text + "\n\n———\n"
+            block = text + "\n\n---\n"
             self.transcript.appendPlainText(block)
             self._file_session(block)
 
@@ -7475,7 +7578,7 @@ class WriteWindow(ModeWindow):
         path_row = QHBoxLayout()
         self.doc_path_edit = QLineEdit()
         self.doc_path_edit.setPlaceholderText(
-            "File inside the project — e.g. notes/letter.md")
+            "File inside the project: e.g. notes/letter.md")
         path_row.addWidget(self.doc_path_edit, 1)
         self.doc_open_btn = QPushButton("Open")
         self.doc_open_btn.setToolTip("Load the file into the document pane")
@@ -7487,14 +7590,14 @@ class WriteWindow(ModeWindow):
         path_row.addWidget(self.doc_save_btn)
         self.doc_new_btn = QPushButton("New")
         self.doc_new_btn.setToolTip(
-            "Start a new document — clears the pane; give it a "
+            "Start a new document. Clears the pane; give it a "
             "path above and Save to create the file")
         self.doc_new_btn.clicked.connect(self.new_document)
         path_row.addWidget(self.doc_new_btn)
         lay.addLayout(path_row)
         self.doc_editor = QPlainTextEdit()
         self.doc_editor.setPlaceholderText(
-            "The document lives here — open a file above, or type "
+            "The document lives here. Open a file above, or type "
             "and Save to create it. Everything in this pane is the "
             "real file: Save writes it to disk in the project.")
         self.doc_editor.textChanged.connect(self._note_editor_dirty)
@@ -7513,7 +7616,7 @@ class WriteWindow(ModeWindow):
         self.selection_rewrite_btn = QPushButton("Rewrite selection")
         self.selection_rewrite_btn.setToolTip(
             "Send the selected passage + your instruction as a Write "
-            "turn — the model changes only that passage (edit_file)")
+            "turn. The model changes only that passage (edit_file)")
         self.selection_rewrite_btn.clicked.connect(self.rewrite_selection)
         sel_row.addWidget(self.selection_rewrite_btn)
         lay.addLayout(sel_row)
@@ -7529,7 +7632,7 @@ class WriteWindow(ModeWindow):
         version_row.addWidget(self.version_prev_btn)
         self.version_next_btn = QPushButton("Next ▶")
         self.version_next_btn.setToolTip(
-            "Step forward — past the newest version is the live file")
+            "Step forward. Past the newest version is the live file")
         self.version_next_btn.clicked.connect(
             lambda: self._step_version(1))
         version_row.addWidget(self.version_next_btn)
@@ -7571,14 +7674,14 @@ class WriteWindow(ModeWindow):
         steppers_row.addWidget(self.tone_combo)
         self.steppers_apply_btn = QPushButton("Apply steppers")
         self.steppers_apply_btn.setToolTip(
-            "Send the length/tone steps as a Write turn — the "
+            "Send the length/tone steps as a Write turn. The "
             "edit lands in the document")
         self.steppers_apply_btn.clicked.connect(self.apply_steppers)
         steppers_row.addWidget(self.steppers_apply_btn)
         steppers_row.addStretch(1)
         lay.insertLayout(2, steppers_row)
         self.selection_status = QLabel(
-            "No selection — the tools act on the whole document.")
+            "No selection. The tools act on the whole document.")
         self.selection_status.setObjectName("muted")
         self.selection_status.setWordWrap(True)
         lay.addWidget(self.selection_status)
@@ -7591,7 +7694,7 @@ class WriteWindow(ModeWindow):
         if _docs is not None:
             _docs[0].itemDoubleClicked.connect(
                 self._open_doc_from_list)
-            docs_label = QLabel("Documents — double-click loads "
+            docs_label = QLabel("Documents: double-click loads "
                                 "a file into the pane")
             docs_label.setObjectName("muted")
             lay.addWidget(docs_label)
@@ -7611,7 +7714,7 @@ class WriteWindow(ModeWindow):
         self.suggest_btn = QPushButton("Suggest edits")
         self.suggest_btn.setToolTip(
             "Ask the model to PROPOSE edits to the document (or "
-            "the selection) — proposals arrive as cards here and "
+            "the selection). Proposals arrive as cards here and "
             "change nothing until you Apply one")
         self.suggest_btn.clicked.connect(self.suggest_edits)
         sugg_head.addWidget(self.suggest_btn)
@@ -7674,7 +7777,7 @@ class WriteWindow(ModeWindow):
                 and not self._loading_version:
             self._viewing_stamp = None
             self.version_status.setText(
-                "Editing the live draft — Save writes it to "
+                "Editing the live draft. Save writes it to "
                 "the file.")
 
     def _editor_target(self, raw: str):
@@ -7692,7 +7795,7 @@ class WriteWindow(ModeWindow):
         target = (root / raw).resolve()
         if target != root and root not in target.parents:
             self.editor_status.setText(
-                "That path is outside the project — the pane only "
+                "That path is outside the project. The pane only "
                 "works on the project's own files.")
             return None
         return target
@@ -7703,7 +7806,7 @@ class WriteWindow(ModeWindow):
             return
         if not target.is_file():
             self.editor_status.setText(
-                f"{target.name} does not exist yet — type the "
+                f"{target.name} does not exist yet. Type the "
                 "document and Save to create it.")
             self.doc_editor.clear()
             self._editor_path = str(target)
@@ -7729,7 +7832,7 @@ class WriteWindow(ModeWindow):
         self._editor_dirty = False
         self._viewing_stamp = None
         self.version_status.setText(
-            "On the live file — Prev steps back through its "
+            "On the live file. Prev steps back through its "
             "saved versions.")
         self.editor_status.setText(f"Opened {target.name}.")
 
@@ -7762,11 +7865,11 @@ class WriteWindow(ModeWindow):
         self._editor_dirty = False
         self._viewing_stamp = None
         self.version_status.setText(
-            "Saved — on the live file, with its earlier versions "
+            "Saved. On the live file, with its earlier versions "
             "kept under Prev.")
         size = target.stat().st_size
         self.editor_status.setText(
-            f"Saved {target.name} ({size} bytes) — the real file, "
+            f"Saved {target.name} ({size} bytes). The real file, "
             "on disk in the project.")
         self.refresh_documents()
 
@@ -7785,7 +7888,7 @@ class WriteWindow(ModeWindow):
         selection = cursor.selectedText().replace("\u2029", "\n")  # Qt marks line breaks in a selection as U+2029
         if not selection.strip():
             self.editor_status.setText(
-                "Select a passage in the document first — only the "
+                "Select a passage in the document first. Only the "
                 "selection is rewritten.")
             return
         instruction = self.selection_instr_edit.text().strip()
@@ -7819,7 +7922,7 @@ class WriteWindow(ModeWindow):
         input_box.setPlainText(prompt)
         send()
         self.editor_status.setText(
-            "Selection sent as a Write turn — the rewrite lands "
+            "Selection sent as a Write turn. The rewrite lands "
             "through the approval gate, on that passage only.")
 
     def add_exchange(self, prompt, reply):
@@ -7839,11 +7942,11 @@ class WriteWindow(ModeWindow):
                 self._add_suggestion_cards(blocks)
                 self.editor_status.setText(
                     f"{len(blocks)} suggested edit(s) landed as "
-                    "cards — Apply the ones you want; the rest "
+                    "cards. Apply the ones you want; the rest "
                     "change nothing.")
             else:
                 self.editor_status.setText(
-                    "That turn returned no suggestion blocks — "
+                    "That turn returned no suggestion blocks: "
                     "nothing was proposed.")
         if not self._editor_path or self._editor_dirty:
             return
@@ -7927,7 +8030,7 @@ class WriteWindow(ModeWindow):
         versions = self._version_paths(target)
         if not versions:
             self.version_status.setText(
-                "No earlier versions yet — a snapshot is taken "
+                "No earlier versions yet. A snapshot is taken "
                 "when a document opens and before each Save that "
                 "changes the file.")
             return
@@ -7973,7 +8076,7 @@ class WriteWindow(ModeWindow):
         self._viewing_stamp = path.stem
         self._editor_dirty = True
         self.version_status.setText(
-            f"Viewing version from {path.stem} — Save writes it "
+            f"Viewing version from {path.stem}. Save writes it "
             "back as the current file; typing returns you to "
             "the live draft.")
 
@@ -7991,7 +8094,7 @@ class WriteWindow(ModeWindow):
         self._viewing_stamp = None
         self.version_status.setText("")
         self.editor_status.setText(
-            "New document — type it here, then put its path "
+            "New document. Type it here, then put its path "
             "above and Save to create the file.")
 
     def _open_doc_from_list(self, item):
@@ -8074,12 +8177,12 @@ class WriteWindow(ModeWindow):
         sel = self._selected_text()
         if sel.strip():
             self.selection_status.setText(
-                f"Selection targeted: {len(sel)} characters — "
+                f"Selection targeted: {len(sel)} characters: "
                 "Rewrite selection, the steppers, and Suggest "
                 "edits act on it alone.")
         else:
             self.selection_status.setText(
-                "No selection — the tools act on the whole "
+                "No selection. The tools act on the whole "
                 "document.")
 
     def _autosave_tick(self):
@@ -8105,7 +8208,7 @@ class WriteWindow(ModeWindow):
             self.tone_combo.currentText())
         if instruction is None:
             self.editor_status.setText(
-                "Both steppers are on Same — pick a length or a "
+                "Both steppers are on Same. Pick a length or a "
                 "tone change first.")
             return
         if not self._editor_path:
@@ -8116,7 +8219,7 @@ class WriteWindow(ModeWindow):
         if selection.strip():
             prompt = (
                 f"In Write mode, edit the file {rel}: rewrite "
-                f"ONLY the passage between the markers — "
+                f"ONLY the passage between the markers: "
                 f"{instruction}.\n\n"
                 f"<<<PASSAGE\n{selection}\nPASSAGE>>>\n\n"
                 "Use edit_file with old_text set to exactly that "
@@ -8137,7 +8240,7 @@ class WriteWindow(ModeWindow):
                 else "The bench is not available to run the turn.")
             return
         self.editor_status.setText(
-            f"Steppers sent as a Write turn ({scope}) — the "
+            f"Steppers sent as a Write turn ({scope}). The "
             "edit lands in the document when the turn finishes.")
 
     def suggest_edits(self):
@@ -8155,7 +8258,7 @@ class WriteWindow(ModeWindow):
             else self.doc_editor.toPlainText()
         if not passage.strip():
             self.editor_status.setText(
-                "The document is empty — there is nothing to "
+                "The document is empty. There is nothing to "
                 "suggest edits for yet.")
             return
         rel = self._doc_rel()
@@ -8180,7 +8283,7 @@ class WriteWindow(ModeWindow):
             return
         self._suggest_pending = {"scoped": scoped}
         self.editor_status.setText(
-            "Suggestions requested — proposals land as cards "
+            "Suggestions requested. Proposals land as cards "
             "beside the document when the turn finishes. "
             "Nothing is applied unless you Apply a card.")
 
@@ -8230,7 +8333,7 @@ class WriteWindow(ModeWindow):
                 lambda _checked=False, c=card: self.apply_suggestion(c))
             btn_row.addWidget(apply_btn)
             dismiss_btn = QPushButton("Dismiss")
-            dismiss_btn.setToolTip("Drop this suggestion — the "
+            dismiss_btn.setToolTip("Drop this suggestion. The "
                                    "document is not changed")
             dismiss_btn.clicked.connect(
                 lambda _checked=False, c=card:
@@ -8259,7 +8362,7 @@ class WriteWindow(ModeWindow):
         not written, not touched."""
         self._remove_suggestion_card(card)
         self.editor_status.setText(
-            "Suggestion dismissed — the document is unchanged.")
+            "Suggestion dismissed. The document is unchanged.")
 
     def apply_suggestion(self, card):
         """Apply lands ONE card: the passage must still be in
@@ -8273,7 +8376,7 @@ class WriteWindow(ModeWindow):
             return
         if self._viewing_stamp is not None:
             self.editor_status.setText(
-                "You're viewing a saved version — step back to "
+                "You're viewing a saved version. Step back to "
                 "the live file before applying a suggestion.")
             return
         text = self.doc_editor.toPlainText()
@@ -8281,7 +8384,7 @@ class WriteWindow(ModeWindow):
         if text.count(old) != 1:
             self.editor_status.setText(
                 "That passage isn't in the document exactly once "
-                "anymore — the card can't be applied as-is. "
+                "anymore. The card can't be applied as-is. "
                 "Dismiss it, or make the change by hand.")
             return
         target = Path(self._editor_path)
@@ -8290,13 +8393,13 @@ class WriteWindow(ModeWindow):
         if cursor.isNull():
             self.editor_status.setText(
                 "That passage could not be located in the pane "
-                "— the card was not applied.")
+                ". The card was not applied.")
             return
         cursor.insertText(new)
         self.save_document()
         self._remove_suggestion_card(card)
         self.editor_status.setText(
-            "Suggestion applied and saved — the version before "
+            "Suggestion applied and saved. The version before "
             "it is kept under Prev.")
 
 
@@ -8324,7 +8427,7 @@ class CodeWindow(ModeWindow):
         self._changes_view.setReadOnly(True)
         self._changes_view.setPlaceholderText(
             "The walkthrough of each finished Code turn lands "
-            "here — what it changed and how it was verified.")
+            "here. What it changed and how it was verified.")
         self._changes_list.currentRowChanged.connect(
             self._show_change)
         page_lay.addWidget(self._changes_list)
@@ -8377,7 +8480,7 @@ class DesignWindow(ModeWindow):
         super().__init__(owner, key)
         self.canvas_btn = QPushButton("Open in Design Canvas")
         self.canvas_btn.setToolTip(
-            "Raise the design canvas — lay this design out as "
+            "Raise the design canvas. Lay this design out as "
             "frames, and send frames back to the bench")
         self.canvas_btn.clicked.connect(self.open_in_canvas)
         self.header.slot_layout.addWidget(self.canvas_btn)
@@ -8386,7 +8489,7 @@ class DesignWindow(ModeWindow):
         page_lay.setContentsMargins(0, 0, 0, 0); page_lay.setSpacing(6)
         self.preview_note = QLabel(
             "Select a design document in a kind tab, then open "
-            "Preview — SVG and HTML designs render here.")
+            "Preview: SVG and HTML designs render here.")
         self.preview_note.setObjectName("muted")
         self.preview_note.setWordWrap(True)
         page_lay.addWidget(self.preview_note)
@@ -8423,7 +8526,7 @@ class DesignWindow(ModeWindow):
             self.preview_image.clear()
             self.preview_note.setText(
                 "Select a design document in a kind tab, then "
-                "open Preview — SVG and HTML designs render here.")
+                "open Preview: SVG and HTML designs render here.")
             return
         suffix = Path(path).suffix.lower()
         try:
@@ -8434,14 +8537,14 @@ class DesignWindow(ModeWindow):
             if QSvgRenderer is None:
                 self.preview_image.clear()
                 self.preview_note.setText(
-                    "This PySide6 build has no QtSvg — SVG "
+                    "This PySide6 build has no QtSvg. SVG "
                     "previews are unavailable; the design's text "
                     "is in its kind tab.")
                 return
             if size > self._DOC_VIEW_CAP:
                 self.preview_image.clear()
                 self.preview_note.setText(
-                    f"{Path(path).name} is {size:,} bytes — too "
+                    f"{Path(path).name} is {size:,} bytes. Too "
                     "large to preview whole; its text is in its "
                     "kind tab.")
                 return
@@ -8455,7 +8558,7 @@ class DesignWindow(ModeWindow):
             if not renderer.isValid():
                 self.preview_image.clear()
                 self.preview_note.setText(
-                    f"{Path(path).name} did not parse as SVG — "
+                    f"{Path(path).name} did not parse as SVG: "
                     "its text is in its kind tab.")
                 return
             default = renderer.defaultSize()
@@ -8494,7 +8597,7 @@ class DesignWindow(ModeWindow):
         else:
             self.preview_image.clear()
             self.preview_note.setText(
-                f"Preview covers SVG and HTML designs — "
+                f"Preview covers SVG and HTML designs: "
                 f"{Path(path).name} is shown as text in its "
                 "kind tab.")
 
@@ -8511,7 +8614,7 @@ class DesignWindow(ModeWindow):
         canvas.raise_()
         canvas.activateWindow()
         self.composer_status.setText(
-            "Design canvas opened — its frames send back to "
+            "Design canvas opened. Its frames send back to "
             "the bench.")
 
 
@@ -8532,7 +8635,7 @@ class ArchitectWindow(ModeWindow):
             outline = QListWidget()
             outline.setMaximumWidth(210)
             outline.setToolTip(
-                "Headings in this document — click one to jump "
+                "Headings in this document. Click one to jump "
                 "to it")
             page.layout().addWidget(outline)
             self._outlines[tab_label] = outline
@@ -8605,7 +8708,7 @@ class ReviewWindow(ModeWindow):
         for name in self.FOCUSES:
             btn = QPushButton(name)
             btn.setToolTip(
-                f"Load the composer with a {name} review — "
+                f"Load the composer with a {name} review: "
                 "edit it, then Send")
             btn.clicked.connect(
                 lambda _checked=False, n=name: self._load_focus(n))
@@ -8625,7 +8728,7 @@ class ReviewWindow(ModeWindow):
         self.voice_combo.addItem("Chill", "chill")
         self.voice_combo.addItem("Assertive", "assertive")
         self.voice_combo.setToolTip(
-            "How much a Review turn says and how hard it pushes — "
+            "How much a Review turn says and how hard it pushes: "
             "Quiet reports Critical and Major only, Chill is the "
             "usual review, Assertive reports everything including "
             "nitpicks. The finding format never changes.")
@@ -8661,14 +8764,14 @@ class ReviewWindow(ModeWindow):
             self.fix_btn = QPushButton("Fix with Driver")
             self.fix_btn.setToolTip(
                 "Run a Code turn on the selected finding, using "
-                "its Prompt for the Driver — smallest change, "
+                "its Prompt for the Driver. Smallest change, "
                 "then verify. The request is recorded in the "
                 "review under Fix requests.")
             self.fix_btn.clicked.connect(self.fix_selected_finding)
             col_lay.addWidget(self.fix_btn)
-            self.teach_btn = QPushButton("Not a finding — teach")
+            self.teach_btn = QPushButton("Not a finding: teach")
             self.teach_btn.setToolTip(
-                "Dismiss the selected finding with a reason — the "
+                "Dismiss the selected finding with a reason. The "
                 "reason is filed as a learning and future reviews "
                 "apply it instead of re-raising this")
             self.teach_btn.clicked.connect(self.teach_from_finding)
@@ -8680,7 +8783,7 @@ class ReviewWindow(ModeWindow):
             # itself — the owner says when a review is done.
             self.incremental_btn = QPushButton("Review what's new")
             self.incremental_btn.setToolTip(
-                "Load the composer with an incremental review — "
+                "Load the composer with an incremental review: "
                 "only the files changed since the last review you "
                 "marked reviewed.")
             self.incremental_btn.clicked.connect(
@@ -8688,7 +8791,7 @@ class ReviewWindow(ModeWindow):
             col_lay.addWidget(self.incremental_btn)
             self.mark_reviewed_btn = QPushButton("Mark reviewed")
             self.mark_reviewed_btn.setToolTip(
-                "Record the project as reviewed as it stands — "
+                "Record the project as reviewed as it stands: "
                 "future 'Review what's new' lists changes from "
                 "here.")
             self.mark_reviewed_btn.clicked.connect(
@@ -8706,7 +8809,7 @@ class ReviewWindow(ModeWindow):
                 "Run the project's installed linters (Ruff, "
                 "ShellCheck, ESLint when present) and load their "
                 "findings into the composer for the next Review "
-                "turn — nothing is installed or auto-fixed.")
+                "turn: nothing is installed or auto-fixed.")
             self.run_linters_btn.clicked.connect(
                 self._run_linters)
             col_lay.addWidget(self.run_linters_btn)
@@ -8725,20 +8828,20 @@ class ReviewWindow(ModeWindow):
             self.docstrings_check = QCheckBox("Docstrings")
             self.docstrings_check.setToolTip(
                 "Add docstrings to the public functions, classes "
-                "and methods in the files this review names — a "
+                "and methods in the files this review names. A "
                 "Code turn, change nothing else.")
             col_lay.addWidget(self.docstrings_check)
             self.unittests_check = QCheckBox("Unit tests")
             self.unittests_check.setToolTip(
                 "Write unit tests for the files this review names "
-                "— a Code turn. The Tester seat verifies the new "
+                ". A Code turn. The Tester seat verifies the new "
                 "tests on its normal run.")
             col_lay.addWidget(self.unittests_check)
             self.run_finishing_btn = QPushButton(
                 "Run finishing touches")
             self.run_finishing_btn.setToolTip(
                 "Run the checked finishing touches as Code turns "
-                "on the files this review names — docstrings "
+                "on the files this review names. Docstrings "
                 "first, then unit tests. Each run is recorded in "
                 "the review under Finishing touches.")
             self.run_finishing_btn.clicked.connect(
@@ -8754,7 +8857,7 @@ class ReviewWindow(ModeWindow):
             self.autofix_btn = QPushButton("Autofix")
             self.autofix_btn.setToolTip(
                 "Fix the next findings in this review as one "
-                "Code turn — up to 5, worst first. Each write "
+                "Code turn. Up to 5, worst first. Each write "
                 "still waits for your approval at the gate. "
                 "Capped at 3 rounds per review chain.")
             self.autofix_btn.clicked.connect(
@@ -8764,7 +8867,7 @@ class ReviewWindow(ModeWindow):
                 "Re-review after autofix")
             self.autofix_rereview_btn.setToolTip(
                 "Re-review only the files the last autofix round "
-                "touched, as a new review in the chain — the "
+                "touched, as a new review in the chain. The "
                 "next round fixes what is left.")
             self.autofix_rereview_btn.clicked.connect(
                 self._run_autofix_rereview)
@@ -8814,18 +8917,18 @@ class ReviewWindow(ModeWindow):
         ws = self._review_workspace()
         if not ws:
             self.review_state_status.setText(
-                "No project open — open one first.")
+                "No project open. Open one first.")
             return
         try:
             result = review_state_mod.changed_since(ws)
         except Exception:
             self.review_state_status.setText(
-                "Could not work out what changed — run a full "
+                "Could not work out what changed. Run a full "
                 "review instead.")
             return
         if not result["ever"]:
             self.review_state_status.setText(
-                "No review baseline yet — mark a review done with "
+                "No review baseline yet. Mark a review done with "
                 "'Mark reviewed' first, then this lists what's new.")
             return
         changed = result["changed"]
@@ -8852,7 +8955,7 @@ class ReviewWindow(ModeWindow):
         self.composer.setFocus()
         total = result["changed_total"] + len(removed)
         self.review_state_status.setText(
-            f"{total} file(s) changed since the last review — "
+            f"{total} file(s) changed since the last review: "
             f"loaded into the composer.")
 
     def _mark_reviewed(self):
@@ -8861,12 +8964,12 @@ class ReviewWindow(ModeWindow):
         ws = self._review_workspace()
         if not ws:
             self.review_state_status.setText(
-                "No project open — open one first.")
+                "No project open. Open one first.")
             return
         state = review_state_mod.record_review(ws)
         count = len(state.get("files", {}))
         self.review_state_status.setText(
-            f"Marked reviewed — {count} file(s) recorded. Future "
+            f"Marked reviewed: {count} file(s) recorded. Future "
             f"'Review what's new' lists changes from here.")
 
     def _on_doc_shown(self, tab_label, path):
@@ -8922,7 +9025,7 @@ class ReviewWindow(ModeWindow):
         if self.findings_label is not None:
             counts = modes_mod.finding_counts_text(parsed_lines)
             self.findings_label.setText(
-                f"Findings — {counts}" if counts else "Findings")
+                f"Findings: {counts}" if counts else "Findings")
         # T2-3: the finishing-touch checkboxes follow the shown
         # review — unchecked, with a "requested" mark on any kind
         # already recorded in it.
@@ -8942,7 +9045,7 @@ class ReviewWindow(ModeWindow):
         name = getattr(self, "_current_review_name", "")
         nxt = modes_mod.autofix_next_round(review_text or "", name)
         if nxt > modes_mod.AUTOFIX_MAX_ROUNDS:
-            self.autofix_btn.setText("Autofix — capped")
+            self.autofix_btn.setText("Autofix · capped")
         elif nxt == 1:
             self.autofix_btn.setText("Autofix")
         else:
@@ -8977,13 +9080,13 @@ class ReviewWindow(ModeWindow):
         current = self._autofix_review_text()
         if not review_path or not current:
             self.composer_status.setText(
-                "Open a review first — there's nothing to fix.")
+                "Open a review first. There's nothing to fix.")
             return
         nxt = modes_mod.autofix_next_round(current, review_name)
         if nxt > modes_mod.AUTOFIX_MAX_ROUNDS:
             self.composer_status.setText(
                 "Autofix is capped at 3 rounds for this review "
-                "chain — file a fresh review to start a new loop.")
+                "chain. File a fresh review to start a new loop.")
             return
         body = modes_mod.section_body(current, "Findings")
         parsed = modes_mod.parse_findings_body(body) if body else []
@@ -8996,7 +9099,7 @@ class ReviewWindow(ModeWindow):
                    if modes_mod.finding_file(found.get("text", ""))]
         if not fixable:
             self.composer_status.setText(
-                "This review has no findings naming a file — "
+                "This review has no findings naming a file: "
                 "nothing to fix.")
             return
         sent_lines = []
@@ -9015,7 +9118,7 @@ class ReviewWindow(ModeWindow):
         if not chosen:
             self.composer_status.setText(
                 "Every finding in this review is already covered "
-                "— sent in an autofix round or fixed individually.")
+                ". Sent in an autofix round or fixed individually.")
             return
         # The prompt carries each finding with its Driver line
         # (CR7) where one is given, so the fix turn works from
@@ -9032,7 +9135,7 @@ class ReviewWindow(ModeWindow):
             f"finding, follow its Driver instruction where one is "
             f"given; otherwise make the smallest change that "
             f"resolves it. Read each finding's file first, and "
-            f"verify each fix as its Driver says — or by running "
+            f"verify each fix as its Driver says, or by running "
             f"the project's own checks when no Driver says how.\n"
             f"{findings_block}")
         ok, _why = self._bench_turn("Code", prompt)
@@ -9044,7 +9147,7 @@ class ReviewWindow(ModeWindow):
         refusal = getattr(owner, "_send_refusal", None)
         if refusal:
             self.composer_status.setText(
-                f"Round {nxt} did not go out — {refusal}")
+                f"Round {nxt} did not go out: {refusal}")
             return
         queued = bool(getattr(owner, "_send_queued", False))
         recorded = False
@@ -9076,7 +9179,7 @@ class ReviewWindow(ModeWindow):
         status = (f"Autofix round {nxt} sent as a Code turn "
                   f"({len(chosen)} findings)"
                   if not queued else
-                  f"Autofix round {nxt} queued — it runs when "
+                  f"Autofix round {nxt} queued. It runs when "
                   f"the current turn ends "
                   f"({len(chosen)} findings)")
         if already_covered > 0:
@@ -9101,7 +9204,7 @@ class ReviewWindow(ModeWindow):
         current = self._autofix_review_text()
         if not review_path or not current:
             self.composer_status.setText(
-                "Open a review first — there's nothing to "
+                "Open a review first. There's nothing to "
                 "re-review.")
             return
         rounds = modes_mod.autofix_rounds(current)
@@ -9109,7 +9212,7 @@ class ReviewWindow(ModeWindow):
                        if not entry.get("rereview")]
         if not outstanding:
             self.composer_status.setText(
-                "Run an autofix round first — there's no round "
+                "Run an autofix round first. There's no round "
                 "waiting on a re-review.")
             return
         entry = outstanding[-1]
@@ -9117,7 +9220,7 @@ class ReviewWindow(ModeWindow):
         files = modes_mod.review_files(entry.get("findings", []))
         if not files:
             self.composer_status.setText(
-                "The last round named no files — nothing to "
+                "The last round named no files: nothing to "
                 "re-review.")
             return
         stem = modes_mod.autofix_chain_stem(review_name)
@@ -9138,7 +9241,7 @@ class ReviewWindow(ModeWindow):
         refusal = getattr(owner, "_send_refusal", None)
         if refusal:
             self.composer_status.setText(
-                f"The re-review did not go out — {refusal}")
+                f"The re-review did not go out: {refusal}")
             return
         queued = bool(getattr(owner, "_send_queued", False))
         recorded = False
@@ -9158,7 +9261,7 @@ class ReviewWindow(ModeWindow):
         status = (f"Re-review sent as a Review turn "
                   f"(round {number}, {len(files)} files)"
                   if not queued else
-                  f"Re-review queued — it runs when the current "
+                  f"Re-review queued. It runs when the current "
                   f"turn ends (round {number}, {len(files)} files)")
         status += f". It files as {rereview_name}."
         if not recorded:
@@ -9205,7 +9308,7 @@ class ReviewWindow(ModeWindow):
             wanted.append("Unit tests")
         if not wanted:
             self.composer_status.setText(
-                "Check Docstrings and/or Unit tests first — "
+                "Check Docstrings and/or Unit tests first: "
                 "nothing is selected to run.")
             return
         review_path = getattr(self, "_current_review_path", "")
@@ -9214,7 +9317,7 @@ class ReviewWindow(ModeWindow):
             getattr(self, "_finding_lines", []))
         if not review_path or not files:
             self.composer_status.setText(
-                "This review names no files — open a review with "
+                "This review names no files. Open a review with "
                 "findings first.")
             return
         file_list = ", ".join(files)
@@ -9244,7 +9347,7 @@ class ReviewWindow(ModeWindow):
             ok, _why = self._bench_turn("Code", prompt)
             if not ok:
                 outcomes.append(
-                    f"{kind.lower()} did not go out — the bench "
+                    f"{kind.lower()} did not go out. The bench "
                     f"is not available")
                 break
             # The bench settles the send three ways: started,
@@ -9255,7 +9358,7 @@ class ReviewWindow(ModeWindow):
             refusal = getattr(owner, "_send_refusal", None)
             if refusal:
                 outcomes.append(
-                    f"{kind.lower()} did not go out — {refusal}")
+                    f"{kind.lower()} did not go out: {refusal}")
                 break
             queued = bool(getattr(owner, "_send_queued", False))
             recorded = False
@@ -9276,7 +9379,7 @@ class ReviewWindow(ModeWindow):
                 record_failed = True
             checks[kind].setChecked(False)
             outcomes.append(
-                f"{kind.lower()} queued — they run when the "
+                f"{kind.lower()} queued. They run when the "
                 f"current turn ends" if queued else
                 f"{kind.lower()} sent as a Code turn")
         if updated is not None:
@@ -9297,7 +9400,7 @@ class ReviewWindow(ModeWindow):
             if self.findings_list is not None else -1
         if not (0 <= row < len(self._finding_lines)):
             self.composer_status.setText(
-                "Pick a finding from the list first — its fix "
+                "Pick a finding from the list first. Its fix "
                 "runs as a Code turn.")
             return
         line = self._finding_lines[row]
@@ -9361,11 +9464,11 @@ class ReviewWindow(ModeWindow):
             viewer.setPlainText(updated)
             self._on_doc_shown("Reviews", Path(review_path))
             self.composer_status.setText(
-                "Fix sent as a Code turn — recorded in the review "
+                "Fix sent as a Code turn. Recorded in the review "
                 "under Fix requests.")
         else:
             self.composer_status.setText(
-                "Fix sent as a Code turn — but the request could "
+                "Fix sent as a Code turn. But the request could "
                 "not be recorded in the review file.")
 
     def teach_from_finding(self):
@@ -9378,12 +9481,12 @@ class ReviewWindow(ModeWindow):
             if self.findings_list is not None else -1
         if not (0 <= row < len(self._finding_lines)):
             self.composer_status.setText(
-                "Pick a finding from the list first — teaching "
+                "Pick a finding from the list first: teaching "
                 "files a learning from it.")
             return
         if not self._workspace:
             self.composer_status.setText(
-                "No project is open — nothing was saved.")
+                "No project is open: nothing was saved.")
             return
         line = self._finding_lines[row]
         reason, ok = QInputDialog.getText(
@@ -9392,7 +9495,7 @@ class ReviewWindow(ModeWindow):
             f"for future reviews:\n{line}")
         if not ok or not reason.strip():
             self.composer_status.setText(
-                "Nothing was saved — no learning filed.")
+                "Nothing was saved. No learning filed.")
             return
         try:
             learnings_mod.add_learning(
@@ -9411,7 +9514,7 @@ class ReviewWindow(ModeWindow):
             getattr(self, "_workspace", ""),
             self._current_review_name, line)
         self.composer_status.setText(
-            "Learning saved — future reviews will apply it.")
+            "Learning saved. Future reviews will apply it.")
 
 
 class AskWindow(ModeWindow):
@@ -9426,7 +9529,7 @@ class AskWindow(ModeWindow):
         row = QHBoxLayout()
         self.source_edit = QLineEdit()
         self.source_edit.setPlaceholderText(
-            "File from Sources — e.g. forge/worker.py:120")
+            "File from Sources: e.g. forge/worker.py:120")
         row.addWidget(self.source_edit, 1)
         self.source_open_btn = QPushButton("Open source")
         self.source_open_btn.setToolTip(
@@ -9440,7 +9543,7 @@ class AskWindow(ModeWindow):
         raw = self.source_edit.text().strip()
         if not raw:
             self.composer_status.setText(
-                "Type a file from Sources first — a path, "
+                "Type a file from Sources first. A path, "
                 "optionally with :line after it.")
             return
         match = re.match(r"^(.*?)(?::(\d+))?$", raw)
@@ -9455,7 +9558,7 @@ class AskWindow(ModeWindow):
             else (root / path_part).resolve()
         if target != root and root not in target.parents:
             self.composer_status.setText(
-                "That file is outside the project — Sources open "
+                "That file is outside the project. Sources open "
                 "project files only.")
             return
         if not target.is_file():
@@ -9626,7 +9729,7 @@ class ResearchWindow(ModeWindow):
         self.ask_edit = QPlainTextEdit()
         self.ask_edit.setPlaceholderText(
             "What should the research answer? Submitting drafts "
-            "a plan — nothing browses until you approve it here.")
+            "a plan: nothing browses until you approve it here.")
         self.ask_edit.setMaximumHeight(64)
         lay.addWidget(self.ask_edit)
         src_row = QHBoxLayout()
@@ -9635,7 +9738,7 @@ class ResearchWindow(ModeWindow):
         self.src_web_check.setChecked(True)
         self.src_web_check.setToolTip(
             "Web searching and page reading through the Browse "
-            "tools — the only part of a run that leaves this "
+            "tools. The only part of a run that leaves this "
             "machine. Switch it off to research only your own "
             "material: browsing is then disabled by the shell, "
             "not just unrequested.")
@@ -9670,7 +9773,7 @@ class ResearchWindow(ModeWindow):
         lay.addLayout(depth_row)
         face = QLabel(
             "Every run is capped at 60 minutes. Searches are the "
-            "only thing that leaves this machine — your files, "
+            "only thing that leaves this machine. Your files, "
             "the notes and the report all stay in the project.")
         face.setObjectName("muted"); face.setWordWrap(True)
         lay.addWidget(face)
@@ -9682,13 +9785,13 @@ class ResearchWindow(ModeWindow):
         self.ask_btn = QPushButton("Draft the research plan")
         self.ask_btn.setToolTip(
             "Start a Research turn: the plan is drafted and "
-            "parks at the gate below — nothing browses before "
+            "parks at the gate below: nothing browses before "
             "you approve it")
         self.ask_btn.clicked.connect(self.start_research)
         ask_row.addWidget(self.ask_btn)
         lay.addLayout(ask_row)
         # --- the gate ------------------------------------------
-        self.gate_box = QGroupBox("Research plan — your gate")
+        self.gate_box = QGroupBox("Research plan · your gate")
         glay = QVBoxLayout(self.gate_box)
         glay.setSpacing(6)
         self.gate_status = QLabel(
@@ -9706,7 +9809,7 @@ class ResearchWindow(ModeWindow):
         self.gate_steps_list.setMaximumHeight(110)
         glay.addWidget(self.gate_steps_list)
         gate_row = QHBoxLayout()
-        self.gate_approve_btn = QPushButton("✓ Approve — start the research")
+        self.gate_approve_btn = QPushButton("✓ Approve · start the research")
         self.gate_approve_btn.setObjectName("primary")
         self.gate_approve_btn.clicked.connect(
             lambda: self._gate_action("approve"))
@@ -9744,7 +9847,7 @@ class ResearchWindow(ModeWindow):
         stop_row = QHBoxLayout()
         self.stop_btn = QPushButton("Stop the run")
         self.stop_btn.setToolTip(
-            "Stop the research run — the same cancel the bench's "
+            "Stop the research run. The same cancel the bench's "
             "Stop sends; the run halts and the report is written "
             "from what was gathered")
         self.stop_btn.setEnabled(False)
@@ -9758,14 +9861,14 @@ class ResearchWindow(ModeWindow):
         play = QVBoxLayout(report_box)
         play.setSpacing(4)
         self.report_path_label = QLabel(
-            "No report open — a finished run's report opens here, "
+            "No report open. A finished run's report opens here, "
             "or double-click one in the Reports tab.")
         self.report_path_label.setWordWrap(True)
         play.addWidget(self.report_path_label)
         mid = QHBoxLayout()
         self.report_editor = QPlainTextEdit()
         self.report_editor.setPlaceholderText(
-            "The finished report opens here, editable — Save "
+            "The finished report opens here, editable. Save "
             "files your edit as a new version; the version it "
             "replaces is kept under Prev.")
         self.report_editor.textChanged.connect(
@@ -9792,7 +9895,7 @@ class ResearchWindow(ModeWindow):
         version_row.addWidget(self.report_prev_btn)
         self.report_next_btn = QPushButton("Next ▶")
         self.report_next_btn.setToolTip(
-            "Step forward — past the newest version is the live report")
+            "Step forward. Past the newest version is the live report")
         self.report_next_btn.clicked.connect(
             lambda: self._step_report_version(1))
         version_row.addWidget(self.report_next_btn)
@@ -9802,7 +9905,7 @@ class ResearchWindow(ModeWindow):
         version_row.addWidget(self.report_version_status, 1)
         self.report_save_btn = QPushButton("Save as a new version")
         self.report_save_btn.setToolTip(
-            "Write the pane back to the report file — the "
+            "Write the pane back to the report file. The "
             "version it replaces is snapshotted first")
         self.report_save_btn.clicked.connect(self.save_report)
         version_row.addWidget(self.report_save_btn)
@@ -9816,7 +9919,7 @@ class ResearchWindow(ModeWindow):
         fu_row = QHBoxLayout()
         self.followup_edit = QLineEdit()
         self.followup_edit.setPlaceholderText(
-            "Follow-up on the open report — answered from its "
+            "Follow-up on the open report. Answered from its "
             "notes when they suffice…")
         fu_row.addWidget(self.followup_edit, 1)
         self.followup_btn = QPushButton("Ask follow-up")
@@ -9881,7 +9984,7 @@ class ResearchWindow(ModeWindow):
             "to end it here.")
         self.gate_box.setVisible(True)
         self.run_status.setText(
-            "Plan drafted — it's at the gate above, waiting on you.")
+            "Plan drafted. It's at the gate above, waiting on you.")
         for i in range(self.tabs.count()):
             if self.tabs.tabText(i) == "Research":
                 self.tabs.setCurrentIndex(i)
@@ -9911,17 +10014,17 @@ class ResearchWindow(ModeWindow):
                     self.gate_steps_list.addItem(
                         QListWidgetItem(step))
                 self.gate_status.setText(
-                    "Steps edited — Approve runs THIS plan.")
+                    "Steps edited. Approve runs THIS plan.")
             return
         self.gate_box.setVisible(False)
         self._gate_steps_shown = None
         if action == "approve":
             self.run_status.setText(
-                "Approved — the run is starting. Its steps, meters "
+                "Approved. The run is starting. Its steps, meters "
                 "and sites land below as they happen.")
         elif action == "kill":
             self.run_status.setText(
-                "Killed at the gate — nothing was browsed.")
+                "Killed at the gate: nothing was browsed.")
 
     # -- ask + sources -------------------------------------------
     def research_options(self) -> dict:
@@ -9958,7 +10061,7 @@ class ResearchWindow(ModeWindow):
         if options["supplied"]:
             sources.append("supplied files: "
                            + ", ".join(options["supplied"]))
-        text = (question + "\n\n[Research room settings — sources: "
+        text = (question + "\n\n[Research room settings · sources: "
                 + "; ".join(sources) + ". Depth: "
                 + options["depth"].capitalize() + ".]")
         ok, why = self._bench_turn("Research", text)
@@ -9970,7 +10073,7 @@ class ResearchWindow(ModeWindow):
             return
         self.ask_edit.clear()
         self.ask_status.setText(
-            "Drafting the research plan — when it's ready, the "
+            "Drafting the research plan. When it's ready, the "
             "gate opens in this room. Nothing browses before you "
             "approve it.")
         self.run_status.setText("Drafting the research plan…")
@@ -10032,7 +10135,7 @@ class ResearchWindow(ModeWindow):
         state = payload.get("state")
         if state == "gate":
             self.run_status.setText(
-                "Plan drafted — it's at the gate above. Nothing "
+                "Plan drafted. It's at the gate above. Nothing "
                 "has browsed.")
         elif state == "running":
             if self._run_started_wall is None:
@@ -10048,20 +10151,20 @@ class ResearchWindow(ModeWindow):
                 self.run_sites_list.addItem(QListWidgetItem(str(url)))
         elif state == "report":
             self.run_status.setText(
-                "Report filed — it opens below with its sources.")
+                "Report filed. It opens below with its sources.")
             self.refresh_documents()
             self._reload_report_if_clean()
         elif state == "killed":
             self._stop_clock()
             self.stop_btn.setEnabled(False)
             self.run_status.setText(
-                "Killed at the gate — nothing was browsed.")
+                "Killed at the gate: nothing was browsed.")
 
     def _render_meters(self, payload, elapsed=None):
         if elapsed is None:
             elapsed = payload.get("elapsed") or 0
         self.run_step_label.setText(
-            f"Now: {payload.get('step') or '—'}")
+            f"Now: {payload.get('step') or '-'}")
         ops = int(payload.get("ops") or 0)
         cap = int(payload.get("cap") or 0)
         self.run_meters.setText(
@@ -10098,7 +10201,7 @@ class ResearchWindow(ModeWindow):
                 and worker.isRunning():
             worker.cancel()
             self.run_status.setText(
-                "Stopping — the run halts at its next step, and "
+                "Stopping. The run halts at its next step, and "
                 "the report is written from what was gathered.")
         else:
             self.run_status.setText("No research run is live.")
@@ -10194,12 +10297,12 @@ class ResearchWindow(ModeWindow):
                 Path(self._workspace).resolve()).as_posix()
         except (ValueError, OSError):
             rel = target.name
-        self.report_path_label.setText(f"Report — {rel}")
+        self.report_path_label.setText(f"Report: {rel}")
         cited, consulted = self._parse_source_lists(text)
         self._fill_list(self.report_cited_list, cited)
         self._fill_list(self.report_consulted_list, consulted)
         self.report_version_status.setText(
-            "On the live report — Prev steps back through its "
+            "On the live report. Prev steps back through its "
             "saved versions.")
         self.report_status.setText(f"Opened {target.name}.")
         for i in range(self.tabs.count()):
@@ -10237,7 +10340,7 @@ class ResearchWindow(ModeWindow):
         if self._report_viewing_stamp is not None:
             self._report_viewing_stamp = None
             self.report_version_status.setText(
-                "Editing the live draft — Save files it as the "
+                "Editing the live draft. Save files it as the "
                 "report, with the old version kept under Prev.")
 
     def save_report(self):
@@ -10268,7 +10371,7 @@ class ResearchWindow(ModeWindow):
         self._report_dirty = False
         self._report_viewing_stamp = None
         self.report_version_status.setText(
-            "Saved — on the live report, its earlier versions "
+            "Saved. On the live report, its earlier versions "
             "kept under Prev.")
         self.report_status.setText(
             f"Saved {target.name} as a new version.")
@@ -10342,7 +10445,7 @@ class ResearchWindow(ModeWindow):
         versions = self._report_version_paths(target)
         if not versions:
             self.report_version_status.setText(
-                "No earlier versions yet — a snapshot is taken "
+                "No earlier versions yet. A snapshot is taken "
                 "when a report opens and before each Save that "
                 "changes it.")
             return
@@ -10391,7 +10494,7 @@ class ResearchWindow(ModeWindow):
         self._report_viewing_stamp = path.stem
         self._report_dirty = True
         self.report_version_status.setText(
-            f"Viewing version from {path.stem} — Save writes it "
+            f"Viewing version from {path.stem}. Save writes it "
             "back as the live report; typing returns you to the "
             "live draft.")
 
@@ -10408,7 +10511,7 @@ class ResearchWindow(ModeWindow):
         question = self.followup_edit.text().strip()
         if not self._report_path:
             self.followup_status.setText(
-                "Open a report first — a follow-up needs its "
+                "Open a report first. A follow-up needs its "
                 "report.")
             return
         if not question:
@@ -10424,11 +10527,11 @@ class ResearchWindow(ModeWindow):
         prompt = (
             f"Follow-up on the finished research report at "
             f"{rel}: {question}\n\n"
-            "Read that report first — it and the sources it "
+            "Read that report first. It and the sources it "
             "gathered are your notes. Answer from them when they "
             "suffice. If the answer needs new web research, "
             "draft a SMALL top-up research plan scoped to just "
-            "this follow-up and let it come to the gate — do "
+            "this follow-up and let it come to the gate. Do "
             "not browse without an approved plan. If the "
             "follow-up asks to change the report, the amendment "
             "lands as a new version of that file, never a "
@@ -10442,7 +10545,7 @@ class ResearchWindow(ModeWindow):
             return
         self.followup_edit.clear()
         self.followup_status.setText(
-            "Follow-up sent — the answer lands in Session work; "
+            "Follow-up sent. The answer lands in Session work; "
             "a top-up plan, if one is needed, opens at the gate "
             "above.")
 
@@ -10478,7 +10581,7 @@ class ProposalsWindow(QWidget):
         super().__init__(owner, Qt.Window)
         self._owner = owner
         self.resize(640, 420)
-        self.setWindowTitle("Proposals — Code Forge")
+        self.setWindowTitle("Proposals · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12)
         lay.setSpacing(6)
@@ -10488,7 +10591,7 @@ class ProposalsWindow(QWidget):
         self.list.itemSelectionChanged.connect(self._sync_buttons)
         lay.addWidget(self.list)
         self.empty = QLabel(
-            "No proposals — when a test fails or a run crashes, "
+            "No proposals. When a test fails or a run crashes, "
             "the proposal waits here. Nothing runs until you "
             "accept it.")
         self.empty.setWordWrap(True)
@@ -10497,14 +10600,14 @@ class ProposalsWindow(QWidget):
         buttons.addStretch(1)
         self.decline_btn = QPushButton("Decline")
         self.decline_btn.setToolTip(
-            "Decline the proposal — it dies and nothing runs")
+            "Decline the proposal. It dies and nothing runs")
         self.decline_btn.clicked.connect(
             lambda: self._decide(False))
         buttons.addWidget(self.decline_btn)
         self.accept_btn = QPushButton("✓ Accept")
         self.accept_btn.setObjectName("primary")
         self.accept_btn.setToolTip(
-            "Accept the proposal — it runs through the gate")
+            "Accept the proposal. It runs through the gate")
         self.accept_btn.clicked.connect(lambda: self._decide(True))
         buttons.addWidget(self.accept_btn)
         lay.addLayout(buttons)
@@ -10512,7 +10615,7 @@ class ProposalsWindow(QWidget):
 
     def _line(self, proposal):
         return (f"{proposal.get('kind', '')} · "
-                f"{proposal.get('event', '')} — "
+                f"{proposal.get('event', '')} · "
                 f"{proposal.get('action', '')} "
                 f"({proposal.get('touches', '')})")
 
@@ -10558,7 +10661,7 @@ class PlanWindow(QWidget):
         self._plan_entries = []
         self.resize(780, 560)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Plan — Code Forge")
+        self.setWindowTitle("Plan · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
         # G4: the standard header — title mirrors the window title,
@@ -10569,15 +10672,15 @@ class PlanWindow(QWidget):
         lay.addWidget(self.header)
         self.plan_approve_btn = QPushButton("✓ Approve")
         self.plan_approve_btn.setObjectName("primary")
-        self.plan_approve_btn.setToolTip("Approve the plan — the agent works the steps in order")
+        self.plan_approve_btn.setToolTip("Approve the plan. The agent works the steps in order")
         self.plan_approve_btn.clicked.connect(lambda: owner._plan_gate_action("approve"))
         self.header.slot_layout.addWidget(self.plan_approve_btn)
         self.plan_edit_btn = QPushButton("✎ Edit")
-        self.plan_edit_btn.setToolTip("Edit the steps, then Approve — the edited plan is what runs")
+        self.plan_edit_btn.setToolTip("Edit the steps, then Approve. The edited plan is what runs")
         self.plan_edit_btn.clicked.connect(lambda: owner._plan_gate_action("edit"))
         self.header.slot_layout.addWidget(self.plan_edit_btn)
         self.plan_kill_btn = QPushButton("✕ Kill")
-        self.plan_kill_btn.setToolTip("Kill the plan — nothing executes, the turn ends")
+        self.plan_kill_btn.setToolTip("Kill the plan. Nothing executes, the turn ends")
         self.plan_kill_btn.clicked.connect(lambda: owner._plan_gate_action("kill"))
         self.header.slot_layout.addWidget(self.plan_kill_btn)
         # Remainder R2: abandon a RUNNING plan — the draft's
@@ -10587,7 +10690,7 @@ class PlanWindow(QWidget):
         # plan is running or interrupted.
         self.plan_abandon_btn = QPushButton("⚑ Abandon")
         self.plan_abandon_btn.setToolTip(
-            "Abandon the plan — it ends here, the record says "
+            "Abandon the plan. It ends here, the record says "
             "abandoned, and no resume picks it back up")
         self.plan_abandon_btn.clicked.connect(
             lambda: owner._confirm_abandon_plan())
@@ -10610,13 +10713,13 @@ class PlanWindow(QWidget):
         comment_row = QHBoxLayout()
         self.plan_comment_edit = QPlainTextEdit()
         self.plan_comment_edit.setPlaceholderText(
-            "Comment on the draft — the driver revises it against "
+            "Comment on the draft. The driver revises it against "
             "your words and the plan comes back to this gate.")
         self.plan_comment_edit.setMaximumHeight(52)
         comment_row.addWidget(self.plan_comment_edit, 1)
         self.plan_comment_btn = QPushButton("💬 Comment")
         self.plan_comment_btn.setToolTip(
-            "Send the comment — the driver revises the draft; "
+            "Send the comment. The driver revises the draft; "
             "nothing runs until you Approve. Select a step first "
             "to scope the comment to that step.")
         self.plan_comment_btn.clicked.connect(self._comment_clicked)
@@ -10637,7 +10740,7 @@ class PlanWindow(QWidget):
         self.gofish_view.setReadOnly(True)
         self.gofish_view.setMaximumHeight(170)
         self.gofish_view.setPlaceholderText(
-            "GoFish review — a fresh reviewer-seat pass reads each "
+            "GoFish review. A fresh reviewer-seat pass reads each "
             "draft plan (plan + named files only, no conversation) "
             "and its findings land here before you approve.")
         glay.addWidget(self.gofish_view)
@@ -10652,7 +10755,7 @@ class PlanWindow(QWidget):
         self.gate_checks_view.setReadOnly(True)
         self.gate_checks_view.setMaximumHeight(110)
         self.gate_checks_view.setPlaceholderText(
-            "Gate checks — plain-words checks from "
+            "Gate checks: plain-words checks from "
             ".forge/gate-checks.md, run here before you approve.")
         glay.addWidget(self.gate_checks_view)
         # Item #58: the plan DOCUMENT itself — the full text the
@@ -10665,7 +10768,7 @@ class PlanWindow(QWidget):
         self.document_view.setReadOnly(True)
         self.document_view.setMaximumHeight(190)
         self.document_view.setPlaceholderText(
-            "Plan document — the full drafted text (Item #58) lands "
+            "Plan document: the full drafted text (Item #58) lands "
             "here: goal, context found, contents, steps with their "
             "detail, risks, and the assumptions the draft is making.")
         glay.addWidget(self.document_view)
@@ -10675,7 +10778,7 @@ class PlanWindow(QWidget):
         # above are untouched.
         self.plan_composer = QPlainTextEdit()
         self.plan_composer.setPlaceholderText(
-            "Say what you want planned — Draft plan runs a Plan "
+            "Say what you want planned. Draft plan runs a Plan "
             "turn on the bench, and the draft comes back to this gate.")
         self.plan_composer.setMaximumHeight(64)
         glay.addWidget(self.plan_composer)
@@ -10686,7 +10789,7 @@ class PlanWindow(QWidget):
         draft_row.addWidget(self.plan_draft_status, 1)
         self.plan_draft_btn = QPushButton("Draft plan")
         self.plan_draft_btn.setToolTip(
-            "Run a Plan turn with what's typed above — the draft "
+            "Run a Plan turn with what's typed above. The draft "
             "lands at this gate for Approve / Edit / Kill")
         self.plan_draft_btn.clicked.connect(self.draft_plan)
         draft_row.addWidget(self.plan_draft_btn)
@@ -10704,7 +10807,7 @@ class PlanWindow(QWidget):
         self.plans_view = QPlainTextEdit()
         self.plans_view.setReadOnly(True)
         self.plans_view.setPlaceholderText(
-            "No plans filed yet — approved and drafted plans "
+            "No plans filed yet. Approved and drafted plans "
             "land here as artifacts of the project.")
         self.plans_list.currentRowChanged.connect(self._show_plan)
         plans_lay.addWidget(self.plans_list)
@@ -10749,7 +10852,7 @@ class PlanWindow(QWidget):
                 gate_checks_mod.render_text(self._workspace))
         except Exception:
             view.setPlainText(
-                "Gate checks unreadable — check "
+                "Gate checks unreadable. Check "
                 ".forge/gate-checks.md by hand.")
 
     def refresh_plans(self):
@@ -10791,7 +10894,7 @@ class PlanWindow(QWidget):
         text = self.plan_composer.toPlainText()
         if not text.strip():
             self.plan_draft_status.setText(
-                "Type what you want planned first — there's "
+                "Type what you want planned first. There's "
                 "nothing to draft yet.")
             return
         owner = self._owner
@@ -10808,13 +10911,13 @@ class PlanWindow(QWidget):
         send()
         self.plan_composer.clear()
         self.plan_draft_status.setText(
-            "Sent as a Plan turn — the draft lands at this gate "
+            "Sent as a Plan turn. The draft lands at this gate "
             "when it's ready.")
 
     def set_project(self, workspace):
         self._workspace = workspace or ""
         name = Path(workspace).name or workspace or ""
-        self.setWindowTitle(f"Plan — {name}" if name else "Plan — Code Forge")
+        self.setWindowTitle(f"Plan: {name}" if name else "Plan · Code Forge")
         self.header.title_label.setText(self.windowTitle())
         self.refresh_plans()
         self.refresh_gate_checks()
@@ -10835,7 +10938,7 @@ class ArtifactsWindow(QWidget):
         self._entries: list[dict] = []
         self.resize(880, 620)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Artifacts — Code Forge")
+        self.setWindowTitle("Artifacts · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
         # G4: the standard header — title, the kind filter slotted
@@ -10859,7 +10962,7 @@ class ArtifactsWindow(QWidget):
         split.addWidget(self.artifacts_list)
         self.artifact_view = QPlainTextEdit(); self.artifact_view.setReadOnly(True)
         self.artifact_view.setPlaceholderText(
-            "No artifacts yet — plans, designs, reviews and turn "
+            "No artifacts yet: plans, designs, reviews and turn "
             "walkthroughs land here as the work happens.")
         split.addWidget(self.artifact_view, 1)
         lay.addLayout(split, 1)
@@ -10873,7 +10976,7 @@ class ArtifactsWindow(QWidget):
         self.artifact_comment_edit = QPlainTextEdit()
         self.artifact_comment_edit.setMaximumHeight(56)
         self.artifact_comment_edit.setPlaceholderText(
-            "Comment on the selected artifact — Send starts a turn "
+            "Comment on the selected artifact. Send starts a turn "
             "that revises it; the revision files as a new artifact "
             "and the original stays untouched.")
         lay.addWidget(self.artifact_comment_edit)
@@ -10912,12 +11015,12 @@ class ArtifactsWindow(QWidget):
         knowledge_row.addWidget(self.knowledge_approve_btn)
         self.knowledge_discard_btn = QPushButton("✖ Discard")
         self.knowledge_discard_btn.setToolTip(
-            "Delete the selected draft — it never reaches the agent")
+            "Delete the selected draft. It never reaches the agent")
         self.knowledge_discard_btn.clicked.connect(self._discard_draft)
         knowledge_row.addWidget(self.knowledge_discard_btn)
         self.knowledge_add_btn = QPushButton("＋ Add entry")
         self.knowledge_add_btn.setToolTip(
-            "Write a knowledge entry yourself — filed as a draft, "
+            "Write a knowledge entry yourself. Filed as a draft, "
             "or approved immediately if you choose")
         self.knowledge_add_btn.clicked.connect(self._add_knowledge)
         knowledge_row.addWidget(self.knowledge_add_btn)
@@ -10945,14 +11048,14 @@ class ArtifactsWindow(QWidget):
         guidelines_row = QHBoxLayout()
         self.guidelines_approve_btn = QPushButton("✔ Approve")
         self.guidelines_approve_btn.setToolTip(
-            "Approve this guideline file — its rules join Review "
+            "Approve this guideline file. Its rules join Review "
             "and Plan turns for this project.")
         self.guidelines_approve_btn.clicked.connect(
             self._approve_guideline)
         guidelines_row.addWidget(self.guidelines_approve_btn)
         self.guidelines_revoke_btn = QPushButton("✖ Revoke")
         self.guidelines_revoke_btn.setToolTip(
-            "Take back this file's approval — its rules stop "
+            "Take back this file's approval. Its rules stop "
             "applying. The file itself is untouched.")
         self.guidelines_revoke_btn.clicked.connect(
             self._revoke_guideline)
@@ -10969,7 +11072,7 @@ class ArtifactsWindow(QWidget):
         if owner is None:
             return
         name = Path(owner.workspace).name or owner.workspace
-        self.setWindowTitle(f"Artifacts — {name}")
+        self.setWindowTitle(f"Artifacts: {name}")
         self.header.title_label.setText(self.windowTitle())
         wanted = self.kind_filter.currentData() or ""
         self._entries = [
@@ -10982,7 +11085,7 @@ class ArtifactsWindow(QWidget):
             if len(label) > 42:
                 label = label[:41] + "…"
             item = QListWidgetItem(label)
-            item.setToolTip(f"{e.get('title', '')} — {stamp}")
+            item.setToolTip(f"{e.get('title', '')} · {stamp}")
             self.artifacts_list.addItem(item)
         if self._entries:
             self.artifacts_list.setCurrentRow(0)
@@ -10999,7 +11102,7 @@ class ArtifactsWindow(QWidget):
             owner.workspace)
         approved = knowledge_mod.list_knowledge(owner.workspace)
         self.knowledge_label.setText(
-            f"Knowledge drafts — {len(self._knowledge_drafts)} "
+            f"Knowledge drafts: {len(self._knowledge_drafts)} "
             f"waiting · {len(approved)} approved")
         self.knowledge_drafts_list.clear()
         for e in self._knowledge_drafts:
@@ -11019,7 +11122,7 @@ class ArtifactsWindow(QWidget):
         self._guidelines_approved = guidelines_mod.list_approved(
             owner.workspace)
         self.guidelines_label.setText(
-            f"Guideline files — {len(self._guidelines_pending)} "
+            f"Guideline files: {len(self._guidelines_pending)} "
             f"waiting · {len(self._guidelines_approved)} approved")
         self.guidelines_list.clear()
         for rel in (self._guidelines_pending
@@ -11065,7 +11168,7 @@ class ArtifactsWindow(QWidget):
             return
         if rel in self._guidelines_approved:
             self.guidelines_status.setText(
-                f"Already approved — “{rel}” applies already.")
+                f"Already approved · “{rel}” applies already.")
             return
         try:
             guidelines_mod.approve_guideline(owner.workspace, rel)
@@ -11074,7 +11177,7 @@ class ArtifactsWindow(QWidget):
                 f"Approval failed: {exc}")
             return
         self.guidelines_status.setText(
-            f"Approved — “{rel}” now applies in Review and Plan "
+            f"Approved · “{rel}” now applies in Review and Plan "
             f"turns for this project.")
         self._refresh_guidelines()
 
@@ -11086,7 +11189,7 @@ class ArtifactsWindow(QWidget):
             return
         if guidelines_mod.revoke_guideline(owner.workspace, rel):
             self.guidelines_status.setText(
-                f"Revoked — “{rel}” no longer applies. The file "
+                f"Revoked · “{rel}” no longer applies. The file "
                 f"itself is untouched.")
         else:
             self.guidelines_status.setText(
@@ -11128,7 +11231,7 @@ class ArtifactsWindow(QWidget):
             self.knowledge_status.setText(f"Approval failed: {exc}")
             return
         self.knowledge_status.setText(
-            f"Approved — “{entry.get('title', '')}” is project "
+            f"Approved · “{entry.get('title', '')}” is project "
             f"knowledge now, and its summary is on the brief.")
         self._refresh_knowledge_drafts()
 
@@ -11141,7 +11244,7 @@ class ArtifactsWindow(QWidget):
         if knowledge_mod.discard_draft(owner.workspace,
                                        entry["name"]):
             self.knowledge_status.setText(
-                f"Discarded — “{entry.get('title', '')}” is gone and "
+                f"Discarded · “{entry.get('title', '')}” is gone and "
                 f"never reached the agent.")
         else:
             self.knowledge_status.setText(
@@ -11176,13 +11279,13 @@ class ArtifactsWindow(QWidget):
             knowledge_mod.add_entry(owner.workspace, title, body,
                                     approved=False)
             self.knowledge_status.setText(
-                "Saved as a draft — it waits for approval like any "
+                "Saved as a draft. It waits for approval like any "
                 "distilled entry.")
         elif clicked is approve_btn:
             knowledge_mod.add_entry(owner.workspace, title, body,
                                     approved=True)
             self.knowledge_status.setText(
-                "Approved — it is project knowledge now, and its "
+                "Approved. It is project knowledge now, and its "
                 "summary is on the brief.")
         else:
             return
@@ -11293,7 +11396,7 @@ class SessionsWindow(QWidget):
         self._rows: list[dict] = []
         self.resize(820, 460)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Sessions — Code Forge")
+        self.setWindowTitle("Sessions · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(6)
         # G4: the standard header — title prominent, Refresh (this
@@ -11375,7 +11478,7 @@ class SessionsWindow(QWidget):
             label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             if key == "project" and row.get("project_full"):
                 label.setToolTip(row["project_full"])
-            if key == "model" and row["model"] != "—":
+            if key == "model" and row["model"] != "-":
                 label.setToolTip(row["model"])
             lay.addWidget(label)
         return widget
@@ -11469,25 +11572,25 @@ _ERROR_CAUSES = (
       "connection aborted", "name or service not known",
       "temporary failure in name resolution", "network is unreachable",
       "could not connect"),
-     "The Forge couldn't reach the service it needed — check that "
+     "The Forge couldn't reach the service it needed. Check that "
      "it's running and try again."),
     (("timed out", "timeout", "timed-out"),
-     "It took too long and timed out — try again."),
+     "It took too long and timed out. Try again."),
     (("no such file", "not found", "no such directory"),
      "A file it needed is missing."),
     (("permission denied", "operation not permitted"),
-     "Permission was denied — the Forge can't read or write that file."),
+     "Permission was denied. The Forge can't read or write that file."),
     (("no space left", "disk full"),
-     "The disk is full — free some space and try again."),
+     "The disk is full. Free some space and try again."),
     (("is a directory", "not a directory"),
-     "A file and a folder got mixed up — that path isn't what the "
+     "A file and a folder got mixed up. That path isn't what the "
      "Forge expected."),
     (("invalid json", "expecting value", "unterminated string",
       "not a valid json"),
      "Something came back in a shape the Forge didn't expect."),
 )
 _ERROR_CAUSE_GENERIC = (
-    "Something unexpected went wrong — the technical detail is below.")
+    "Something unexpected went wrong. The technical detail is below.")
 
 
 def _error_cause_text(exc) -> str:
@@ -11600,7 +11703,7 @@ class PrivacyWindow(QWidget):
         self._cloud_labels: list = []
         self.resize(700, 600)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Privacy — Code Forge")
+        self.setWindowTitle("Privacy · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
         self.header = build_window_header(self, self.windowTitle())
@@ -11610,7 +11713,7 @@ class PrivacyWindow(QWidget):
         self.guarantee_label = QLabel(
             "No account. No subscription. No usage meter. Nothing "
             "expires. Code Forge never sends your code, chats, or "
-            "usage anywhere on its own — there is no telemetry and "
+            "usage anywhere on its own. There is no telemetry and "
             "no phone-home.")
         self.guarantee_label.setWordWrap(True)
         lay.addWidget(self.guarantee_label)
@@ -11631,7 +11734,7 @@ class PrivacyWindow(QWidget):
         # anywhere) — this line states exactly that.
         self.deck_line = QLabel(
             "The phone deck talks to this PC on your local network "
-            "only — it never relays through anyone's cloud.")
+            "only. It never relays through anyone's cloud.")
         self.deck_line.setWordWrap(True)
         lay.addWidget(self.deck_line)
 
@@ -11743,7 +11846,7 @@ class PrivacyWindow(QWidget):
         if owner.delete_all_conversations() is None:
             QMessageBox.information(
                 self, "Delete all conversations",
-                "A turn is running — stop it first, then delete.")
+                "A turn is running. Stop it first, then delete.")
             return
         self.refresh()
 
@@ -11796,7 +11899,7 @@ class PrivacyWindow(QWidget):
         if owner.delete_all_forge_data() is None:
             QMessageBox.information(
                 self, "Delete all Code Forge data",
-                "A turn or Forge maintenance is in progress — "
+                "A turn or Forge maintenance is in progress: "
                 "finish or stop it first, then delete.")
             return
         self.refresh()
@@ -11814,15 +11917,15 @@ def format_ai_context(messages) -> str:
     for m in messages or []:
         content = str(m.get("content") or "")
         if context_mod.is_summary(m):
-            parts.append("— Summary of earlier turns "
-                         "(context was folded) —\n" + content)
+            parts.append("- Summary of earlier turns "
+                         "(context was folded) -\n" + content)
         elif context_mod.is_notes(m):
-            parts.append("— Session notes (kept on disk; the AI "
-                         "reads these) —\n" + content)
+            parts.append("- Session notes (kept on disk; the AI "
+                         "reads these) -\n" + content)
         elif m.get("role") == "system":
-            parts.append("— System prompt —\n" + content)
+            parts.append("- System prompt -\n" + content)
         elif m.get("role") == "user":
-            parts.append("— You —\n" + content)
+            parts.append("- You -\n" + content)
         elif m.get("role") == "assistant":
             lines = []
             if content.strip():
@@ -11831,12 +11934,12 @@ def format_ai_context(messages) -> str:
                 fn = (call.get("function") or {}) \
                     if isinstance(call, dict) else {}
                 lines.append(f"[called {fn.get('name', 'tool')}]")
-            parts.append("— Assistant —\n" + "\n".join(lines))
+            parts.append("- Assistant -\n" + "\n".join(lines))
         elif m.get("role") == "tool":
             name = m.get("name") or m.get("tool_name") or "tool"
-            parts.append(f"— Tool result ({name}) —\n" + content)
+            parts.append(f"- Tool result ({name}) -\n" + content)
         elif content.strip():
-            parts.append(f"— {m.get('role') or 'message'} —\n" + content)
+            parts.append(f"- {m.get('role') or 'message'} -\n" + content)
     return "\n\n".join(parts)
 
 
@@ -11855,7 +11958,7 @@ class NotesWindow(QWidget):
     EMPTY_HINT = ("No notes yet for this conversation. Forge adds "
                   "entries when plans are approved, steps finish, "
                   "or context is summarized. You can also write "
-                  "your own — the AI reads this file after any "
+                  "your own. The AI reads this file after any "
                   "summarization.")
 
     def __init__(self, owner):
@@ -11865,7 +11968,7 @@ class NotesWindow(QWidget):
         self._loaded_conv = None
         self.resize(680, 560)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Session notes — Code Forge")
+        self.setWindowTitle("Session notes · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
         self.header = build_window_header(self, self.windowTitle())
@@ -11904,7 +12007,7 @@ class NotesWindow(QWidget):
         path = notes_mod.notes_path(APP_DIR, conv)
         if path is None:
             self.path_label.setText(
-                "This conversation has not been saved yet — its "
+                "This conversation has not been saved yet. Its "
                 "notes file starts with its first entry.")
             self._loaded_text = ""
             self.editor.setPlainText("")
@@ -11957,7 +12060,7 @@ class WhatTheAiSeesWindow(QWidget):
         self._owner = owner
         self.resize(720, 620)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("What the AI sees — Code Forge")
+        self.setWindowTitle("What the AI sees · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
         self.header = build_window_header(self, self.windowTitle())
@@ -12008,19 +12111,19 @@ class WhatTheAiSeesWindow(QWidget):
         if resolved != num_ctx:
             self.usage_label.setText(
                 f"~{est:,} of {resolved:,} tokens (estimate, counted "
-                f"locally) — {driver}'s resolved context window "
+                f"locally): {driver}'s resolved context window "
                 f"(your num_ctx setting is {num_ctx:,}); the "
                 "messages below are what the next request carries, "
                 "in order. Tool schemas ride along on top of them.")
         else:
             self.usage_label.setText(
                 f"~{est:,} of {num_ctx:,} tokens (estimate, counted "
-                "locally) — the messages below are what the next "
+                "locally). The messages below are what the next "
                 "request carries, in order. Tool schemas ride along "
                 "on top of them.")
         if not any(m.get("role") == "user" for m in messages):
             self.view.setPlainText(
-                "Nothing to show yet — this conversation has no "
+                "Nothing to show yet. This conversation has no "
                 "messages. When you chat, this window shows "
                 "exactly what will be sent to the model: the "
                 "system prompt, any folded summary, your session "
@@ -12087,7 +12190,7 @@ class ModelsWindow(QWidget):
         self._pull_rows: list = []
         self.resize(760, 560)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Models — Code Forge")
+        self.setWindowTitle("Models · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
         self.header = build_window_header(
@@ -12097,7 +12200,7 @@ class ModelsWindow(QWidget):
 
         lay.addWidget(self._section_label("ON THIS PC"))
         truth = QLabel(
-            "Local models are files on this PC — they work offline "
+            "Local models are files on this PC. They work offline "
             "and can't be retired or taken away.")
         truth.setWordWrap(True)
         lay.addWidget(truth)
@@ -12114,7 +12217,7 @@ class ModelsWindow(QWidget):
         unload_row = QHBoxLayout(); unload_row.setSpacing(6)
         self.unload_all_btn = QPushButton("Unload all models")
         self.unload_all_btn.setToolTip(
-            "Unload every model Ollama currently holds in RAM — "
+            "Unload every model Ollama currently holds in RAM: "
             "frees the memory immediately. Works whether the "
             "Light Machine profile is on or off. Cloud models "
             "are not Ollama models and are never touched.")
@@ -12133,7 +12236,7 @@ class ModelsWindow(QWidget):
         self.local_list = QListWidget()
         lay.addWidget(self.local_list, 1)
         self.local_empty = QLabel(
-            "No local models in the list yet — Forge reads it from "
+            "No local models in the list yet. Forge reads it from "
             "Ollama. If Ollama is still starting, reopen this "
             "window in a moment; models pulled with Ollama appear "
             "here once Forge refreshes.")
@@ -12159,7 +12262,7 @@ class ModelsWindow(QWidget):
         self.pull_tag_edit = QLineEdit()
         self.pull_tag_edit.setObjectName("pull_tag_edit")
         self.pull_tag_edit.setPlaceholderText(
-            "any Ollama tag — e.g. qwen3:4b or user/model:tag")
+            "any Ollama tag: e.g. qwen3:4b or user/model:tag")
         self.pull_tag_edit.returnPressed.connect(
             self._pull_from_field)
         pull_row.addWidget(self.pull_tag_edit, 1)
@@ -12227,15 +12330,15 @@ class ModelsWindow(QWidget):
                 total_ram, num_ctx)
             self.machine_line.setText(
                 f"This PC: {modelfit_mod.format_ram_gb(total_ram)} "
-                f"GB RAM — models up to "
+                f"GB RAM. Models up to "
                 f"≈{modelfit_mod.format_gb(max_size)} GB fit "
                 f"comfortably.")
         else:
             self.machine_line.setText(
-                "This PC: its RAM could not be read — fit badges "
+                "This PC: its RAM could not be read. Fit badges "
                 "are unavailable, sizes and provenance still show.")
         self.local_section.setText(
-            f"LOCAL MODELS — FIT AT {num_ctx:,} CONTEXT")
+            f"LOCAL MODELS · FIT AT {num_ctx:,} CONTEXT")
         local_entries, cloud_entries = [], []
         for entry in entries:
             if not isinstance(entry, dict):
@@ -12341,8 +12444,27 @@ class ModelsWindow(QWidget):
         prov.setStyleSheet(f"color:{TOKENS['text_muted']};")
         prov.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lay.addWidget(prov)
+        # F7 (U39): the roster knows what this model DOES — say
+        # so verbatim where the roster knows it, and say nothing
+        # where it doesn't (no invented line, the same honesty
+        # the fit badge follows for typed tags). The note gets
+        # its own objectName: the provenance label is counted
+        # exactly once per row by ModelFitTests.
+        role_note = ""
+        key = governor.model_key_for(name)
+        if key is not None:
+            role_note = str(governor.MODELS[key].get("note") or "")
+        if role_note:
+            note = QLabel(role_note)
+            note.setObjectName("role_note")
+            note.setStyleSheet(f"color:{TOKENS['text_muted']};")
+            note.setWordWrap(True)
+            note.setAttribute(Qt.WA_TransparentForMouseEvents,
+                              True)
+            lay.addWidget(note)
         return {"entry": entry, "klass": klass, "need": need,
-                "badge_text": badge_text, "widget": widget}
+                "badge_text": badge_text, "role_note": role_note,
+                "widget": widget}
 
     def _cloud_row(self, entry):
         provider = entry.get("provider")
@@ -12370,7 +12492,7 @@ class ModelsWindow(QWidget):
         top.addWidget(prov_label)
         lay.addLayout(top)
         note_text = (
-            f"Cloud model — runs on {label}'s machines, not this "
+            f"Cloud model: runs on {label}'s machines, not this "
             "PC. No fit badge: there is nothing local to fit.")
         # A window the provider itself stated (its catalog) is a
         # fact, not an invention — show it; budgeting uses it too.
@@ -12469,7 +12591,9 @@ class ModelsWindow(QWidget):
     def show_pull_note(self, text):
         """The pull section's own status line: the terminal-pull
         entry reports a refused tag (or a busy run surface)
-        here, in plain words, next to the field it came from."""
+        here, and a stopped or failed pull reports its next
+        step here (F15) — in plain words, next to the field it
+        came from."""
         self.pull_note.setText(str(text or ""))
 
 
@@ -12507,7 +12631,7 @@ class SkillEditorWindow(QWidget):
         lay.addWidget(self.header)
         blurb = QLabel("Skills are global: this writes into the Forge's own skills/ "
                        "folder, so the skill is available in every project. Saving "
-                       "rescans automatically — no restart needed.")
+                       "rescans automatically. No restart needed.")
         blurb.setObjectName("muted"); blurb.setWordWrap(True)
         lay.addWidget(blurb)
         self.tabs = QTabWidget()
@@ -12521,9 +12645,9 @@ class SkillEditorWindow(QWidget):
         form.addRow("Name (slug):", self.name_edit)
         self.desc_edit = QLineEdit(skill.description if skill is not None else "")
         self.desc_edit.setPlaceholderText(
-            "One line: what it does AND when to use it — the skill index line")
+            "One line: what it does AND when to use it. The skill index line")
         form.addRow("Description:", self.desc_edit)
-        name_note = QLabel("The name is the skill's folder name — it cannot change "
+        name_note = QLabel("The name is the skill's folder name. It cannot change "
                            "after creation.")
         name_note.setObjectName("muted"); name_note.setWordWrap(True)
         form.addRow("", name_note)
@@ -12579,15 +12703,15 @@ class SkillEditorWindow(QWidget):
 
     def _lock_name(self):
         self.name_edit.setReadOnly(True)
-        self.name_edit.setToolTip("The name is the folder name — fixed after creation.")
+        self.name_edit.setToolTip("The name is the folder name. Fixed after creation.")
 
     def _retitle(self):
         if self._folder_name is not None:
             self.win_title.setText("EDIT SKILL")
-            self.setWindowTitle(f"Edit Skill — {self._folder_name} — Code Forge")
+            self.setWindowTitle(f"Edit Skill: {self._folder_name} · Code Forge")
         else:
             self.win_title.setText("NEW SKILL")
-            self.setWindowTitle("New Skill — Code Forge")
+            self.setWindowTitle("New Skill · Code Forge")
 
     def save(self):
         """Write through the create/update backing calls. Returns
@@ -12655,7 +12779,7 @@ class PluginEditorWindow(QWidget):
         blurb = QLabel("Plugins are global: this writes into the Forge's own "
                        "plugins/ folder, available in every project. The code must "
                        "define HANDLERS = {'tool_name': handler, ...}; it is checked "
-                       "before anything is written. A new plugin starts DISABLED — "
+                       "before anything is written. A new plugin starts DISABLED: "
                        "enable it in Customize.")
         blurb.setObjectName("muted"); blurb.setWordWrap(True)
         lay.addWidget(blurb)
@@ -12671,7 +12795,7 @@ class PluginEditorWindow(QWidget):
         self.desc_edit = QLineEdit(plugin.description if plugin is not None else "")
         self.desc_edit.setPlaceholderText("One line: what the plugin does and when to use it")
         form.addRow("Description:", self.desc_edit)
-        name_note = QLabel("The name is the plugin's folder name — it cannot change "
+        name_note = QLabel("The name is the plugin's folder name. It cannot change "
                            "after creation.")
         name_note.setObjectName("muted"); name_note.setWordWrap(True)
         form.addRow("", name_note)
@@ -12680,7 +12804,7 @@ class PluginEditorWindow(QWidget):
         self.code_edit = QPlainTextEdit()
         self.code_edit.setFont(QFont("monospace", 10))
         self.code_edit.setPlaceholderText(
-            "Complete plugin.py source — define HANDLERS = "
+            "Complete plugin.py source. Define HANDLERS = "
             "{'tool_name': handler_function, ...}; each handler takes "
             "(args, ctx) and returns a string. Optional: TOOL_SCHEMAS = "
             "{'tool_name': {parameters}, ...}.")
@@ -12719,15 +12843,15 @@ class PluginEditorWindow(QWidget):
 
     def _lock_name(self):
         self.name_edit.setReadOnly(True)
-        self.name_edit.setToolTip("The name is the folder name — fixed after creation.")
+        self.name_edit.setToolTip("The name is the folder name. Fixed after creation.")
 
     def _retitle(self):
         if self._folder_name is not None:
             self.win_title.setText("EDIT PLUGIN")
-            self.setWindowTitle(f"Edit Plugin — {self._folder_name} — Code Forge")
+            self.setWindowTitle(f"Edit Plugin: {self._folder_name} · Code Forge")
         else:
             self.win_title.setText("NEW PLUGIN")
-            self.setWindowTitle("New Plugin — Code Forge")
+            self.setWindowTitle("New Plugin · Code Forge")
 
     def save(self):
         """Write through the create/update backing calls. Returns
@@ -12839,7 +12963,7 @@ class MaintenanceWindow(QWidget):
         self._owner = owner
         self.resize(880, 660)
         self.setStyleSheet("background:#12100d;")
-        self.setWindowTitle("Forge maintenance — Code Forge")
+        self.setWindowTitle("Forge maintenance · Code Forge")
         self.last_test_ok = None
         self.candidate_path = None
         self.candidate_manifest = None
@@ -12864,7 +12988,7 @@ class MaintenanceWindow(QWidget):
         self.test_providers_action = self.header.overflow_menu.actions()[0]
         self.provider_status = QLabel(
             "Hosted models repair Forge itself here. Prompts and code "
-            "in this room go to the provider you pick — nothing here "
+            "in this room go to the provider you pick: nothing here "
             "runs on a local model unless you choose one.")
         self.provider_status.setObjectName("muted")
         self.provider_status.setWordWrap(True)
@@ -12875,7 +12999,7 @@ class MaintenanceWindow(QWidget):
         chat_page = QWidget(); chat_lay = QVBoxLayout(chat_page)
         self.transcript = QPlainTextEdit(); self.transcript.setReadOnly(True)
         self.transcript.setPlaceholderText(
-            "The maintenance conversation lives here — it persists "
+            "The maintenance conversation lives here. It persists "
             "across sessions, separate from your project chats.")
         chat_lay.addWidget(self.transcript, 1)
         model_row = QHBoxLayout()
@@ -12908,7 +13032,7 @@ class MaintenanceWindow(QWidget):
         changes_lay.addWidget(self.refresh_changes_btn)
         self.changes_view = QPlainTextEdit(); self.changes_view.setReadOnly(True)
         self.changes_view.setPlaceholderText(
-            "No work copy yet — sending a maintenance message creates it.")
+            "No work copy yet: sending a maintenance message creates it.")
         changes_lay.addWidget(self.changes_view, 1)
         self.tabs.addTab(changes_page, "Changes")
         # --- Tests tab ---
@@ -12925,7 +13049,7 @@ class MaintenanceWindow(QWidget):
         # models), and running it EXECUTES that code on this PC.
         # Until now the tab never said so.
         self.tests_exec_label = QLabel(
-            "Running tests runs the candidate's code on this PC — "
+            "Running tests runs the candidate's code on this PC: "
             "the suite is the candidate's own code, written by the "
             "cloud maintenance models. It is not a read-only check.")
         self.tests_exec_label.setObjectName("muted")
@@ -13050,7 +13174,7 @@ class MaintenanceWindow(QWidget):
             if message.get("reviewer"):
                 who = f"REVIEWER · {message['reviewer']}"
             blocks.append(f"{who}\n{body}")
-        self.transcript.setPlainText("\n\n———\n\n".join(blocks))
+        self.transcript.setPlainText("\n\n---\n\n".join(blocks))
         bar = self.transcript.verticalScrollBar()
         bar.setValue(bar.maximum())
 
@@ -13059,7 +13183,7 @@ class MaintenanceWindow(QWidget):
         if not work.is_dir():
             self._changes = []
             self.changes_view.setPlainText(
-                "No work copy yet — sending a maintenance message "
+                "No work copy yet: sending a maintenance message "
                 "creates it under the app data folder.")
             return
         try:
@@ -13071,11 +13195,11 @@ class MaintenanceWindow(QWidget):
         if self.last_test_ok and signature != self._tested_signature:
             self.last_test_ok = False
             self.test_status.setText(
-                "Changes landed after the passing run — verification "
+                "Changes landed after the passing run. Verification "
                 "is stale; run it again before building a candidate.")
         if not self._changes:
             self.changes_view.setPlainText(
-                "The work copy matches the live app — no changes yet.")
+                "The work copy matches the live app. No changes yet.")
             return
         protected = {c["path"] for c in
                      self_maint_mod.protected_changes(self._changes)}
@@ -13083,7 +13207,7 @@ class MaintenanceWindow(QWidget):
         for change in self._changes:
             line = f"{change['status'].upper():9s} {change['path']}"
             if change["path"] in protected:
-                line += "   ⚠ PROTECTED — separate acknowledgement required"
+                line += "   ⚠ PROTECTED · separate acknowledgement required"
             lines.append(line)
         self.changes_view.setPlainText("\n".join(lines))
 
@@ -13153,7 +13277,7 @@ class MaintenanceWindow(QWidget):
         # log at the moment a candidate test run starts.
         self._owner.log(
             "Maintenance verification: running the candidate's test "
-            "suite EXECUTES the candidate's code on this PC — it is "
+            "suite EXECUTES the candidate's code on this PC. It is "
             "not a read-only check.")
         self.last_test_ok = None
         self.test_status.setText("Running the full suite in the work copy…")
@@ -13177,9 +13301,9 @@ class MaintenanceWindow(QWidget):
         except Exception:
             self._tested_signature = None
         self.test_status.setText(
-            "Verification PASSED — a candidate update may be built."
+            "Verification PASSED. A candidate update may be built."
             if ok else
-            "Verification FAILED — fix the work copy and run it again. "
+            "Verification FAILED. Fix the work copy and run it again. "
             "No candidate can be built from failing changes.")
         self.refresh_changes()
 
@@ -13189,7 +13313,7 @@ class MaintenanceWindow(QWidget):
         if self.last_test_ok is not True:
             QMessageBox.warning(
                 self, "Build candidate update",
-                "Run the full verification first — a candidate is "
+                "Run the full verification first. A candidate is "
                 "only built from changes whose suite passed.")
             return None
         work = self.worktree_path()
@@ -13236,7 +13360,7 @@ class MaintenanceWindow(QWidget):
             QMessageBox.warning(
                 self, "Install candidate",
                 "This candidate changes protected files. Tick the "
-                "acknowledgement first — those are the files that "
+                "acknowledgement first. Those are the files that "
                 "guard your seats, permissions, keys, updater, and "
                 "the test evidence itself.")
             return
@@ -13246,14 +13370,14 @@ class MaintenanceWindow(QWidget):
         owner = self._owner
         if owner.worker is not None and owner.worker.isRunning():
             self.provider_status.setText(
-                "A maintenance turn is running — stop it before closing.")
+                "A maintenance turn is running. Stop it before closing.")
             event.ignore()
             return
         if (self._test_thread is not None and self._test_thread.isRunning()) or \
                 (self._provider_thread is not None
                  and self._provider_thread.isRunning()):
             self.provider_status.setText(
-                "A check is still running — wait for it before closing.")
+                "A check is still running. Wait for it before closing.")
             event.ignore()
             return
         if getattr(owner, "_self_maintenance_active", False):
@@ -13272,7 +13396,7 @@ class DeckLinkDialog(QDialog):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.setWindowTitle("Phone deck — scan to connect")
+        self.setWindowTitle("Phone deck · scan to connect")
         lay = QVBoxLayout(self); lay.setContentsMargins(18, 16, 18, 16); lay.setSpacing(10)
         head = QLabel("Scan with your phone to open the deck:")
         lay.addWidget(head)
@@ -13292,7 +13416,7 @@ class DeckLinkDialog(QDialog):
             # Never an empty box: say so in the window itself.
             self.qr_label.setPixmap(QPixmap())
             self.qr_label.setText(
-                "QR code unavailable —\ntype the address below into your phone.")
+                "QR code unavailable.\nType the address below into your phone.")
         self.url_label.setText(url)
 
 
@@ -13317,7 +13441,7 @@ class WelcomeDialog(QDialog):
         head.setStyleSheet("font-size:18px; font-weight:700;")
         lay.addWidget(head)
         blurb = QLabel(
-            "A fully local AI coding agent for Linux — free, no "
+            "A fully local AI coding agent for Linux. Free, no "
             "subscription, no account. Your code never leaves "
             "your machine.\n\n"
             "If Code Forge helps you, you can support its "
@@ -13331,7 +13455,7 @@ class WelcomeDialog(QDialog):
         else:
             # Never an empty box: say so in the window itself.
             self.qr_label.setText(
-                "QR code unavailable —\nuse the button or the link below.")
+                "QR code unavailable.\nUse the button or the link below.")
         lay.addWidget(self.qr_label)
         self.url_label = QLabel(
             f"Cash App: {DONATE_CASHTAG}  ·  {DONATE_URL}")
@@ -13378,7 +13502,7 @@ class TemplatesWindow(QWidget):
     def __init__(self, owner):
         super().__init__(owner, Qt.Window)
         self._owner = owner
-        self.setWindowTitle("Templates — Code Forge")
+        self.setWindowTitle("Templates · Code Forge")
         self.resize(680, 440)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         lay = QVBoxLayout(self)
@@ -13392,8 +13516,8 @@ class TemplatesWindow(QWidget):
         blurb = QLabel(
             "Start a new project from a template that ships with "
             "Code Forge. The template's files are copied into a "
-            "fresh project folder — the template itself is never "
-            "changed — and the project opens like any other.")
+            "fresh project folder. The template itself is never "
+            "changed, and the project opens like any other.")
         blurb.setObjectName("muted"); blurb.setWordWrap(True)
         lay.addWidget(blurb)
         self.rows_list = QListWidget()
@@ -13425,7 +13549,7 @@ class TemplatesWindow(QWidget):
         if not self._entries:
             self.rows_list.addItem(QListWidgetItem(
                 "No templates on the shelf. Templates live in the "
-                "app's templates/ folder — one folder per template, "
+                "app's templates/ folder. One folder per template, "
                 "with a template.json manifest."))
         if self._entries:
             self.rows_list.setCurrentRow(0)
@@ -13502,7 +13626,7 @@ class TestingWindow(QWidget):
         self._command_dirty = False
         self._filled_workspace = None
         self.command_source = None
-        self.setWindowTitle("Testing — Code Forge")
+        self.setWindowTitle("Testing · Code Forge")
         self.resize(760, 560)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         lay = QVBoxLayout(self)
@@ -13518,7 +13642,7 @@ class TestingWindow(QWidget):
             overflow_actions=[("Refresh", self.refresh)])
         lay.addWidget(self.header)
         blurb = QLabel(
-            "Watch the project's tests run — output streams here "
+            "Watch the project's tests run. Output streams here "
             "live, as it happens, and every finished run stays in "
             "the session history below with its verdict. Runs "
             "started from the Run window stream here too: there is "
@@ -13541,13 +13665,13 @@ class TestingWindow(QWidget):
         self.test_run_btn = QPushButton("▶ Run tests")
         self.test_run_btn.setObjectName("primary")
         self.test_run_btn.setToolTip(
-            "Run the test command in the project folder — output "
+            "Run the test command in the project folder. Output "
             "streams here and in the Run window")
         self.test_run_btn.clicked.connect(self._run_tests)
         cmd_row.addWidget(self.test_run_btn)
         self.test_stop_btn = QPushButton("■ Stop")
         self.test_stop_btn.setToolTip(
-            "Stop the run — kills the whole process group, "
+            "Stop the run. Kills the whole process group, "
             "children included")
         self.test_stop_btn.setEnabled(False)
         self.test_stop_btn.clicked.connect(owner.stop_run)
@@ -13575,7 +13699,7 @@ class TestingWindow(QWidget):
         self.test_history_list = QListWidget()
         self.test_history_list.setMaximumHeight(140)
         self.test_history_list.setToolTip(
-            "Runs finished this session — command, the runner's "
+            "Runs finished this session: command, the runner's "
             "own verdict (or the exit code), and how long they took")
         lay.addWidget(self.test_history_list)
         self._timer = QTimer(self)
@@ -13619,15 +13743,15 @@ class TestingWindow(QWidget):
 
     def _update_source_label(self, source):
         if source == "project":
-            text = ("Test command — from this project's "
+            text = ("Test command: from this project's "
                     ".forge/verify.json, the same checks the agent "
                     "verifies with. Edit the field to run something "
                     "else once; the file itself is not changed.")
         elif source == "settings":
-            text = "Test command — from Agent settings (verify_commands)."
+            text = "Test command: from Agent settings (verify_commands)."
         else:
             text = ("No test command is configured for this project "
-                    "yet. Type one and press Run tests — it is saved "
+                    "yet. Type one and press Run tests. It is saved "
                     "as the default in Agent settings.")
         self.test_source_label.setText(text)
 
@@ -13686,7 +13810,7 @@ class TestingWindow(QWidget):
     def _settled(self, record):
         if record is not None:
             verdict = testview_mod.run_verdict(record)
-            self._append_output(f"— {verdict}")
+            self._append_output(f"- {verdict}")
             self.test_status_label.setText(verdict)
             self._render_history()
         self._sync_controls()
@@ -13721,7 +13845,7 @@ class ParallelDiffDialog(QDialog):
         super().__init__(owner)
         self._owner = owner
         self._job = job
-        self.setWindowTitle("Parallel job — diff")
+        self.setWindowTitle("Parallel job · diff")
         self.resize(820, 560)
         lay = QVBoxLayout(self)
         head = QLabel(f"{job['task'][:100]}  ·  {job['model']}")
@@ -13774,7 +13898,7 @@ class ParallelDispatchDialog(QDialog):
         self.resize(640, 560)
         lay = QVBoxLayout(self)
         note = QLabel(
-            "A code job works in its own git copy of the project — "
+            "A code job works in its own git copy of the project: "
             "it cannot touch your real files, and its changes land "
             "only if you approve the merge. A read-only job answers "
             "a question using reading tools only. Inside a job, "
@@ -13904,7 +14028,7 @@ class MissionControlWindow(QWidget):
     def __init__(self, owner):
         super().__init__(owner, Qt.Window)
         self._owner = owner
-        self.setWindowTitle("Mission Control — Code Forge")
+        self.setWindowTitle("Mission Control · Code Forge")
         self.resize(760, 480)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         lay = QVBoxLayout(self)
@@ -13915,7 +14039,7 @@ class MissionControlWindow(QWidget):
         blurb = QLabel(
             "Every turn the Forge is running, across conversations. "
             "Approvals surface one gate at a time, labelled with the "
-            "conversation that asked — on the desktop and the phone "
+            "conversation that asked. On the desktop and the phone "
             "deck alike. Parallel turns share the one Ollama, so "
             "they trade speed for company.")
         blurb.setObjectName("muted"); blurb.setWordWrap(True)
@@ -14015,7 +14139,7 @@ class MissionControlWindow(QWidget):
             self.rows_list.addItem(QListWidgetItem(entry["line"]))
         if not rows:
             self.rows_list.addItem(QListWidgetItem(
-                "Nothing running. Turns you start appear here — "
+                "Nothing running. Turns you start appear here: "
                 "with Parallel turns above 1, a turn you switch "
                 "away from keeps working and is watched from here."))
         target = 0
@@ -14081,7 +14205,7 @@ class MissionControlWindow(QWidget):
             self.jobs_list.addItem(QListWidgetItem(entry["line"]))
         if not rows:
             self.jobs_list.addItem(QListWidgetItem(
-                "No parallel jobs. Start one with New job… — it "
+                "No parallel jobs. Start one with New job… It "
                 "works in an isolated copy of the project."))
         target = 0
         for i, entry in enumerate(rows):
@@ -14194,7 +14318,7 @@ class InboxWindow(QWidget):
     def __init__(self, owner):
         super().__init__(owner, Qt.Window)
         self._owner = owner
-        self.setWindowTitle("Inbox — Code Forge")
+        self.setWindowTitle("Inbox · Code Forge")
         self.resize(760, 560)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         lay = QVBoxLayout(self)
@@ -14204,7 +14328,7 @@ class InboxWindow(QWidget):
         lay.addWidget(title)
         blurb = QLabel(
             "What needs attention, what's running, and what's ready "
-            "to merge — across every project. Dismissing a session "
+            "to merge, across every project. Dismissing a session "
             "doesn't archive it and doesn't stop it: it waits in "
             "Done and comes back on new activity. Mark as Done "
             "closes it for good (the conversation itself is never "
@@ -14480,7 +14604,7 @@ class ProviderChatWindow(QWidget):
     def __init__(self, owner):
         super().__init__(owner, Qt.Window)
         self._owner = owner
-        self.setWindowTitle("Provider chat — Code Forge")
+        self.setWindowTitle("Provider chat · Code Forge")
         self.resize(720, 560)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         self.messages = []
@@ -14499,7 +14623,7 @@ class ProviderChatWindow(QWidget):
         lay.addWidget(self.header)
         blurb = QLabel(
             "Talk with a hosted model (Groq / Gemini / EXAONE) while the "
-            "local agent works on the bench. Conversation only — "
+            "local agent works on the bench. Conversation only: "
             "this chat has no tools and runs nothing, the bench "
             "keeps working untouched, and this conversation is "
             "never saved into your project chats.")
@@ -14517,7 +14641,7 @@ class ProviderChatWindow(QWidget):
         self.transcript.setReadOnly(True)
         self.transcript.setMaximumBlockCount(run_mod.MAX_OUTPUT_LINES)
         self.transcript.setPlaceholderText(
-            "Nothing yet — pick a hosted model and say hello.")
+            "Nothing yet. Pick a hosted model and say hello.")
         lay.addWidget(self.transcript, 1)
         pick_row = QHBoxLayout()
         pick_row.addWidget(QLabel("Provider"))
@@ -14533,7 +14657,7 @@ class ProviderChatWindow(QWidget):
         self.input = QPlainTextEdit()
         self.input.setMaximumHeight(96)
         self.input.setPlaceholderText(
-            "Ask the hosted model about the work — or anything else…")
+            "Ask the hosted model about the work, or anything else…")
         lay.addWidget(self.input)
         send_row = QHBoxLayout()
         self.send_btn = QPushButton("Send")
@@ -14584,7 +14708,7 @@ class ProviderChatWindow(QWidget):
             self.setup_label.setText(
                 "No cloud provider is set up yet. Add a Groq, Gemini "
                 "or EXAONE API key in Customize → Providers, then "
-                "reopen this window — the hosted models will be "
+                "reopen this window. The hosted models will be "
                 "listed here. Your local models and the bench are "
                 "unaffected.")
             self.setup_label.setVisible(True)
@@ -14633,7 +14757,7 @@ class ProviderChatWindow(QWidget):
             if not models:
                 self.setup_label.setText(
                     f"No {providers_mod.PROVIDER_LABELS[provider]} "
-                    "models are available — add one to the model "
+                    "models are available. Add one to the model "
                     "registry in Customize → Providers.")
                 self.setup_label.setVisible(True)
         current = self.model_combo.currentText()
@@ -14773,7 +14897,7 @@ class TimelineWindow(QWidget):
     def __init__(self, owner):
         super().__init__(owner, Qt.Window)
         self._owner = owner
-        self.setWindowTitle("Turn Timeline — Code Forge")
+        self.setWindowTitle("Turn Timeline · Code Forge")
         self.resize(820, 520)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         lay = QVBoxLayout(self)
@@ -14817,7 +14941,7 @@ class TimelineWindow(QWidget):
         self.rows_list.clear()
         if not data["entries"]:
             head = (
-                f"{data['title']} — no turns recorded for this "
+                f"{data['title']}. No turns recorded for this "
                 "conversation in this session yet. Turns appear "
                 "here as they finish; the timeline is built from "
                 "the event log's own turn records.")
@@ -14827,22 +14951,22 @@ class TimelineWindow(QWidget):
                 head += "\n" + presend
             self.head.setText(head)
             self.rows_list.addItem(QListWidgetItem(
-                "Nothing recorded yet — send a message and its "
+                "Nothing recorded yet. Send a message and its "
                 "turn lands here with its time and estimated "
                 "tokens."))
             return
         lines = [
-            f"{data['title']} — {totals['turns']} turn(s) this "
+            f"{data['title']} · {totals['turns']} turn(s) this "
             f"session · ≈{totals['total_tokens']:,} estimated "
             f"tokens (≈{totals['prompt_tokens']:,} in / "
             f"≈{totals['eval_tokens']:,} out) · "
             f"{totals['seconds']:,.1f}s of generation · "
             f"{totals['generations']} generation(s)"]
         budget_line = (
-            f"Soft budget: {data['budget']:,} estimated tokens — "
+            f"Soft budget: {data['budget']:,} estimated tokens: "
             f"≈{totals['total_tokens']:,} used")
         if data["over"]:
-            budget_line += " — OVER the soft budget (a flag only; nothing is blocked)"
+            budget_line += ". OVER the soft budget (a flag only; nothing is blocked)"
         lines.append(budget_line)
         if acceptance:
             lines.append(acceptance)
@@ -15020,7 +15144,7 @@ class CanvasBoardView(QWidget):
                        Qt.TextWordWrap,
                        "The board is empty. Add an artifact frame "
                        "linked to a project file, a note card, or "
-                       "a variant — frames reference files, they "
+                       "a variant. Frames reference files, they "
                        "never copy them.")
             return
         for frame in frames:
@@ -15100,7 +15224,7 @@ class DesignCanvasWindow(QWidget):
         self.board = design_canvas_mod.empty_board()
         self._loaded_workspace = None
         self.selected_id = None
-        self.setWindowTitle("Design Canvas — Code Forge")
+        self.setWindowTitle("Design Canvas · Code Forge")
         self.resize(1020, 640)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
         lay = QVBoxLayout(self)
@@ -15115,7 +15239,7 @@ class DesignCanvasWindow(QWidget):
         lay.addWidget(self.header)
         blurb = QLabel(
             "Lay the project's surfaces out side by side. Frames "
-            "LINK to files — the file stays the one truth — and "
+            "LINK to files. The file stays the one truth, and "
             "variants record what they descend from. Drag to "
             "move, drag a selected frame's corner to resize, "
             "drag the board to pan, scroll to zoom.")
@@ -15183,7 +15307,7 @@ class DesignCanvasWindow(QWidget):
         self.viewport_combo.addItems(
             ["(viewport)"] + list(design_canvas_mod.VIEWPORTS))
         self.viewport_combo.setToolTip(
-            "A variant's viewport preset label — a label only; "
+            "A variant's viewport preset label. A label only; "
             "no source is rewritten to match it")
         self.viewport_combo.currentIndexChanged.connect(
             self._labels_changed)
@@ -15192,7 +15316,7 @@ class DesignCanvasWindow(QWidget):
         self.state_combo.addItems(
             ["(state)"] + list(design_canvas_mod.STATES))
         self.state_combo.setToolTip(
-            "A variant's interaction-state label — the state the "
+            "A variant's interaction-state label. The state the "
             "variant is FOR; recorded, not edited into source")
         self.state_combo.currentIndexChanged.connect(
             self._labels_changed)
@@ -15283,7 +15407,7 @@ class DesignCanvasWindow(QWidget):
                 "No frame selected. Click a frame on the board "
                 "or in the list.")
             self.status_label.setText(
-                f"{project} — {count} frame(s) on the board.")
+                f"{project} · {count} frame(s) on the board.")
         else:
             bits = [f"{frame['kind']} · "
                     f"({frame['x']}, {frame['y']}) · "
@@ -15347,7 +15471,7 @@ class DesignCanvasWindow(QWidget):
             rel = chosen.relative_to(workspace.resolve())
         except ValueError:
             self.status_label.setText(
-                "That file is outside this project — a frame "
+                "That file is outside this project. A frame "
                 "links to a file inside the project it belongs to.")
             return
         frame = design_canvas_mod.add_frame(
@@ -15372,14 +15496,14 @@ class DesignCanvasWindow(QWidget):
         source = self._selected()
         if source is None:
             self.status_label.setText(
-                "Select a frame first — a variant descends from "
+                "Select a frame first. A variant descends from "
                 "the selected frame.")
             return
         frame = design_canvas_mod.duplicate_as_variant(
             self.board, source["id"])
         self.selected_id = frame["id"]
         self._changed(
-            "Variant created — it names its source; edit its "
+            "Variant created. It names its source; edit its "
             "labels to say what it is for.")
 
     def rename_selected(self):
@@ -15412,7 +15536,7 @@ class DesignCanvasWindow(QWidget):
             return
         design_canvas_mod.delete_frame(self.board, frame["id"])
         self.selected_id = None
-        self._changed("Frame deleted — links and lineage that "
+        self._changed("Frame deleted. Links and lineage that "
                       "pointed at it were cleared, not left dangling.")
 
     def front_selected(self):
@@ -15439,7 +15563,7 @@ class DesignCanvasWindow(QWidget):
             self.board, frame["id"],
             viewport="" if viewport.startswith("(") else viewport,
             state="" if state.startswith("(") else state)
-        self._changed("Variant labels saved (labels only — no "
+        self._changed("Variant labels saved (labels only: no "
                       "source was rewritten).")
 
     def _reset_view(self):
@@ -15451,7 +15575,7 @@ class DesignCanvasWindow(QWidget):
         frame = self._selected()
         if frame is None:
             self.status_label.setText(
-                "Select a frame first — the bench turn is "
+                "Select a frame first. The bench turn is "
                 "composed from the selected frame.")
             return
         ok, message = self._owner.send_canvas_frame_to_bench(
@@ -15461,7 +15585,7 @@ class DesignCanvasWindow(QWidget):
     def file_summary_as_artifact(self):
         workspace = self._owner.workspace
         project = Path(workspace).name
-        title = f"Design canvas — {project}"
+        title = f"Design canvas: {project}"
         text = design_canvas_mod.summary_text(self.board, project)
         design_canvas_mod.save_summary(workspace, self.board, project)
         self._owner._record_artifact("design", title, text)
@@ -15474,12 +15598,12 @@ class DesignCanvasWindow(QWidget):
         if filed:
             self.status_label.setText(
                 "Summary filed as a design artifact "
-                f"({entries[0].get('file', '')}) — the same text "
+                f"({entries[0].get('file', '')}). The same text "
                 "is at .forge/design/canvas-summary.md.")
         else:
             self.status_label.setText(
                 "The summary is at .forge/design/canvas-summary.md; "
-                "filing it as an artifact failed — see the log.")
+                "filing it as an artifact failed. See the log.")
 
 
 QUOTE_MAX_CHARS = 600
@@ -15517,7 +15641,7 @@ class ExportChatDialog(QDialog):
         self._title = title or "Conversation"
         self._model = model
         self._project = project
-        self.setWindowTitle("Export chat — Code Forge")
+        self.setWindowTitle("Export chat · Code Forge")
         self.resize(520, 340)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 12, 16, 12); lay.setSpacing(8)
@@ -15585,7 +15709,7 @@ class ExportChatDialog(QDialog):
                          "export will be text-only.")
         elif self._format() == "md":
             notes.append("Markdown puts the images in a "
-                         "“<name>_assets” folder beside the file — "
+                         "“<name>_assets” folder beside the file: "
                          "keep them together.")
         else:
             notes.append("Images are embedded in the exported file.")
@@ -15615,7 +15739,7 @@ class ExportChatDialog(QDialog):
         if result.get("embedded"):
             bits.append(f"{result['embedded']} image(s) embedded")
         if result.get("missing"):
-            bits.append(f"{result['missing']} image(s) not found — "
+            bits.append(f"{result['missing']} image(s) not found: "
                         "marked in the export")
         if result.get("omitted"):
             bits.append(f"{result['omitted']} image(s) left out")
@@ -15637,7 +15761,7 @@ class ConverterWindow(QWidget):
         self._path = None
         self.resize(560, 520)
         self.setStyleSheet(f"background:{TOKENS['surface_base']};")
-        self.setWindowTitle("Converter — Code Forge")
+        self.setWindowTitle("Converter · Code Forge")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 12); lay.setSpacing(8)
         self.header = build_window_header(self, self.windowTitle())
@@ -16197,7 +16321,7 @@ class ForgeWindow(QMainWindow):
         # window never writes a log file by itself; log() forwards
         # to it only when one is present.
         self.debug_logger = debug_logger
-        self.setWindowTitle(f"CODE FORGE v{APP_VERSION} — Linux Forge Agent")
+        self.setWindowTitle(f"CODE FORGE v{APP_VERSION} · Linux Forge Agent")
         # F1 (U5): the bench remembers its geometry. The settings
         # object is injectable so tests can point at a scratch
         # store instead of the real user settings; production
@@ -16358,7 +16482,11 @@ class ForgeWindow(QMainWindow):
         # problems — the recipes dialog reports them at every open,
         # and the log should carry each distinct one exactly once.
         self._recipe_problems_seen: set = set()
-        self.all_skills = scan_skills(self.app_skills_dir)
+        # F10 (U19): skills that failed to LOAD ride alongside the
+        # survivors — scan_skills_report names them, and the
+        # Customize window's Skills lane shows them.
+        self.all_skills, self._broken_skills = scan_skills_report(
+            self.app_skills_dir)
         self.macros = macros_mod.scan_macros(COMMANDS_DIR)
         self.plugin_ctx = PluginContext(
             workspace=self.workspace, base_url=self.client.base_url,
@@ -16519,7 +16647,7 @@ class ForgeWindow(QMainWindow):
         self._pending_artifact_comment = None
         self._build_ui()
         if self._vault_plaintext_left:
-            self.log("⚠ Vault migration incomplete — these keys are "
+            self.log("⚠ Vault migration incomplete. These keys are "
                      "still in plain text in connectors.json: "
                      + ", ".join(self._vault_plaintext_left)
                      + ". They keep working, but they are NOT "
@@ -16691,7 +16819,7 @@ class ForgeWindow(QMainWindow):
             self.save_settings()
             if hasattr(self, "activity"):
                 for pid in new_pids:
-                    self.log(f"New plugin '{pid}' appeared — left DISABLED until you enable it in Customize.")
+                    self.log(f"New plugin '{pid}' appeared. Left DISABLED until you enable it in Customize.")
         # S6 (audit S1-25c): skills mirror plugins — a skill whose
         # name has never been seen starts DISABLED; the first
         # recorded history is the skills already present (an existing
@@ -16727,7 +16855,7 @@ class ForgeWindow(QMainWindow):
                 self.save_settings()
                 if hasattr(self, "activity"):
                     for name in new_skills:
-                        self.log(f"New skill '{name}' appeared — left DISABLED until you enable it in Customize.")
+                        self.log(f"New skill '{name}' appeared. Left DISABLED until you enable it in Customize.")
         # C16 (audit S1-25/W2): content-fingerprint trust for
         # skills — the mirror of the plugin gate in load_plugins,
         # placed here because skills are READ, not executed: the
@@ -16786,14 +16914,15 @@ class ForgeWindow(QMainWindow):
             self._refresh_panels()
 
     def rescan_extensions(self):
-        self.all_skills = scan_skills(self.app_skills_dir)
+        self.all_skills, self._broken_skills = scan_skills_report(
+            self.app_skills_dir)
         self.macros = macros_mod.scan_macros(COMMANDS_DIR)
         self.all_plugins, self._full_registry = (
             self._load_plugins_with_fingerprints())
         self.reload_extensions()
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = self.build_system_prompt()
-        self.log(f"Extensions rescanned — {len(self.all_skills)} skill(s), {len(self.all_plugins)} plugin(s) on disk.")
+        self.log(f"Extensions rescanned: {len(self.all_skills)} skill(s), {len(self.all_plugins)} plugin(s) on disk.")
         # Note 22: skills/plugins saved inside the project folder are
         # project-only — detected and reported, never loaded as globals.
         self._project_local = create_mod.find_project_local(
@@ -16801,7 +16930,7 @@ class ForgeWindow(QMainWindow):
         if self._project_local:
             names = ", ".join(f"{i['kind']} '{i['name']}'" for i in self._project_local)
             self.log(f"⚠ {len(self._project_local)} extension(s) found INSIDE the project "
-                     f"folder ({names}) — project-only until housed globally "
+                     f"folder ({names}). Project-only until housed globally "
                      "(Customize → “House project skills/plugins globally”).")
 
 
@@ -16929,14 +17058,14 @@ class ForgeWindow(QMainWindow):
         if (self.worker and self.worker.isRunning()) or \
                 (self._fold_thread is not None
                  and self._fold_thread.isRunning()):
-            self.log("Maintenance refused — a turn is running. "
+            self.log("Maintenance refused. A turn is running. "
                      "Stop it first.")
             return False
         # Item #64: a background turn is still a turn — the room's
         # swap (workspace, extension dirs, disabled sets) is
         # window-global and must never land under one.
         if self._live_streams():
-            self.log("Maintenance refused — a background turn is "
+            self.log("Maintenance refused. A background turn is "
                      "running. Stop it first (Mission Control).")
             return False
         # Item #54: the maintenance room swaps conversations itself —
@@ -17031,7 +17160,7 @@ class ForgeWindow(QMainWindow):
         self.refresh_projects()
         if getattr(self, "run_win", None) is not None:
             self.run_win.refresh()
-        self.log(f"🛠 Forge maintenance ACTIVE — work copy: {worktree}. "
+        self.log(f"🛠 Forge maintenance ACTIVE · work copy: {worktree}. "
                  "Changes here are candidates, never live, until you "
                  "install them from the Maintenance window.")
         if getattr(self, "maintenance_win", None) is not None:
@@ -17050,7 +17179,7 @@ class ForgeWindow(QMainWindow):
         if (self.worker and self.worker.isRunning()) or \
                 (self._fold_thread is not None
                  and self._fold_thread.isRunning()):
-            self.log("Maintenance stays active — a turn is running. "
+            self.log("Maintenance stays active. A turn is running. "
                      "Stop it first.")
             return False
         self.persist_conversation()
@@ -17091,7 +17220,7 @@ class ForgeWindow(QMainWindow):
         if getattr(self, "run_win", None) is not None:
             self.run_win.refresh()
         self._self_maintenance_prior = None
-        self.log("🛠 Forge maintenance off — back to your session.")
+        self.log("🛠 Forge maintenance off. Back to your session.")
         if getattr(self, "maintenance_win", None) is not None:
             self.maintenance_win.refresh_models()
             self.maintenance_win.refresh_transcript()
@@ -17168,7 +17297,7 @@ class ForgeWindow(QMainWindow):
                     set(self.settings.get("disabled_plugins", [])) | {pid})
                 self.save_settings()
                 message += (f" Plugin '{pid}' was enabled, so the update has switched it "
-                            "OFF — re-enable it in Customize to run the new code.")
+                            "OFF. Re-enable it in Customize to run the new code.")
             self.extension_created.emit(message.split(" — ")[0])
         return message
 
@@ -17187,7 +17316,7 @@ class ForgeWindow(QMainWindow):
         if not lines:
             lines.append("Nothing to house.")
         report = "\n".join(lines)
-        self.log("🏠 Housing project-local extensions — " + report.replace("\n", " "))
+        self.log("🏠 Housing project-local extensions: " + report.replace("\n", " "))
         self.rescan_extensions()
         return report
 
@@ -17220,7 +17349,8 @@ class ForgeWindow(QMainWindow):
                                  fingerprint_changed_skills=set(self._settings_list(
                                      self.settings, "fingerprint_changed_skills")),
                                  fingerprint_changed_plugins=set(self._settings_list(
-                                     self.settings, "fingerprint_changed_plugins")))
+                                     self.settings, "fingerprint_changed_plugins")),
+                                 broken_skills=getattr(self, "_broken_skills", []))
         if dialog.exec() == QDialog.Accepted:
             disabled_skills, disabled_plugins, config, rules, skribe_on, disabled_tools = dialog.values()
             self.settings["permission_rules"] = rules
@@ -17267,7 +17397,7 @@ class ForgeWindow(QMainWindow):
             plaintext_left = vault_mod.plaintext_secret_keys(APP_DIR)
             if plaintext_left or vault_extract_failed \
                     or dialog._secret_vault_failures:
-                self.log("⚠ Vault failed — keys still in plain text "
+                self.log("⚠ Vault failed. Keys still in plain text "
                          "in connectors.json: "
                          + ", ".join(plaintext_left or
                                      dialog._secret_vault_failures)
@@ -17275,7 +17405,7 @@ class ForgeWindow(QMainWindow):
                          "protected until a vault write succeeds.")
                 QMessageBox.warning(
                     self, "Secrets vault",
-                    "Vault failed — keys still in plain text in "
+                    "Vault failed. Keys still in plain text in "
                     "connectors.json. They keep working, but they "
                     "are not protected until a vault write succeeds.")
             # Item #69: new keys/enables/registry reach the live
@@ -17311,7 +17441,7 @@ class ForgeWindow(QMainWindow):
                 self.reload_extensions()
             if self.messages and self.messages[0].get("role") == "system":
                 self.messages[0]["content"] = self.build_system_prompt()
-            self.log("Customize saved — skills/plugins/connectors updated.")
+            self.log("Customize saved. Skills/plugins/connectors updated.")
         # Window rule: a New…/Edit… button in the dialog asked for a
         # skill/plugin editor window. It opens now that the modal
         # dialog is closed, so the window is fully usable; its saves
@@ -17480,12 +17610,12 @@ class ForgeWindow(QMainWindow):
                 store[workspace] = entry
             entry[kind] = digest
             self.save_settings()
-            self.log(f"Project {label} trusted for {workspace} — "
-                     "they will run automatically until their "
+            self.log(f"Project {label} trusted for {workspace}. "
+                     "They will run automatically until their "
                      "content changes.")
             return True
         denials.add(denial_key)
-        self.log(f"Project {label} skipped for {workspace} — not "
+        self.log(f"Project {label} skipped for {workspace}. Not "
                  "trusted, so they did not run. They will be asked "
                  "about again only if their content changes or "
                  "Forge restarts.")
@@ -17501,14 +17631,14 @@ class ForgeWindow(QMainWindow):
         content hash, not as a permission rule."""
         label = "hooks" if kind == "hooks" else "verify commands"
         listing = "\n".join(str(c) for c in commands)
-        target = f"{len(commands)} project {label} — {Path(str(self.workspace)).name}"
+        target = f"{len(commands)} project {label} · {Path(str(self.workspace)).name}"
         description = (
             f"This project wants Forge to run these shell commands "
             f"automatically as its {label} (on session start, around "
-            f"tool calls, and after edits — without asking each "
+            f"tool calls, and after edits, without asking each "
             f"time):\n\n{listing}\n\n"
             f"Approve only if you trust this project. Approving "
-            f"remembers this exact content for this project — any "
+            f"remembers this exact content for this project. Any "
             f"later edit asks again. Declining means they do not "
             f"run.")
         dialog = ApprovalDialog(self, "CODE FORGE shell",
@@ -17672,12 +17802,12 @@ class ForgeWindow(QMainWindow):
         tl.addWidget(self.hamburger_btn)
         self.menu_btn = QPushButton("Menu")
         self.menu_btn.setObjectName("topbarBtn")
-        self.menu_btn.setToolTip("Actions — new chat, settings, customize, schedule, phone deck, rescan, update, panels")
+        self.menu_btn.setToolTip("Actions: new chat, settings, customize, schedule, phone deck, rescan, update, panels")
         self._build_menu()
         tl.addWidget(self.menu_btn)
         self.view_btn = QPushButton("View")
         self.view_btn.setObjectName("topbarBtn")
-        self.view_btn.setToolTip("View — every window and panel the Forge can open, in one menu")
+        self.view_btn.setToolTip("View: every window and panel the Forge can open, in one menu")
         self._build_view_menu()
         tl.addWidget(self.view_btn)
         # Owner's UI correction (2026-11-08): the rolodex strip is
@@ -17764,6 +17894,50 @@ class ForgeWindow(QMainWindow):
         self.history_list.setContentsMargins(0, 0, 0, 0)
         self.history_scroll.setWidget(history_content)
         conv_sec.body_layout.addWidget(self.history_scroll, 1)
+        # GUIFX F6: honest loading while a search runs — the old
+        # rows stay on screen until the new ones land. FIRST of
+        # the three standing labels: the visible scroll region
+        # is only ~35 px tall at this window size, so only the
+        # top label reads — and during a search that must be
+        # "Searching…", not the stale empty state below it.
+        self._history_loading_label = QLabel("Searching…")
+        self._history_loading_label.setObjectName("muted")
+        self._history_loading_label.setVisible(False)
+        self.history_list.addWidget(self._history_loading_label)
+        # GUIFX F22 (2026-11-14): the empty state lives at the top
+        # of the list itself, so it reads where the chats would
+        # be — the rebuild loop skips it when clearing buttons.
+        self._history_empty_label = QLabel(
+            "No conversations yet. Start one with New conversation above.")
+        self._history_empty_label.setObjectName("muted")
+        self._history_empty_label.setWordWrap(True)
+        self._history_empty_label.setVisible(False)
+        self.history_list.addWidget(self._history_empty_label)
+        # GUIFX F21: the 200 cap gets its count, at the top of
+        # the list itself — NOT as a sibling under the scroll
+        # area. The section body is only 77 px tall at this
+        # window size (probed 2026-11-14: search 40 + scroll
+        # 90 minimum already exceed it, and the scroll absorbs
+        # the overflow by clipping cleanly); a non-scrolling
+        # sibling forces Qt's layout into degenerate overlap —
+        # the cap text painted over the buttons and the search
+        # box was crushed to 22 px. Inside the scroll, the body
+        # layout is exactly as it was before this build.
+        self._history_cap_label = QLabel()
+        self._history_cap_label.setObjectName("muted")
+        self._history_cap_label.setWordWrap(True)
+        self._history_cap_label.setVisible(False)
+        self.history_list.addWidget(self._history_cap_label)
+        # GUIFX F6: the search debounce — restarts on every
+        # keystroke; only the last one in a burst issues a search.
+        self._history_search_timer = QTimer(self)
+        self._history_search_timer.setSingleShot(True)
+        self._history_search_timer.setInterval(
+            _HISTORY_SEARCH_DEBOUNCE_MS)
+        self._history_search_timer.timeout.connect(
+            self._start_history_search)
+        self._history_search_token = 0
+        self._history_search_threads = {}
         sl.addWidget(conv_sec, 1)
         self.workspace_label = QLabel(); self.workspace_label.setWordWrap(True)
         self.workspace_label.setObjectName("muted"); sl.addWidget(self.workspace_label)
@@ -17810,13 +17984,13 @@ class ForgeWindow(QMainWindow):
         # the gauge stack gives back width before any label clips.
         self.ram_bar = QProgressBar(); self.ram_bar.setMinimumWidth(60); self.ram_bar.setMaximumWidth(120); self.ram_bar.setRange(0, 100)
         ram_row.addWidget(self.ram_bar)
-        self.ram_text = QLabel("—"); self.ram_text.setObjectName("muted"); ram_row.addWidget(self.ram_text)
+        self.ram_text = QLabel("-"); self.ram_text.setObjectName("muted"); ram_row.addWidget(self.ram_text)
         gauge_box.addLayout(ram_row)
         cpu_row = QHBoxLayout()
         cpu_lab = QLabel("CPU"); cpu_lab.setObjectName("stamp"); cpu_row.addWidget(cpu_lab)
         self.cpu_bar = QProgressBar(); self.cpu_bar.setMinimumWidth(60); self.cpu_bar.setMaximumWidth(120); self.cpu_bar.setRange(0, 100)
         cpu_row.addWidget(self.cpu_bar)
-        self.cpu_text = QLabel("—"); self.cpu_text.setObjectName("muted"); cpu_row.addWidget(self.cpu_text)
+        self.cpu_text = QLabel("-"); self.cpu_text.setObjectName("muted"); cpu_row.addWidget(self.cpu_text)
         gauge_box.addLayout(cpu_row)
         models_row = QHBoxLayout()
         models_lab = QLabel("MODELS"); models_lab.setObjectName("stamp"); models_row.addWidget(models_lab)
@@ -17829,7 +18003,7 @@ class ForgeWindow(QMainWindow):
         # Provider models can never appear here — the data is
         # Ollama's /api/ps, and cloud models don't live in this
         # PC's RAM at all.
-        self.models_text = QLabel("—"); self.models_text.setObjectName("muted"); models_row.addWidget(self.models_text)
+        self.models_text = QLabel("-"); self.models_text.setObjectName("muted"); models_row.addWidget(self.models_text)
         # T5 (GUIFX task list, 2026-11-12): the Light Machine
         # indicator chip. The profile is otherwise invisible (a
         # Settings checkbox only), so the gauge stack carries a
@@ -17889,24 +18063,24 @@ class ForgeWindow(QMainWindow):
         self._update_privacy_badge()
         self.mode_combo = QComboBox(); self.mode_combo.setMinimumWidth(80)
         self.mode_combo.addItems(["Code", "Plan", "Design", "Architect", "Review", "Ask", "Write", "Research"])
-        self.mode_combo.setToolTip("Permission mode — Code: full tools · Plan: read + write the plan, no building · "
+        self.mode_combo.setToolTip("Permission mode · Code: full tools · Plan: read + write the plan, no building · "
                                    "Design: mockups/prototypes (HTML/CSS/SVG/MD), no program logic · "
                                    "Architect: read + Markdown docs · Review: critique only, may write the report · "
                                    "Ask: read-only (write tools are not even offered, so requests run shorter) · "
-                                   "Write: the document workshop — read/write/copy/edit any file in the project, no commands · "
-                                   "Research: gated deep research — a plan you approve, then budgeted browsing, reports in .forge/research/")
+                                   "Write: the document workshop. Read/write/copy/edit any file in the project, no commands · "
+                                   "Research: gated deep research. A plan you approve, then budgeted browsing, reports in .forge/research/")
         saved_mode = str(self.settings.get("mode", "code")).lower()
         self.mode_combo.setCurrentText({m: m.capitalize() for m in perm_mod.MODES}.get(saved_mode, "Code"))
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
         hl.addWidget(self.mode_combo)
         self.council_check = QCheckBox("Council")
-        self.council_check.setToolTip("Council — when on for a turn, the finished work goes to the Reviewer Seat "
+        self.council_check.setToolTip("Council: when on for a turn, the finished work goes to the Reviewer Seat "
                                       "(Agent settings → Reviewer model) for one critique and the driver revises "
                                       "once. Off by default; costs one extra generation per turn.")
         self.council_check.setChecked(bool(self.settings.get("council", False)))
         self.council_check.toggled.connect(
             lambda on: (self.settings.__setitem__("council", on), self.save_settings(),
-                        self.log("Council: on — turns get one review + one revision" if on else "Council: off")))
+                        self.log("Council: on. Turns get one review + one revision" if on else "Council: off")))
         hl.addWidget(self.council_check)
         # Connection is a LIGHT, not a sentence (owner's call): orange = connected, red = not.
         self.connection = QLabel("●")
@@ -17952,7 +18126,7 @@ class ForgeWindow(QMainWindow):
         # controls — a temporary fork of the current conversation
         # for a quick question, discarded on close.
         self.side_chat_btn = QPushButton("⑂ Side chat")
-        self.side_chat_btn.setToolTip("Open a side chat — a temporary fork of this conversation "
+        self.side_chat_btn.setToolTip("Open a side chat. A temporary fork of this conversation "
                                       "for a quick question. It never saves, and closing it "
                                       "discards it: nothing merges back into the main thread.")
         self.side_chat_btn.clicked.connect(self.open_side_chat)
@@ -17964,7 +18138,7 @@ class ForgeWindow(QMainWindow):
         self.side_bar.setStyleSheet(f"QFrame{{background:{TOKENS['surface_glass_bottom']};border-top:1px solid {TOKENS['rim']};border-bottom:1px solid {TOKENS['rim']};}}")
         side_bar_lay = QHBoxLayout(self.side_bar)
         side_bar_lay.setContentsMargins(16, 4, 8, 4)
-        side_bar_label = QLabel("Side chat — temporary, closing discards it")
+        side_bar_label = QLabel("Side chat · temporary, closing discards it")
         side_bar_label.setObjectName("stamp")
         side_bar_lay.addWidget(side_bar_label)
         side_bar_lay.addStretch(1)
@@ -17984,12 +18158,22 @@ class ForgeWindow(QMainWindow):
         # window; real web links are re-opened by the handler itself.
         self.chat.setOpenLinks(False)
         self.chat.anchorClicked.connect(self._on_chat_anchor)
+        # Render-follows fix (2026-11-15): the chat bar's maximum
+        # grows after setHtml relayouts, so a setValue(maximum)
+        # taken before the layout settles lands short of the
+        # bottom. Track pinned-ness as the reader scrolls and
+        # re-pin when the range grows, so a pinned reader keeps
+        # following instead of silently stopping.
+        self._chat_follow = True
+        _chat_bar = self.chat.verticalScrollBar()
+        _chat_bar.valueChanged.connect(self._on_chat_scroll)
+        _chat_bar.rangeChanged.connect(self._on_chat_range_changed)
         self.chat.setMaximumWidth(920)
         chat_row = QWidget(); chat_layout = QHBoxLayout(chat_row)
         chat_layout.setContentsMargins(0, 0, 0, 0)
         chat_layout.addStretch(1); chat_layout.addWidget(self.chat, 3); chat_layout.addStretch(1)
         cl.addWidget(chat_row, 1)
-        self.receipt_bar = QLabel("🧾  Receipts from the shell will appear here — the model cannot write these.")
+        self.receipt_bar = QLabel("🧾  Receipts from the shell will appear here. The model cannot write these.")
         self.receipt_bar.setObjectName("stamp"); self.receipt_bar.setWordWrap(True)
         self.receipt_bar.setStyleSheet(f"padding:6px 16px;background:{TOKENS['surface_glass_bottom']};border-top:1px solid {TOKENS['rim']};")
         cl.addWidget(self.receipt_bar)
@@ -18183,7 +18367,7 @@ class ForgeWindow(QMainWindow):
         _edit_layout.setContentsMargins(10, 6, 10, 6)
         _edit_layout.setSpacing(8)
         self._edit_banner_label = QLabel(
-            "Editing your message — sending re-runs from here. Later "
+            "Editing your message: sending re-runs from here. Later "
             "messages leave this conversation (the full original is "
             "saved as a fork in your history). Files already written "
             "stay written.")
@@ -18290,10 +18474,10 @@ class ForgeWindow(QMainWindow):
         control_sec.body_layout.addWidget(self.ext_counts)
         self.watch_check = QCheckBox("Watch for AI! / AI? comments in project files")
         self.watch_check.setToolTip("When you save a file with a comment ending in AI! (do it) or AI? (answer it), "
-                                    "the Forge picks it up as a task — write in your editor, the agent works here.")
+                                    "the Forge picks it up as a task. Write in your editor, the agent works here.")
         self.watch_check.setChecked(bool(self.settings.get("watch_ai", False)))
         self.watch_check.toggled.connect(lambda on: (self.settings.__setitem__("watch_ai", on), self.save_settings(),
-                                                     self.log("AI-comment watch " + ("ON — write AI! in a file and save." if on else "off."))))
+                                                     self.log("AI-comment watch " + ("ON. Write AI! in a file and save." if on else "off."))))
         control_sec.body_layout.addWidget(self.watch_check)
         self.deck_url = QLabel("")
         self.deck_url.setWordWrap(True)
@@ -18375,29 +18559,29 @@ class ForgeWindow(QMainWindow):
         self.act_howto = menu.addAction("❓   How to use Code Forge…", self.open_how_to_use)
         self.act_howto.setToolTip("How to use Code Forge: every window, every shortcut, indexed by task")
         self.act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
-        self.act_customize = menu.addAction("⚒   Customize — skills · plugins · connectors", self.open_customize)
+        self.act_customize = menu.addAction("⚒   Customize · skills · plugins · connectors", self.open_customize)
         self.act_schedule = menu.addAction("⏰   Scheduled runs…", self.open_schedule)
         self.act_deck = menu.addAction("📱   Phone deck: OFF", self._toggle_deck)
         self.act_welcome = menu.addAction("☕   Donate / Support Code Forge…", self.show_welcome)
-        self.act_welcome.setToolTip("Code Forge is free — support its development via the owner's Cash App")
+        self.act_welcome.setToolTip("Code Forge is free. Support its development via the owner's Cash App")
         self.act_deck_qr = menu.addAction("📱   Deck QR code…", self._show_deck_link)
         self.act_deck.setToolTip("Serve a local-network phone page: watch the agent, approve from your "
-                                 "phone, send prompts. Token in the URL — shown only here.")
+                                 "phone, send prompts. Token in the URL. Shown only here.")
         self.act_rescan = menu.addAction("↻   Rescan skills & plugins", self.rescan_extensions)
-        self.act_rescan.setToolTip("Pick up skills/plugins created since launch — including ones the agent just wrote (Note 18)")
+        self.act_rescan.setToolTip("Pick up skills/plugins created since launch: including ones the agent just wrote (Note 18)")
         self.act_builder = menu.addAction("🖌   UI builder…", self.open_ui_builder)
-        self.act_builder.setToolTip("Note 13B: lay out a window visually — live preview + exportable PySide6 code")
+        self.act_builder.setToolTip("Note 13B: lay out a window visually. Live preview + exportable PySide6 code")
         self.act_snapshots = menu.addAction("📸   Snapshots…", self.open_snapshots)
-        self.act_snapshots.setToolTip("Note 14 item 1: git restore points for the current project — take one, roll back")
+        self.act_snapshots.setToolTip("Note 14 item 1: git restore points for the current project. Take one, roll back")
         self.act_checkpoints = menu.addAction("🧷   Checkpoints…", self.open_checkpoints)
-        self.act_checkpoints.setToolTip("Audit D38: shadow restore points kept OUTSIDE the project — per write step or per turn, for any project")
+        self.act_checkpoints.setToolTip("Audit D38: shadow restore points kept OUTSIDE the project. Per write step or per turn, for any project")
         self.act_bench = menu.addAction("🏁   Forge Bench…", self.open_bench)
-        self.act_bench.setToolTip("Audit D37: fifteen fixed, test-scored tasks against any installed model — the seat race, settled with numbers")
+        self.act_bench.setToolTip("Audit D37: fifteen fixed, test-scored tasks against any installed model. The seat race, settled with numbers")
         self.act_recipes = menu.addAction("📋   Recipes…", self.open_recipes)
-        self.act_recipes.setToolTip("Audit D41: parameterized prompt files from the data folder's recipes/ — run one with fresh values")
+        self.act_recipes.setToolTip("Audit D41: parameterized prompt files from the data folder's recipes/. Run one with fresh values")
         self.act_update = menu.addAction("⬆   Update & restart…", self.apply_update)
         self.act_maintenance = menu.addAction("🛠   Forge maintenance…", self.open_maintenance_window)
-        self.act_maintenance.setToolTip("Item #69: the dedicated cloud self-maintenance room — Groq/Gemini/EXAONE repair Forge itself in a guarded work copy; you approve any install")
+        self.act_maintenance.setToolTip("Item #69: the dedicated cloud self-maintenance room. Groq/Gemini/EXAONE repair Forge itself in a guarded work copy; you approve any install")
         menu.addSeparator()
         self.act_dock_receipts = menu.addAction(
             "🧾   Receipts panel",
@@ -18420,47 +18604,47 @@ class ForgeWindow(QMainWindow):
             "▶   Run window", self.open_run_window)
         self.act_debug_window = menu.addAction(
             "🐞   Debug window", self.open_debug_window)
-        self.act_debug_window.setToolTip("Run a Python file under the debugger: breakpoints, step, inspect — the agent's debug tools drive the same session")
+        self.act_debug_window.setToolTip("Run a Python file under the debugger: breakpoints, step, inspect. The agent's debug tools drive the same session")
         self.act_artifacts_window = menu.addAction(
             "🧩   Artifacts window", self.open_artifacts_window)
         self.act_converter_window = menu.addAction(
             "🔀   Converter window", self.open_converter_window)
         self.act_sessions_window = menu.addAction(
             "👥   Sessions window", self.open_sessions_window)
-        self.act_sessions_window.setToolTip("G2: every open chat in one list — state, model, project, last activity; click a row to go to it")
+        self.act_sessions_window.setToolTip("G2: every open chat in one list. State, model, project, last activity; click a row to go to it")
         self.act_privacy_window = menu.addAction(
             "🔒   Privacy window", self.open_privacy_window)
         self.act_privacy_window.setToolTip("H1: what never leaves this PC, what can (per chat, your choice of model), where your data lives, and how to delete it")
         self.act_notes_window = menu.addAction(
             "📝   Session notes window", self.open_notes_window)
-        self.act_notes_window.setToolTip("H5: the current conversation's notes file — Forge's durable memory of plans, steps and folds, yours to read and edit")
+        self.act_notes_window.setToolTip("H5: the current conversation's notes file. Forge's durable memory of plans, steps and folds, yours to read and edit")
         self.act_sees_window = menu.addAction(
             "👁   What the AI sees window", self.open_sees_window)
-        self.act_sees_window.setToolTip("H5: exactly what the next request sends the model — system prompt, folded summary, session notes, and the turns, in order")
+        self.act_sees_window.setToolTip("H5: exactly what the next request sends the model. System prompt, folded summary, session notes, and the turns, in order")
         self.act_models_window = menu.addAction(
             "🤖   Models window", self.open_models_window)
-        self.act_models_window.setToolTip("H4: every model Forge can pick — its size, whether it fits this PC's RAM at your context setting, and where it came from; cloud models carry no fit badge")
+        self.act_models_window.setToolTip("H4: every model Forge can pick. Its size, whether it fits this PC's RAM at your context setting, and where it came from; cloud models carry no fit badge")
         self.act_mission_window = menu.addAction(
             "🛰   Mission control", self.open_mission_control)
-        self.act_mission_window.setToolTip("Item #64: every running turn across conversations — what is running, what is parked at a gate, what finished")
+        self.act_mission_window.setToolTip("Item #64: every running turn across conversations. What is running, what is parked at a gate, what finished")
         self.act_inbox_window = menu.addAction(
             "📥   Inbox", self.open_inbox)
-        self.act_inbox_window.setToolTip("Inbox mode: what needs attention, what's running, what's ready to merge — across every project")
+        self.act_inbox_window.setToolTip("Inbox mode: what needs attention, what's running, what's ready to merge, across every project")
         self.act_templates_window = menu.addAction(
             "🧰   Templates", self.open_templates_window)
         self.act_templates_window.setToolTip("Item C4: start a new project from a template that ships with Code Forge")
         self.act_testing_window = menu.addAction(
             "🧪   Testing window", self.open_testing_window)
-        self.act_testing_window.setToolTip("Item C8: watch the project's tests run live — streamed output, the runner's own tally, and the session's run history")
+        self.act_testing_window.setToolTip("Item C8: watch the project's tests run live. Streamed output, the runner's own tally, and the session's run history")
         self.act_provider_chat = menu.addAction(
             "💬   Provider chat", self.open_provider_chat)
-        self.act_provider_chat.setToolTip("Talk with a hosted model (Groq / Gemini / EXAONE) alongside the bench — conversation only, no tools; the local agent keeps working untouched")
+        self.act_provider_chat.setToolTip("Talk with a hosted model (Groq / Gemini / EXAONE) alongside the bench. Conversation only, no tools; the local agent keeps working untouched")
         self.act_timeline_window = menu.addAction(
             "🕰   Turn timeline", self.open_timeline)
-        self.act_timeline_window.setToolTip("Item C9: this conversation's completed turns — time, generations and estimated tokens per turn, with its soft budget state")
+        self.act_timeline_window.setToolTip("Item C9: this conversation's completed turns. Time, generations and estimated tokens per turn, with its soft budget state")
         self.act_design_canvas = menu.addAction(
             "🎨   Design canvas", self.open_design_canvas)
-        self.act_design_canvas.setToolTip("Item C5: the project's code-linked design board — frames that reference files, note cards, and variants with lineage; saved as .forge/design/canvas.json")
+        self.act_design_canvas.setToolTip("Item C5: the project's code-linked design board. Frames that reference files, note cards, and variants with lineage; saved as .forge/design/canvas.json")
         self.act_run_window.setToolTip("Note 13A + shell round 2: the run surface is its own window, not a panel")
         self.main_menu = menu
         self.menu_btn.setMenu(menu)
@@ -18495,7 +18679,7 @@ class ForgeWindow(QMainWindow):
         self.view_act_checkpoints = menu.addAction("🧷   Checkpoints…", self.open_checkpoints)
         self.view_act_bench = menu.addAction("🏁   Forge Bench…", self.open_bench)
         self.view_act_recipes = menu.addAction("📋   Recipes…", self.open_recipes)
-        self.view_act_customize = menu.addAction("⚒   Customize — skills · plugins · connectors", self.open_customize)
+        self.view_act_customize = menu.addAction("⚒   Customize · skills · plugins · connectors", self.open_customize)
         self.view_act_settings = menu.addAction("⚙   Agent settings", self.open_settings)
         menu.addSeparator()
         self.view_act_dock_receipts = menu.addAction(
@@ -19044,14 +19228,14 @@ class ForgeWindow(QMainWindow):
         if not tag or not re.match(self._PULL_TAG_PATTERN, tag):
             if win is not None:
                 win.show_pull_note(
-                    "That doesn't look like an Ollama tag — use "
+                    "That doesn't look like an Ollama tag. Use "
                     "a single tag like qwen3:4b or user/model:"
                     "tag, with no spaces or shell characters.")
             return False
         if self.run_is_running():
             if win is not None:
                 win.show_pull_note(
-                    "A run is already going in the Run window — "
+                    "A run is already going in the Run window: "
                     "stop it or let it finish, then pull.")
             return False
         if win is not None:
@@ -19107,14 +19291,14 @@ class ForgeWindow(QMainWindow):
         outcome, names = light_mod.unload_all_models(self.client)
         if outcome == "unloaded":
             line = (f"Unloaded {len(names)} model"
-                    f"{'s' if len(names) != 1 else ''} — RAM freed.")
+                    f"{'s' if len(names) != 1 else ''}. RAM freed.")
         elif outcome == "none":
             line = "No models were loaded."
         elif outcome == "failed":
             line = ("Unload all models: Ollama didn't release "
                     "any of the loaded models.")
         else:
-            line = ("Unload all models: couldn't reach Ollama — "
+            line = ("Unload all models: couldn't reach Ollama: "
                     "nothing was unloaded.")
         self.log(line)
         return line
@@ -19348,25 +19532,25 @@ class ForgeWindow(QMainWindow):
         the (ok, message) shape the phone prompt path returns."""
         comment = str(comment or "").strip()
         if not comment:
-            return False, ("Type the change you want first — an "
+            return False, ("Type the change you want first. An "
                            "empty comment can't revise anything.")
         if self.worker and self.worker.isRunning():
-            return False, ("A turn is already running — the "
+            return False, ("A turn is already running. The "
                            "comment waits until the bench is free.")
         if self._fold_thread is not None and self._fold_thread.isRunning():
-            return False, ("A context fold is running — try the "
+            return False, ("A context fold is running. Try the "
                            "comment again in a moment.")
         if getattr(self, "_side_chat", None) is not None:
-            return False, ("Close the side chat first — an "
+            return False, ("Close the side chat first. An "
                            "artifact comment belongs to the main "
                            "thread, and side-chat turns are never "
                            "filed.")
         if self.mode_combo.currentText().lower() == "plan":
-            return False, ("Plan mode drafts plans — switch to "
+            return False, ("Plan mode drafts plans. Switch to "
                            "another mode to comment on an artifact, "
                            "so the revision is a direct turn.")
         if not self.model_combo.currentText().strip():
-            return False, ("No model selected — pick one on the "
+            return False, ("No model selected. Pick one on the "
                            "bench first.")
         entry = dict(entry or {})
         title = str(entry.get("title") or "Artifact")
@@ -19382,25 +19566,25 @@ class ForgeWindow(QMainWindow):
             if proj and proj != self.workspace:
                 self.log("Artifact comment: the conversation that "
                          f"produced '{title}' belongs to another "
-                         "project — the revision turn runs in the "
+                         "project. The revision turn runs in the "
                          "current conversation instead.")
             else:
                 self.load_conversation(target)
                 if self.conversation_id != target:
                     self.log("Artifact comment: the conversation "
                              f"that produced '{title}' could not "
-                             "be opened — the revision turn runs "
+                             "be opened. The revision turn runs "
                              "in the current conversation instead.")
         prompt = (
             "[ARTIFACT COMMENT] The owner commented on an artifact "
             "you produced.\n\n"
-            f"Artifact: {kind} — \"{title}\"\n"
-            f"File: .forge/artifacts/{fname} — read it for the "
+            f"Artifact: {kind} · \"{title}\"\n"
+            f"File: .forge/artifacts/{fname}. Read it for the "
             "current text in full.\n\n"
             f"Owner's comment:\n{comment}\n\n"
             "Revise the artifact to address the comment. Reply "
             "with the COMPLETE revised artifact text and nothing "
-            "else — your reply is filed as the new version of "
+            "else. Your reply is filed as the new version of "
             "this artifact; the original stays on record "
             "untouched.")
         self._pending_artifact_comment = {
@@ -19419,9 +19603,9 @@ class ForgeWindow(QMainWindow):
             # and fires when the bench settles — the marker stays
             # armed so the claim at that turn's settle still files
             # the revision.
-            self.log(f"Artifact comment queued on '{title}' — the "
+            self.log(f"Artifact comment queued on '{title}'. The "
                      "revision turn runs when the current one ends.")
-            return True, (f"Revision turn queued — its reply files "
+            return True, (f"Revision turn queued. Its reply files "
                           f"as a new {kind} artifact when it runs "
                           "and lands.")
         # Started = a NEW worker object is the bench's, or the
@@ -19435,11 +19619,11 @@ class ForgeWindow(QMainWindow):
         if not folding and (self.worker is None
                             or self.worker is before):
             self._pending_artifact_comment = None
-            return False, ("The revision turn didn't start — see "
+            return False, ("The revision turn didn't start. See "
                            "the bench log.")
         self.log(f"Artifact comment sent on '{title}': "
                  f"{comment[:120]}")
-        return True, (f"Revision turn started — its reply files "
+        return True, (f"Revision turn started. Its reply files "
                       f"as a new {kind} artifact when it lands.")
 
     def _claim_artifact_comment(self, prompt, conversation_id):
@@ -19469,22 +19653,22 @@ class ForgeWindow(QMainWindow):
         composition: same gates, same worker, same settle. Every
         refusal is plain words in the (ok, message) shape."""
         if not isinstance(frame, dict) or not frame.get("id"):
-            return False, "No frame to send — select one first."
+            return False, "No frame to send. Select one first."
         if self.worker and self.worker.isRunning():
-            return False, ("A turn is already running — the frame "
+            return False, ("A turn is already running. The frame "
                            "waits until the bench is free.")
         if self._fold_thread is not None and self._fold_thread.isRunning():
-            return False, ("A context fold is running — try again "
+            return False, ("A context fold is running. Try again "
                            "in a moment.")
         if getattr(self, "_side_chat", None) is not None:
-            return False, ("Close the side chat first — a canvas "
+            return False, ("Close the side chat first. A canvas "
                            "turn belongs to the main thread.")
         if self.mode_combo.currentText().lower() == "plan":
-            return False, ("Plan mode drafts plans — switch to "
+            return False, ("Plan mode drafts plans. Switch to "
                            "another mode to send a frame, so it "
                            "runs as a direct turn.")
         if not self.model_combo.currentText().strip():
-            return False, ("No model selected — pick one on the "
+            return False, ("No model selected. Pick one on the "
                            "bench first.")
         excerpt = design_canvas_mod.frame_excerpt(self.workspace, frame)
         prompt = design_canvas_mod.compose_bench_prompt(
@@ -19497,16 +19681,16 @@ class ForgeWindow(QMainWindow):
         if getattr(self, "_send_queued", False):
             # Message queue (2026-11-11): the frame's turn is held
             # and fires when the bench settles.
-            return True, ("Queued — the frame's turn runs when the "
+            return True, ("Queued. The frame's turn runs when the "
                           "current one ends.")
         folding = self._fold_thread is not None \
             and self._fold_thread.isRunning()
         if not folding and (self.worker is None
                             or self.worker is before):
-            return False, ("The frame's turn didn't start — see "
+            return False, ("The frame's turn didn't start. See "
                            "the log for the refusal.")
         label = design_canvas_mod.frame_label(board or {}, frame)
-        return True, (f"Sent \"{label}\" to the bench — the turn "
+        return True, (f"Sent \"{label}\" to the bench. The turn "
                       "is running in the main window.")
 
     def _on_chat_anchor(self, url):
@@ -19552,21 +19736,21 @@ class ForgeWindow(QMainWindow):
                            "resend.")
         message = messages[index]
         if message.get("role") != "user" or message.get("summary"):
-            return False, ("Resend is for your own sent messages — "
+            return False, ("Resend is for your own sent messages: "
                            "that block isn't one.")
         text = message.get("content") or ""
         if not text.strip():
             return False, "That message has no text to load."
         if self.input.toPlainText().strip():
             return False, ("Your message box already holds a draft "
-                           "— send or clear it first; resend won't "
+                           ". Send or clear it first; resend won't "
                            "overwrite it.")
         self.input.setPlainText(text)
         cursor = self.input.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.input.setTextCursor(cursor)
         self.input.setFocus()
-        return True, ("Loaded into the message box — edit and send "
+        return True, ("Loaded into the message box. Edit and send "
                       "when ready.")
 
     def reply_to_message(self, index):
@@ -19587,7 +19771,7 @@ class ForgeWindow(QMainWindow):
         if message.get("role") not in ("user", "assistant") \
                 or message.get("summary"):
             return False, ("Reply works on your messages and the "
-                           "agent's replies — that block isn't one.")
+                           "agent's replies. That block isn't one.")
         text = message.get("content") or ""
         if not text.strip():
             return False, "That message has no text to quote."
@@ -19603,7 +19787,7 @@ class ForgeWindow(QMainWindow):
         cursor.setPosition(place)
         self.input.setTextCursor(cursor)
         self.input.setFocus()
-        return True, ("Quoted into the message box — type your "
+        return True, ("Quoted into the message box. Type your "
                       "reply after it.")
 
     def edit_message(self, index):
@@ -19627,20 +19811,20 @@ class ForgeWindow(QMainWindow):
                            "edit.")
         message = messages[index]
         if message.get("role") != "user" or message.get("summary"):
-            return False, ("Edit is for your own sent messages — "
+            return False, ("Edit is for your own sent messages: "
                            "that block isn't one.")
         text = message.get("content") or ""
         if not text.strip():
             return False, "That message has no text to edit."
         if self._bench_busy():
-            return False, ("A turn is running — editing waits "
+            return False, ("A turn is running: editing waits "
                            "until it ends.")
         if self.plan_state and self.plan_state.get("status") == "draft":
-            return False, ("A plan is waiting at the gate — approve "
+            return False, ("A plan is waiting at the gate. Approve "
                            "or kill it first; editing waits.")
         if self.input.toPlainText().strip():
             return False, ("Your message box already holds a draft "
-                           "— send or clear it first; edit won't "
+                           ". Send or clear it first; edit won't "
                            "overwrite it.")
         self._edit_target = index
         self.input.setPlainText(text)
@@ -19651,7 +19835,7 @@ class ForgeWindow(QMainWindow):
         banner = getattr(self, "_edit_banner", None)
         if banner is not None:
             banner.setVisible(True)
-        return True, ("Editing — send to re-run from here, or "
+        return True, ("Editing. Send to re-run from here, or "
                       "cancel the edit.")
 
     def _cancel_edit(self):
@@ -19668,7 +19852,7 @@ class ForgeWindow(QMainWindow):
     def _on_cancel_edit_clicked(self):
         self._cancel_edit()
         self.input.clear()
-        self.log("Edit cancelled — nothing changed.")
+        self.log("Edit cancelled: nothing changed.")
 
     def _apply_edit(self, text):
         """The truncate half of edit_message, run from send_message
@@ -19700,14 +19884,14 @@ class ForgeWindow(QMainWindow):
         if message.get("role") != "user" or message.get("summary"):
             self._cancel_edit()
             self._send_refusal = ("Edit is for your own sent "
-                                  "messages — that block isn't one.")
+                                  "messages. That block isn't one.")
             return False
         if self.plan_state and self.plan_state.get("status") == "draft":
             # Re-checked at send time: a draft could have arrived
             # between arming the edit and sending it. The edit
             # state is KEPT — the owner settles the draft and
             # sends again.
-            self._send_refusal = ("A plan is waiting at the gate — "
+            self._send_refusal = ("A plan is waiting at the gate: "
                                   "approve or kill it first; "
                                   "editing waits.")
             self.log(self._send_refusal)
@@ -19723,7 +19907,7 @@ class ForgeWindow(QMainWindow):
                                           len(messages) - 1)
                 if fork_id is None:
                     self._send_refusal = ("Couldn't save a copy of "
-                                          "the original first — "
+                                          "the original first: "
                                           "nothing changed.")
                     self.log(self._send_refusal)
                     return False
@@ -19875,11 +20059,42 @@ class ForgeWindow(QMainWindow):
         # Scout phase 1: a terminal pull that finished cleanly
         # changed what Ollama holds — refresh the model list so
         # the new model lands in the combo and the Models room
-        # (whose own refresh rides the apply path).
-        if (code == 0 and not stopped and block is not None
-                and block.command.startswith("ollama pull ")):
-            self.refresh_models_async()
+        # (whose own refresh rides the apply path). F15 (U24):
+        # a pull that stopped or failed says so on the pull note
+        # with the next step — pull the same tag again, and
+        # Ollama picks up where it left off (ollama's own
+        # server/download.go: Prepare() restores the -partial-*
+        # part files and the re-pull requests only the missing
+        # byte ranges; the gate evidence is in f8-verify).
+        if block is not None and block.command.startswith(
+                "ollama pull "):
+            if code == 0 and not stopped:
+                self.refresh_models_async()
+            else:
+                self._note_stopped_pull(block.command, stopped)
         self._set_run_controls(False)
+
+    def _note_stopped_pull(self, command, stopped):
+        """F15 (U24/U17): a stopped or failed pull leaves a
+        partial download behind — the pull note says the next
+        step in plain words, next to the field it came from.
+        The claim is true per Ollama's own source (see
+        _on_run_finished): a re-pull resumes from the last
+        completed chunk. A pull that never started (the
+        _on_run_failed path) has nothing to resume, so it
+        never reaches this helper."""
+        tag = str(command or "")[len("ollama pull "):].strip()
+        win = getattr(self, "models_win", None)
+        if win is None:
+            return
+        verb = "stopped" if stopped else "failed"
+        if tag:
+            text = (f"Pull {verb}. Pull {tag} again to pick up "
+                    "where it left off.")
+        else:
+            text = (f"Pull {verb}. Pull the same tag again to "
+                    "pick up where it left off.")
+        win.show_pull_note(text)
 
     def _on_run_failed(self, message):
         self.run_status.setText(f"could not start: {message}")
@@ -19902,7 +20117,7 @@ class ForgeWindow(QMainWindow):
         record. Pure presentation — noting an alert NEVER triggers
         a proposal; proposals are the owner's button press only."""
         line = (f"👁 Watch alert · {alert['kind']} · {alert['detail']}"
-                f" — {alert['evidence'][:120]}")
+                f" · {alert['evidence'][:120]}")
         self.log(line)
         try:
             self.eventlog.record(
@@ -19967,7 +20182,7 @@ class ForgeWindow(QMainWindow):
                     self._provider_config(), model,
                     scope="project", role="watch"):
             self.log(f"Watch seat: provider model '{model}' is not "
-                     "registry-allowed as watch — "
+                     "registry-allowed as watch: "
                      f"{monitor_mod.DEFAULT_WATCH_MODEL} holds the "
                      "seat instead.")
             model = monitor_mod.DEFAULT_WATCH_MODEL
@@ -19982,7 +20197,7 @@ class ForgeWindow(QMainWindow):
         if self._monitor_thread is not None \
                 and self._monitor_thread.isRunning():
             self.log("👁 Watch: a fix proposal is already being "
-                     "drafted — wait for it to reach the gate.")
+                     "drafted. Wait for it to reach the gate.")
             return
         root = Path(self.workspace)
         listing = []
@@ -20024,7 +20239,7 @@ class ForgeWindow(QMainWindow):
             lambda t=thread: self._monitor_thread_settled(t))
         self._monitor_thread = thread
         self.log(f"👁 Watch: asking {short_model(model)} for a fix "
-                 f"proposal — {alert['kind']} · {alert['detail']}.")
+                 f"proposal: {alert['kind']} · {alert['detail']}.")
         thread.start()
 
     def _monitor_thread_settled(self, thread):
@@ -20043,7 +20258,7 @@ class ForgeWindow(QMainWindow):
         parsed = monitor_mod.parse_fix_reply(text, listing)
         if parsed is None:
             self.log("👁 Watch: the seat's reply was not one whole-file "
-                     "fix for a project file — no proposal was made.")
+                     "fix for a project file. No proposal was made.")
             return
         rel, content = parsed
         args = {"path": rel, "content": content}
@@ -20069,7 +20284,7 @@ class ForgeWindow(QMainWindow):
         answer = getattr(self, "_watch_gate_answer", None)
         self._watch_gate_answer = None
         if answer is not True:
-            self.log("👁 Watch: fix not approved — nothing was written.")
+            self.log("👁 Watch: fix not approved: nothing was written.")
             return
         try:
             result = execute_tool("write_file", args, self.workspace)
@@ -20077,7 +20292,7 @@ class ForgeWindow(QMainWindow):
             self.log(f"👁 Watch: the approved fix could not be "
                      f"applied: {exc}")
             return
-        self.log(f"👁 Watch: approved fix applied — {result}")
+        self.log(f"👁 Watch: approved fix applied: {result}")
         # An applied fix can resolve the alert that raised it and
         # can retire the whole watch list; the honest v1 state is
         # 'the owner judged it', so the alert REMAINS in the list
@@ -20150,7 +20365,7 @@ class ForgeWindow(QMainWindow):
             queue = getattr(self, "_proposal_log_queue", None)
             if queue is not None:
                 queue.append("📩 Proposal raised · tester_failed · "
-                             "Tester run failed — Start a fix turn "
+                             "Tester run failed. Start a fix turn "
                              "for the failing test(s). Accept or "
                              "decline it; nothing happens until "
                              "you do.")
@@ -20170,10 +20385,10 @@ class ForgeWindow(QMainWindow):
             proposal, created = self._raise_proposal_record(
                 kind, event, action, touches, detail=detail)
         except ValueError:
-            self.log(f"📩 Proposal rejected — unknown kind: {kind}.")
+            self.log(f"📩 Proposal rejected. Unknown kind: {kind}.")
             return None
         if created:
-            self.log(f"📩 Proposal raised · {kind} · {event} — "
+            self.log(f"📩 Proposal raised · {kind} · {event} · "
                      f"{action}. Accept or decline it; nothing "
                      f"happens until you do.")
         # Fix F6: the proposals room follows the record.
@@ -20205,7 +20420,7 @@ class ForgeWindow(QMainWindow):
                        if p.get("id") == proposal_id), None)
         if target is None:
             self.log(f"📩 Proposal {proposal_id} cannot be decided "
-                     f"— it is already decided or expired.")
+                     f". It is already decided or expired.")
             return False
         if accept and target.get("kind") in (
                 "tester_failed", "file_changed") \
@@ -20214,7 +20429,7 @@ class ForgeWindow(QMainWindow):
             # The bench is busy: do not consume the decision on a
             # turn that cannot start. The proposal stays pending
             # untouched — accept it again when the bench is free.
-            self.log("📩 A turn is already running — the proposal "
+            self.log("📩 A turn is already running. The proposal "
                      "stays pending; accept it again when the "
                      "bench is free.")
             return False
@@ -20231,7 +20446,7 @@ class ForgeWindow(QMainWindow):
         self._refresh_proposals_window()
         if not accept:
             self.log(f"📩 Proposal declined · {decided['kind']} · "
-                     f"{decided['event']} — nothing runs.")
+                     f"{decided['event']}: nothing runs.")
             try:
                 self.eventlog.record(
                     "proposal_declined", proposal_id=proposal_id,
@@ -20253,7 +20468,7 @@ class ForgeWindow(QMainWindow):
         else:  # pragma: no cover — the store only knows three kinds
             return False
         self.log(f"📩 Proposal accepted · {decided['kind']} · "
-                 f"{decided['event']} — running through the gate.")
+                 f"{decided['event']}: running through the gate.")
         try:
             self.eventlog.record(
                 "proposal_accepted", proposal_id=proposal_id,
@@ -20317,7 +20532,7 @@ class ForgeWindow(QMainWindow):
             self._file_watcher.changed.connect(
                 self._on_watched_file_changed)
         self._file_watcher.start(self.workspace)
-        self.log(f"📁 File watcher on — "
+        self.log(f"📁 File watcher on: "
                  f"{self._file_watcher.watched_count} files "
                  f"watched.")
 
@@ -20347,10 +20562,10 @@ class ForgeWindow(QMainWindow):
         if self.debug_session_live():
             return {"status": "error",
                     "output": "A debug session is already live for "
-                              f"{self._debug_session.target} — stop it first."}
+                              f"{self._debug_session.target}. Stop it first."}
         if self.run_is_running():
             return {"status": "error",
-                    "output": "A run is live in the Run window — stop it "
+                    "output": "A run is live in the Run window. Stop it "
                               "before debugging (one program at a time)."}
         session = debugger_mod.DebugSession(workspace or self.workspace)
         try:
@@ -20380,7 +20595,7 @@ class ForgeWindow(QMainWindow):
         elif status == "finished":
             lines.append("The program finished; the debug session is closed.")
         elif status == "running":
-            lines.append("The program is still running — it has not "
+            lines.append("The program is still running. It has not "
                          "stopped at a breakpoint.")
         else:
             lines.append(state.get("output") or "The debug call failed.")
@@ -20398,7 +20613,7 @@ class ForgeWindow(QMainWindow):
     def _debug_tool_start(self, args, workspace):
         path = str(args.get("path", "")).strip()
         if not path:
-            return "debug_start needs a 'path' — a Python file in the workspace."
+            return "debug_start needs a 'path'. A Python file in the workspace."
         try:
             breakpoints = debugger_mod.parse_breakpoints(
                 str(args.get("breakpoints", "")), path)
@@ -20417,20 +20632,20 @@ class ForgeWindow(QMainWindow):
     def _debug_tool_step(self, args):
         session = self._debug_session
         if session is None:
-            return "No debug session is live — start one with debug_start."
+            return "No debug session is live. Start one with debug_start."
         state = session.step_into() if args.get("into") else session.step_over()
         return self._format_debug_state(state, session)
 
     def _debug_tool_continue(self, args):
         session = self._debug_session
         if session is None:
-            return "No debug session is live — start one with debug_start."
+            return "No debug session is live. Start one with debug_start."
         return self._format_debug_state(session.continue_(), session)
 
     def _debug_tool_inspect(self, args):
         session = self._debug_session
         if session is None:
-            return "No debug session is live — start one with debug_start."
+            return "No debug session is live. Start one with debug_start."
         expr = str(args.get("expression", "")).strip()
         if not expr:
             return session.locals_text()
@@ -20635,7 +20850,7 @@ class ForgeWindow(QMainWindow):
         n_conn = sum(1 for p in self.plugins if p.kind == "connector")
         self.ext_counts.setText(
             f"{len(self.skills)} skill(s) · {len(self.plugins) - n_conn} plugin(s) · "
-            f"{n_conn} connector(s)\nManaged in Customize — nothing else belongs on this wall.")
+            f"{n_conn} connector(s)\nManaged in Customize: nothing else belongs on this wall.")
 
     def log(self, message):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
@@ -20721,7 +20936,7 @@ class ForgeWindow(QMainWindow):
             # True and the gauges would freeze for the whole
             # session. Reset it here so the next tick retries.
             self._gauge_busy = False
-            self.log("Gauge refresh could not start — will retry on the next tick.")
+            self.log("Gauge refresh could not start. Will retry on the next tick.")
 
     def _note_model_loading(self, model):
         """A turn is starting with `model`: if that model is not one
@@ -20917,7 +21132,7 @@ class ForgeWindow(QMainWindow):
         # Any outcome is a receipt line, never a blocked creation.
         git_status = proj.git_start(folder)
         if git_status.get("status") == "started":
-            self.log(f"Git started for this project — first snapshot "
+            self.log(f"Git started for this project. First snapshot "
                      f"{git_status.get('commit', '')} (the prebuilt scaffold).")
         elif git_status.get("status") == "no-git":
             self.log("Git isn't installed on this PC, so this project "
@@ -20931,7 +21146,7 @@ class ForgeWindow(QMainWindow):
         # the switch proceeds (the stream keeps its own workspace,
         # captured at its start); otherwise the classic refusal.
         if not self._leave_stage(
-                "Project switch ignored — a turn is running."):
+                "Project switch ignored. A turn is running."):
             return
         self.workspace = path
         Path(self.workspace).mkdir(parents=True, exist_ok=True)
@@ -20973,7 +21188,7 @@ class ForgeWindow(QMainWindow):
 
     def create_dev_clone(self):
         if self._copy_in_progress():
-            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            self.log("A clone/promote copy is already in progress. Wait for it to finish.")
             return
         src = Path(self.workspace)
         dest = src.parent / (src.name + "-dev")
@@ -20990,9 +21205,9 @@ class ForgeWindow(QMainWindow):
         clone/promote asked for mid-copy is logged and refused."""
         src, dest = Path(src), Path(dest)
         if self._copy_in_progress():
-            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            self.log("A clone/promote copy is already in progress. Wait for it to finish.")
             return
-        self.log(f"Cloning {src.name} → {dest.name} — copying in the background…")
+        self.log(f"Cloning {src.name} → {dest.name} · copying in the background…")
         thread = CopyTreeThread(src, dest)
 
         def _done():
@@ -21020,9 +21235,9 @@ class ForgeWindow(QMainWindow):
         land in the completion slot, unchanged."""
         dev, live = Path(dev), Path(live)
         if self._copy_in_progress():
-            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            self.log("A clone/promote copy is already in progress. Wait for it to finish.")
             return
-        self.log("Promoting dev → live — copying in the background…")
+        self.log("Promoting dev → live · copying in the background…")
         thread = CopyTreeThread(dev, live, dirs_exist_ok=True)
 
         def _done():
@@ -21042,7 +21257,7 @@ class ForgeWindow(QMainWindow):
 
     def promote_dev(self):
         if self._copy_in_progress():
-            self.log("A clone/promote copy is already in progress — wait for it to finish.")
+            self.log("A clone/promote copy is already in progress. Wait for it to finish.")
             return
         live = Path(self.workspace)
         dev = live.parent / (live.name + "-dev")
@@ -21069,7 +21284,7 @@ class ForgeWindow(QMainWindow):
             # complete difference. A promote decided on a partial
             # diff can overwrite the live project wrongly; abort
             # and say so instead.
-            self.log(f"Promote: the dev/live comparison failed ({exc}) — nothing was promoted.")
+            self.log(f"Promote: the dev/live comparison failed ({exc}): nothing was promoted.")
             show_error_dialog(
                 self, "Promote", exc,
                 "Comparing the dev clone with the live project",
@@ -21111,7 +21326,7 @@ class ForgeWindow(QMainWindow):
         brief = knowledge_mod.brief_text(self.workspace)
         if brief:
             _add("project brief", 2,
-                 "Project brief — what this project is and where it "
+                 "Project brief: what this project is and where it "
                  "stands (.forge/brief.md; read it first):\n" + brief)
         sources = proj.sources_index_text(self.workspace)
         if sources:
@@ -21122,7 +21337,7 @@ class ForgeWindow(QMainWindow):
         hints = proj.hints_text(self.workspace)
         if hints:
             _add("project hints", 1,
-                 "Project hints — the owner's standing instructions for THIS project "
+                 "Project hints: the owner's standing instructions for THIS project "
                  "(from .forge/hints.md). Follow them unless the owner's current "
                  "message says otherwise:\n" + hints)
         production = prod_mod.context_text(prod_mod.load_markings(self.workspace))
@@ -21165,7 +21380,7 @@ class ForgeWindow(QMainWindow):
         folder_prompt = proj.folder_prompt_text(self.workspace, mode_now)
         if folder_prompt:
             _add("folder instructions", 1,
-                 "Folder instructions — the PROMPT.md of the folder this "
+                 "Folder instructions: the PROMPT.md of the folder this "
                  "mode files into (.forge/, owner-editable). Follow them "
                  "for anything you file there:\n" + folder_prompt)
         if sources:
@@ -21201,15 +21416,15 @@ class ForgeWindow(QMainWindow):
         if macro_idx:
             _add("macros index", 3, macro_idx)
         _add("self-extension", 0,
-             "Self-extension (owner's standing instruction): skills and plugins are GLOBAL — "
+             "Self-extension (owner's standing instruction): skills and plugins are GLOBAL: "
             "they live in the Forge's own skills/ and plugins/ folders and are available in "
             "every project. When the owner asks you to create a skill, use create_skill; to "
             "create a plugin or tool, use create_plugin; to change a skill or plugin that "
             "already exists, use update_skill / update_plugin (the create tools refuse "
             "names that are already taken). NEVER save a skill or plugin into "
-            "the current project folder with write_file — it would only exist in that one "
+            "the current project folder with write_file. It would only exist in that one "
             "project. Creation takes effect after an automatic rescan. A plugin you create "
-            "starts DISABLED — the owner enables it in Customize. Say plainly in chat what "
+            "starts DISABLED. The owner enables it in Customize. Say plainly in chat what "
             "you created and where it lives.")
         scratch_path = proj.forge_area(self.workspace) / "scratchpad.md"
         try:
@@ -21270,6 +21485,21 @@ class ForgeWindow(QMainWindow):
                 pass
         return "\n\n".join(parts)
 
+    def _on_chat_scroll(self, value):
+        # Render-follows fix (2026-11-15): remember whether the
+        # reader is riding the bottom, as they scroll.
+        bar = self.chat.verticalScrollBar()
+        self._chat_follow = value >= bar.maximum() - 8
+
+    def _on_chat_range_changed(self, _minimum, _maximum):
+        # Render-follows fix (2026-11-15): setHtml relayouts after
+        # the value is set, so the maximum grows underneath it.
+        # Re-pin here, once the layout has settled, when the
+        # reader was following.
+        if self._chat_follow:
+            bar = self.chat.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
     def render(self, messages=None):
         # Sweep R63: `messages or self.messages` made an explicit
         # EMPTY list render the full history — None is the only
@@ -21293,7 +21523,7 @@ class ForgeWindow(QMainWindow):
                 count = m.get("folded_count")
                 label = "EARLIER CONVERSATION SUMMARIZED TO FIT THE CONTEXT WINDOW"
                 if count:
-                    label += f" — ~{count} MESSAGES FOLDED"
+                    label += f" · ~{count} MESSAGES FOLDED"
                 html.append(f'<div style="margin:20px 0;padding:10px 14px;max-width:92%;border:1px dashed #51483c;border-radius:8px;">'
                             f'<b style="color:#ddbb8f">{label}</b><br>'
                             f'<div style="line-height:1.55;margin-top:6px;color:#b8ac9a;">{body}</div></div>')
@@ -21320,7 +21550,7 @@ class ForgeWindow(QMainWindow):
         if visible == 0:
             html.append('<div style="margin:60px auto;max-width:560px;color:#a39a8b;line-height:1.7;">'
                         '<b style="color:#eae6df;font-size:15px;">The bench is clear.</b><br>'
-                        'Ask for code, a fix, an explanation — or use <b style="color:#eae6df;">＋ Attach</b> to hand the agent a file.<br>'
+                        'Ask for code, a fix, an explanation, or use <b style="color:#eae6df;">＋ Attach</b> to hand the agent a file.<br>'
                         'Tools ask your approval first. Approvals have no clock on them.<br>'
                         'Skills, plugins and connectors live under <b style="color:#eae6df;">Customize</b> in the Menu.</div>')
         html.append('</div>')
@@ -21333,6 +21563,7 @@ class ForgeWindow(QMainWindow):
         # every tick for as long as the gate sat open.
         bar = self.chat.verticalScrollBar()
         pinned = bar.value() >= bar.maximum() - 8
+        self._chat_follow = pinned
         place = bar.value()
         self.chat.setHtml(''.join(html))
         # Chat-glitch fix: setHtml rebuilt the document — any stream
@@ -21482,6 +21713,7 @@ class ForgeWindow(QMainWindow):
         # only when the reader is already riding the bottom.
         bar = self.chat.verticalScrollBar()
         pinned = bar.value() >= bar.maximum() - 8
+        self._chat_follow = pinned
         cursor.insertHtml(self._assistant_bubble_html(content))
         self._stream_painted = content
         if pinned:
@@ -21536,31 +21768,13 @@ class ForgeWindow(QMainWindow):
         self._stream_anchor = header.position()
 
     def _history_visible_rows(self, rows):
-        """Project-scoped conversations (2026-11-13): the [02]
-        CONVERSATIONS panel shows the current project's chats. A
-        row is visible when its recorded project is the current
-        workspace, or when it belongs to no project at all — no
-        recorded project (older rows, NULL/empty), or its recorded
-        project folder no longer exists on disk (renamed/deleted:
-        the chat must stay reachable, so it shows everywhere).
-        Returns (row, unfiled) pairs; unfiled rows carry the
-        marker in the list. Matching is plain string equality,
-        the same rule load_conversation and refresh_projects
-        already use."""
-        visible = []
-        for row in rows:
-            project = row.get("project")
-            if not project:
-                visible.append((row, True))
-            elif project == self.workspace:
-                visible.append((row, False))
-            elif not Path(project).is_dir():
-                visible.append((row, True))
-        return visible
+        """The rows of `rows` visible in this window's Conversations
+        panel — see _visible_history_rows."""
+        return _visible_history_rows(rows, self.workspace)
 
     def refresh_history(self):
-        # Note 24 amendment: the list is scrollable and must be able to
-        # reach EVERY past chat — the old recent(12) cap silently hid
+        # Note 24 amendment: the list is scrollable and must be able
+        # to reach EVERY past chat — the old recent(12) cap silently hid
         # anything older than the twelve newest.
         # Audit C35: a non-empty search box swaps the source from
         # recent() to search() — same cap, same row shape.
@@ -21568,13 +21782,88 @@ class ForgeWindow(QMainWindow):
         search_box = getattr(self, "history_search", None)
         if search_box is not None:
             query = search_box.text().strip()
+        if query:
+            # GUIFX F6 (2026-11-14): the search runs off the GUI
+            # thread, debounced — a keystroke must never freeze
+            # typing. The timer restarts on every keystroke; only
+            # the last one in a 150 ms burst issues a search. The
+            # current rows stay on screen until the new ones land.
+            self._history_search_timer.start()
+            return
+        # Empty query: the default load stays synchronous —
+        # recent(100000) measured 24.8 ms at N=2000, once per
+        # persist, below the perception threshold.
+        self._history_search_timer.stop()
+        # Any search in flight belongs to a query the owner has
+        # cleared — bump the token so its results are discarded
+        # when they arrive.
+        self._history_search_token += 1
+        self._set_history_loading(False)
         # Project-scoped conversations (2026-11-13): the fetch is
         # uncapped (the 100000 precedent is the delete-all path's
         # recent(100000)) so the 200 cap applies AFTER the project
         # filter — a global recent(200) would hide this project's
         # older chats behind other projects' newer ones.
-        rows = self.store.search(query, limit=100000) if query else self.store.recent(100000)
-        visible = self._history_visible_rows(rows)[:200]
+        rows = self.store.recent(100000)
+        visible = self._history_visible_rows(rows)
+        self._render_history(query, visible[:200], len(visible))
+
+    def _start_history_search(self):
+        """The debounce fired: issue the search for the CURRENT
+        box text (re-read — the box may have been cleared while
+        the timer waited)."""
+        query = ""
+        search_box = getattr(self, "history_search", None)
+        if search_box is not None:
+            query = search_box.text().strip()
+        if not query:
+            self.refresh_history()
+            return
+        self._history_search_token += 1
+        token = self._history_search_token
+        thread = HistorySearchThread(self.store, query,
+                                     self.workspace, token)
+        self._history_search_threads[token] = thread
+        thread.searched.connect(self._on_history_searched)
+        thread.failed.connect(self._on_history_search_failed)
+        thread.finished.connect(
+            lambda tok=token: self._on_history_search_finished(tok))
+        self._set_history_loading(True)
+        thread.start()
+
+    def _on_history_searched(self, token, query, visible, total):
+        # Sweep R74: only the newest search's answer paints. An
+        # older search finishing after a newer one was issued is
+        # discarded — a stale search never overwrites fresher
+        # results.
+        if token != self._history_search_token:
+            return
+        self._set_history_loading(False)
+        self._render_history(query, visible, total)
+
+    def _on_history_search_failed(self, token, query):
+        if token != self._history_search_token:
+            return
+        # The list stays as it was — a failed search is not an
+        # empty one.
+        self._set_history_loading(False)
+
+    def _on_history_search_finished(self, token):
+        thread = self._history_search_threads.pop(token, None)
+        if thread is not None:
+            thread.deleteLater()
+
+    def _set_history_loading(self, searching):
+        label = getattr(self, "_history_loading_label", None)
+        if label is not None:
+            label.setVisible(bool(searching))
+
+    def _render_history(self, query, visible, total):
+        """Paint the history list from already-fetched rows:
+        `visible` is the first 200 visible (row, unfiled) pairs,
+        `total` is how many visible rows there are in all. The
+        R45 signature-skip lives here, so the sync path and the
+        search worker share it."""
         # Sweep R45: this rebuild runs on every persist and every
         # search keystroke and used to deleteLater/recreate up to
         # 200 buttons each time. When the rows that would be drawn
@@ -21586,16 +21875,33 @@ class ForgeWindow(QMainWindow):
         # The signature runs over the VISIBLE rows with the unfiled
         # flag — the same row can be filed under one workspace and
         # unfiled under another, and the label differs.
-        signature = (query, tuple(
+        # F21: the total is part of the signature too — the cap
+        # label shows it, so a changed total is a visible change
+        # even when the drawn rows are identical.
+        signature = (query, total, tuple(
             (r.get("id"), r.get("title"), r.get("model"), unfiled)
             for r, unfiled in visible))
         if signature == getattr(self, "_history_signature", None):
             return
         self._history_signature = signature
-        while self.history_list.count():
-            item = self.history_list.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        # Clear the old buttons — but NOT the three standing
+        # labels, which live at the top of the same layout and
+        # are managed by visibility below (F21 cap, F22 empty,
+        # F6 loading).
+        empty_label = getattr(self, "_history_empty_label", None)
+        cap_label = getattr(self, "_history_cap_label", None)
+        loading_label = getattr(self, "_history_loading_label", None)
+        standing = {id(w) for w in
+                    (empty_label, cap_label, loading_label)
+                    if w is not None}
+        for i in reversed(range(self.history_list.count())):
+            item = self.history_list.itemAt(i)
+            widget = item.widget() if item is not None else None
+            if widget is not None and id(widget) in standing:
+                continue
+            self.history_list.takeAt(i)
+            if widget is not None:
+                widget.deleteLater()
         for row, unfiled in visible:
             label = "◷  " + (row["title"] or "Conversation")
             if row.get("model"):
@@ -21611,6 +21917,30 @@ class ForgeWindow(QMainWindow):
                     self._history_context_menu(b, cid, t, pos))
             self.history_list.addWidget(button)
         self.history_list.addStretch(1)
+        # F21: the 200 cap gets its count — the exact number, not
+        # "200+". The count is the visible total (project-scoped),
+        # which is what the list actually shows.
+        cap_label = getattr(self, "_history_cap_label", None)
+        if cap_label is not None:
+            if total > 200:
+                cap_label.setText(
+                    f"Showing 200 of {total}. Search to find older chats.")
+                cap_label.setVisible(True)
+            else:
+                cap_label.setVisible(False)
+        # F22: the empty state — two wordings, no em-dash (U33).
+        if empty_label is not None:
+            if visible:
+                empty_label.setVisible(False)
+            else:
+                if query:
+                    empty_label.setText(
+                        f"No conversations match '{query}'.")
+                else:
+                    empty_label.setText(
+                        "No conversations yet. Start one with "
+                        "New conversation above.")
+                empty_label.setVisible(True)
 
     def _history_context_menu(self, button, conversation_id, title, pos):
         """Audit C35: the per-chat actions live on the history button's
@@ -21645,7 +21975,7 @@ class ForgeWindow(QMainWindow):
         else:
             messages = self.store.load(conversation_id)
         if messages is None:
-            self.log("Export failed — that conversation no longer exists.")
+            self.log("Export failed. That conversation no longer exists.")
             return
         model = project = None
         if conversation_id is not None:
@@ -21679,7 +22009,7 @@ class ForgeWindow(QMainWindow):
         from . import replay as replay_mod
         messages = self.store.load(conversation_id)
         if messages is None:
-            self.log("Replay export failed — that conversation no longer exists.")
+            self.log("Replay export failed. That conversation no longer exists.")
             return
         model, project = self.store.meta(conversation_id)
         entries = []
@@ -21759,13 +22089,13 @@ class ForgeWindow(QMainWindow):
         if getattr(self, "_side_chat", None) is not None:
             return
         if self.worker and self.worker.isRunning():
-            self.log("Side chat held — a turn is running.")
+            self.log("Side chat held. A turn is running.")
             return
         if self._fold_thread is not None and self._fold_thread.isRunning():
-            self.log("Side chat held — a context fold is running.")
+            self.log("Side chat held. A context fold is running.")
             return
         if getattr(self, "_self_maintenance_active", False):
-            self.log("Side chat held — the maintenance room keeps "
+            self.log("Side chat held. The maintenance room keeps "
                      "its own single thread.")
             return
         # A draft plan sits in the ONE window plan slot awaiting its
@@ -21773,7 +22103,7 @@ class ForgeWindow(QMainWindow):
         # turn would kill the main thread's waiting plan. The gate
         # gets its decision first.
         if self.plan_state and self.plan_state.get("status") == "draft":
-            self.log("Side chat held — a plan is waiting at the gate. "
+            self.log("Side chat held. A plan is waiting at the gate. "
                      "Approve or kill it first.")
             return
         self._side_chat = {"messages": self.messages}
@@ -21782,7 +22112,7 @@ class ForgeWindow(QMainWindow):
         self.side_chat_btn.setEnabled(False)
         self.render()
         self._update_context_gauge()
-        self.log("Side chat opened — a temporary fork of this "
+        self.log("Side chat opened. A temporary fork of this "
                  "conversation. It is never saved; closing it "
                  "discards it.")
 
@@ -21807,7 +22137,7 @@ class ForgeWindow(QMainWindow):
         self.side_chat_btn.setEnabled(True)
         self.render()
         self._update_context_gauge()
-        self.log("Side chat closed — discarded. Nothing was merged "
+        self.log("Side chat closed. Discarded. Nothing was merged "
                  "back into the main thread.")
 
     def load_conversation(self, conversation_id):
@@ -21816,10 +22146,10 @@ class ForgeWindow(QMainWindow):
         # classic refusal stands whenever the turn may not detach
         # (see _leave_stage for the pinned reasons).
         if not self._leave_stage(
-                "Conversation load ignored — a turn is running."):
+                "Conversation load ignored. A turn is running."):
             return
         if self._fold_thread is not None and self._fold_thread.isRunning():
-            self.log("Conversation load ignored — a context fold is running.")
+            self.log("Conversation load ignored. A context fold is running.")
             return  # a fold is mid-flight against the current history
         loaded = self.store.load(conversation_id)
         if not loaded:
@@ -21858,7 +22188,7 @@ class ForgeWindow(QMainWindow):
                 self.log(f"Conversation's model restored: {model}")
             else:
                 self.log(f"⚠ This conversation used '{model}', which is not installed. "
-                         f"Current model: {self.model_combo.currentText()} — check before sending.")
+                         f"Current model: {self.model_combo.currentText()}. Check before sending.")
         if project and project != self.workspace and Path(project).is_dir():
             self.workspace = project
             proj.ensure_project(project)
@@ -21947,18 +22277,18 @@ class ForgeWindow(QMainWindow):
             self.plan_list.addItem(line)
         skribe = plan.get("skribe") or ""
         if skribe.startswith("NOT VERIFIED"):
-            self.plan_list.addItem(f"✗  SKRIBE verification — {skribe}")
+            self.plan_list.addItem(f"✗  SKRIBE verification: {skribe}")
         elif skribe:
-            self.plan_list.addItem(f"✓  SKRIBE verification — {skribe}")
+            self.plan_list.addItem(f"✓  SKRIBE verification: {skribe}")
         else:
-            self.plan_list.addItem("·  SKRIBE verification — the final step, graded by the gate")
+            self.plan_list.addItem("·  SKRIBE verification: the final step, graded by the gate")
         # Item #56: the GoFish rendering lives in its own view
         # under the checklist — the checklist's rows stay exactly
         # the plan's steps plus the SKRIBE line, as before.
         gofish_text = gofish_mod.format_result(plan.get("gofish"))
         self.gofish_view.setPlainText(
             gofish_text or
-            "GoFish review — no review on record for this plan.")
+            "GoFish review. No review on record for this plan.")
         # Item #58: the plan document under the review — the full
         # text the checklist was extracted from. A bare-list draft
         # (or a pre-#58 sidecar) has none on record.
@@ -21989,7 +22319,7 @@ class ForgeWindow(QMainWindow):
         try:
             for e in artifacts_mod.list_artifacts(self.workspace)[:12]:
                 docs.append({
-                    "name": f"{e.get('kind', 'note')} — {e.get('title', '')}",
+                    "name": f"{e.get('kind', 'note')} · {e.get('title', '')}",
                     "path": ".forge/artifacts/" + str(e.get("file", ""))})
             forge_dir = Path(self.workspace) / ".forge"
             if forge_dir.is_dir():
@@ -22033,7 +22363,7 @@ class ForgeWindow(QMainWindow):
         self._pending_gofish = result
         summary = gofish_mod.summary_line(result)
         if summary:
-            self.log("🐠 " + summary + " — findings are in the Plan window.")
+            self.log("🐠 " + summary + ". Findings are in the Plan window.")
 
     def on_plan_document(self, text):
         """Item #58: the worker's plan document, emitted just
@@ -22104,7 +22434,7 @@ class ForgeWindow(QMainWindow):
                  "Shell job' approves it in the shell; nothing "
                  "builds before that.")
         self._record_artifact(
-            "design", f"Design Shell plan — {job}", result)
+            "design", f"Design Shell plan: {job}", result)
 
     def _design_gate_approve(self, token):
         """Spend the gate: the token must match the pending entry
@@ -22131,7 +22461,7 @@ class ForgeWindow(QMainWindow):
     def _design_gate_approve_clicked(self):
         pending = getattr(self, "_design_gate_pending", None)
         if not pending:
-            self.log("No Design Shell job is waiting at the gate — "
+            self.log("No Design Shell job is waiting at the gate: "
                      "a design_shell plan presents one first.")
             return
         self._design_gate_approve(pending[1])
@@ -22178,10 +22508,10 @@ class ForgeWindow(QMainWindow):
             ((f"Request: {request}\n\n" if request else "")
              + planning_mod.format_steps(list(steps))))
         self._plan_persist()
-        self.agent_state.setText("●  PAUSED — PLAN AWAITING YOUR CALL")
+        self.agent_state.setText("●  PAUSED · PLAN AWAITING YOUR CALL")
         self.agent_state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
         self.ember.set_mode("paused"); self.ember_label.setText("PAUSED")
-        self.log(f"Plan drafted: {len(steps)} step(s). Approve, edit, or kill it — "
+        self.log(f"Plan drafted: {len(steps)} step(s). Approve, edit, or kill it: "
                  "nothing runs until you decide.")
 
     def _plan_gate_action(self, action, comment=None):
@@ -22197,7 +22527,7 @@ class ForgeWindow(QMainWindow):
             # resolving one now would strand the gate when the
             # revision lands. The gate re-opens then.
             self.log("The driver is revising the plan against your "
-                     "comment — the gate re-opens when the revision "
+                     "comment. The gate re-opens when the revision "
                      "lands.")
             return
         if action == "edit":
@@ -22208,7 +22538,7 @@ class ForgeWindow(QMainWindow):
             plan["status"] = "killed"
             self._plan_render()
             self._plan_persist()
-            self.log("Plan killed — nothing was executed.")
+            self.log("Plan killed: nothing was executed.")
             if worker:
                 worker.resolve_plan("kill")
             return
@@ -22244,7 +22574,7 @@ class ForgeWindow(QMainWindow):
             except Exception as exc:
                 self.log("Could not save the superseded "
                          f"trajectory: {exc}")
-            self.log("Previous plan's trajectory superseded — "
+            self.log("Previous plan's trajectory superseded: "
                      "the new plan replaces it.")
         self.log(f"Plan approved: {len(plan['steps'])} step(s). Working them in order.")
         # H5: the approval is a decision the fold must not eat —
@@ -22280,7 +22610,7 @@ class ForgeWindow(QMainWindow):
             "This cannot be undone.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
-            return False, "Plan kept — nothing abandoned."
+            return False, "Plan kept: nothing abandoned."
         return self.abandon_plan()
 
     def abandon_plan(self):
@@ -22306,11 +22636,11 @@ class ForgeWindow(QMainWindow):
         if not plan or plan.get("status") not in ("running",
                                                   "interrupted"):
             if plan and plan.get("status") == "draft":
-                message = ("That plan is still a draft — Kill ends "
+                message = ("That plan is still a draft. Kill ends "
                            "it; Abandon is for a plan that ran.")
             elif plan and plan.get("status") in ("done", "killed",
                                                  "abandoned"):
-                message = "That plan is already over — nothing to abandon."
+                message = "That plan is already over: nothing to abandon."
             else:
                 message = "No plan to abandon."
             self.log(message)
@@ -22318,7 +22648,7 @@ class ForgeWindow(QMainWindow):
         worker = self.worker if (self.worker
                                  and self.worker.isRunning()) else None
         if worker:
-            message = ("A turn is running — stop it first, then "
+            message = ("A turn is running. Stop it first, then "
                        "abandon the plan.")
             self.log(message)
             return False, message
@@ -22350,7 +22680,7 @@ class ForgeWindow(QMainWindow):
             APP_DIR, self.conversation_id,
             f"Plan abandoned: {title[0][:80] if title else 'Plan'} "
             f"({len(plan['steps'])} step(s))")
-        message = ("Plan abandoned — it ends here, and no resume "
+        message = ("Plan abandoned. It ends here, and no resume "
                    "will pick it back up.")
         self.log(message)
         return True, message
@@ -22370,18 +22700,18 @@ class ForgeWindow(QMainWindow):
             return
         if getattr(self, "_plan_revising", False):
             self.log("A revision is already under way against your "
-                     "last comment — the gate re-opens when it lands.")
+                     "last comment. The gate re-opens when it lands.")
             return
         from_desktop = comment is None
         if from_desktop:
             comment = self.plan_comment_edit.toPlainText()
         comment = str(comment or "").strip()
         if not comment:
-            self.log("Type the change you want first — an empty "
+            self.log("Type the change you want first. An empty "
                      "comment can't revise the plan, and the draft "
                      "is still waiting at the gate.")
             self.statusBar().showMessage(
-                "Empty comment — the drafted plan still waits.")
+                "Empty comment. The drafted plan still waits.")
             return
         planning_mod.record_comment(plan, comment)
         self._plan_persist()
@@ -22403,7 +22733,7 @@ class ForgeWindow(QMainWindow):
             # No live turn holds the gate (Stop raced the click):
             # the comment stays on the plan's record, and the
             # draft's settle speaks for the gate from here.
-            self.log("No live turn is holding the gate — the "
+            self.log("No live turn is holding the gate. The "
                      "comment is on the plan's record, but no "
                      "revision is running.")
 
@@ -22425,17 +22755,17 @@ class ForgeWindow(QMainWindow):
         self._plan_persist()
         self.log(f"Plan revised against your comment: {len(steps)} "
                  "step(s). Approve, edit, comment again, or kill "
-                 "it — nothing runs until you decide.")
+                 "it: nothing runs until you decide.")
 
     def _plan_edit(self):
         plan = self.plan_state
         if not plan or plan["status"] != "draft":
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("Edit the plan — one step per line")
+        dialog.setWindowTitle("Edit the plan · one step per line")
         dialog.setMinimumWidth(560)
         lay = QVBoxLayout(dialog)
-        lay.addWidget(QLabel("Rewrite the steps freely — numbering is optional. "
+        lay.addWidget(QLabel("Rewrite the steps freely: numbering is optional. "
                              "Saving re-reads them; Approve then runs THIS plan."))
         editor = QPlainTextEdit()
         editor.setPlainText(planning_mod.format_steps(
@@ -22449,7 +22779,7 @@ class ForgeWindow(QMainWindow):
             return
         steps = planning_mod.steps_from_editor(editor.toPlainText())
         if not steps:
-            self.log("Plan edit left no steps — the drafted plan stands.")
+            self.log("Plan edit left no steps. The drafted plan stands.")
             return
         plan["steps"] = [{"text": t, "state": "pending", "resource": ""}
                          for t in steps]
@@ -22508,7 +22838,7 @@ class ForgeWindow(QMainWindow):
         elif not outcome.get("graded"):
             plan["skribe"] = "no writes to verify"
         elif unverified:
-            plan["skribe"] = (f"NOT VERIFIED — {unverified} file(s) unverified, "
+            plan["skribe"] = (f"NOT VERIFIED: {unverified} file(s) unverified, "
                               f"{verified} verified")
         else:
             plan["skribe"] = f"{verified} file(s) verified"
@@ -22532,7 +22862,7 @@ class ForgeWindow(QMainWindow):
             pass
         info = info or {}
         if info.get("ok"):
-            self.log(f"Draft skill '{info.get('name', '?')}' saved — "
+            self.log(f"Draft skill '{info.get('name', '?')}' saved: "
                      f"DISABLED until you enable it in Customize.")
         else:
             self.log(f"Could not save draft skill "
@@ -22540,7 +22870,7 @@ class ForgeWindow(QMainWindow):
         if info.get("recipe"):
             if info.get("recipe_ok"):
                 self.log(f"Draft recipe '{info['recipe']}' saved in "
-                         f"the recipes drafts folder — move it to "
+                         f"the recipes drafts folder. Move it to "
                          f"recipes/ to run it.")
             else:
                 self.log(f"Could not save draft recipe "
@@ -22562,7 +22892,7 @@ class ForgeWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.settings["scheduled_jobs"] = dialog.jobs
             self.save_settings()
-            self.log(f"Schedule saved — {len(dialog.jobs)} job(s).")
+            self.log(f"Schedule saved: {len(dialog.jobs)} job(s).")
 
     def _scheduler_tick(self):
         if self.worker and self.worker.isRunning():
@@ -22604,13 +22934,13 @@ class ForgeWindow(QMainWindow):
                 self.plugin_ctx.workspace = workspace
                 self._sync_presend_scan()
                 self.refresh_projects()
-            self.log(f"⏰ Scheduled job firing: {job.get('name')} — if it needs approval, it will park and wait for you.")
+            self.log(f"⏰ Scheduled job firing: {job.get('name')}. If it needs approval, it will park and wait for you.")
             self.eventlog.record("scheduled_job", name=name[:60])
             self.new_chat()
             self.input.setPlainText(job.get("prompt", ""))
             self.send_message()
         except Exception as exc:
-            self.log(f"⏰ Scheduled job '{name}' could not start — it will retry on the next tick. ({exc})")
+            self.log(f"⏰ Scheduled job '{name}' could not start. It will retry on the next tick. ({exc})")
             _rollback()
             return
         if getattr(self, "_send_queued", False) or \
@@ -22624,7 +22954,7 @@ class ForgeWindow(QMainWindow):
             self.settings["scheduled_jobs"] = jobs
             self.save_settings()
         else:
-            self.log(f"⏰ Scheduled job '{name}' could not start — it will retry on the next tick.")
+            self.log(f"⏰ Scheduled job '{name}' could not start. It will retry on the next tick.")
             _rollback()
 
     def _watch_tick(self):
@@ -22686,7 +23016,7 @@ class ForgeWindow(QMainWindow):
                 and self.worker is not before)
         if not started:
             self.log(f"✎ AI-comment in {m['file']}:{m['line']} could not "
-                     "start a turn — it stays in place and will be "
+                     "start a turn. It stays in place and will be "
                      "picked up again on the next idle tick.")
             return
         self._watch_seen.add(m["key"])
@@ -22697,11 +23027,11 @@ class ForgeWindow(QMainWindow):
         self._watch_seen = set(self.settings["watch_seen"])
         self.save_settings()
         if getattr(self, "_send_queued", False):
-            self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}) — queued, it runs when the current turn ends.")
+            self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}). Queued, it runs when the current turn ends.")
         else:
-            self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}) — running it now.")
+            self.log(f"✎ AI-comment picked up from {m['file']}:{m['line']} ({mark}): running it now.")
         if len(markers) > 1:
-            self.log(f"✎ {len(markers) - 1} more AI marker(s) waiting — they run one per turn.")
+            self.log(f"✎ {len(markers) - 1} more AI marker(s) waiting. They run one per turn.")
         self.eventlog.record("watch_pickup", file=m["file"], line=m["line"], marker_kind=m["kind"])
 
     def apply_update(self, zip_path=None):
@@ -22730,7 +23060,7 @@ class ForgeWindow(QMainWindow):
                                   "Checking the update package",
                                   warning=True)
                 return
-            self.log("Candidate checksum verified — sha256 "
+            self.log("Candidate checksum verified: sha256 "
                      f"{str(candidate.get('sha256', ''))[:12]}…")
             extras = []
         else:
@@ -22763,7 +23093,7 @@ class ForgeWindow(QMainWindow):
             "was_running": bool(self.worker and self.worker.isRunning()),
             "last_prompt": last_prompt, "reason": "update"})
         upd.spawn_updater(ROOT_DIR, APP_DIR, zip_path, extras)
-        self.log("Update handed to the external updater — quitting to install. See you in a moment.")
+        self.log("Update handed to the external updater: quitting to install. See you in a moment.")
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
         QTimer.singleShot(400, QApplication.instance().quit)
@@ -22774,7 +23104,7 @@ class ForgeWindow(QMainWindow):
             if result.get("ok"):
                 self.log("⬆ Update installed cleanly. " + " · ".join(result.get("steps", [])[-2:]))
             else:
-                self.log(f"⚠ Update problem: {result.get('error', 'unknown')} — the previous version may still be in place.")
+                self.log(f"⚠ Update problem: {result.get('error', 'unknown')}. The previous version may still be in place.")
             upd.clear_update_result(APP_DIR)
         state = upd.read_resume_state(APP_DIR)
         if not state:
@@ -22787,9 +23117,9 @@ class ForgeWindow(QMainWindow):
             self.mode_combo.setCurrentText(state["mode"].capitalize())
         if state.get("was_running") and state.get("last_prompt"):
             self.input.setPlainText(state["last_prompt"])
-            self.log("↩ Picked up where you left off — your interrupted task is in the input box. Send resumes it.")
+            self.log("↩ Picked up where you left off. Your interrupted task is in the input box. Send resumes it.")
         elif state.get("reason") == "update":
-            self.log("↩ Back from the update — same conversation, same place.")
+            self.log("↩ Back from the update. Same conversation, same place.")
 
     def _toggle_deck(self):
         if self.deck._server:
@@ -22850,11 +23180,11 @@ class ForgeWindow(QMainWindow):
         the first version returned without a word when its QR library
         was missing, and the owner got no window at all (2026-11-08)."""
         if not self.deck._server:
-            self.log("Phone deck is off — start it to get its QR code.")
+            self.log("Phone deck is off. Start it to get its QR code.")
             return
         pix = qr_mod.qr_pixmap(self.deck.url, scale=8)
         if pix is None:
-            self.log("⚠ QR code could not be rendered — the deck-link "
+            self.log("⚠ QR code could not be rendered. The deck-link "
                      "window shows the address to type instead.")
         dlg = getattr(self, "_deck_link_dialog", None)
         if dlg is None:
@@ -22890,8 +23220,8 @@ class ForgeWindow(QMainWindow):
             # bench would play them back for hours. Twenty held is
             # a generous backlog; past it the phone hears the truth.
             if len(self._phone_queue) >= 20:
-                self.log("📱 Phone prompt refused — 20 prompts are already held.")
-                return False, ("The queue is full (20 prompts held) — "
+                self.log("📱 Phone prompt refused. 20 prompts are already held.")
+                return False, ("The queue is full (20 prompts held): "
                                "this one was not kept. Try again when "
                                "a turn ends.")
             while len(self._phone_queue_ws) < len(self._phone_queue):
@@ -22902,8 +23232,8 @@ class ForgeWindow(QMainWindow):
             self.log(f"📱 Phone prompt queued until the current turn ends "
                      f"(#{position} in line).")
             if position == 1:
-                return True, "Queued — it runs when the current turn ends."
-            return True, (f"Queued — #{position} in line; it runs after "
+                return True, "Queued. It runs when the current turn ends."
+            return True, (f"Queued · #{position} in line; it runs after "
                           f"the prompts ahead of it.")
         self.log("📱 Phone prompt received.")
         self.input.setPlainText(text)
@@ -22913,7 +23243,7 @@ class ForgeWindow(QMainWindow):
         # "Received" would be a lie about a turn that never ran.
         if getattr(self, "_send_refusal", None):
             return False, self._send_refusal
-        return True, "Received — the Forge is on it."
+        return True, "Received. The Forge is on it."
 
     def _drain_phone_queue(self):
         """Fire the oldest held phone prompt, if any — one per turn
@@ -23005,10 +23335,10 @@ class ForgeWindow(QMainWindow):
         self._push_deck_attachments()
         self._refresh_queue_panel()
         position = len(self._queue_entries_for_current())
-        self.log(f"Queued — it runs when the current turn ends "
+        self.log(f"Queued. It runs when the current turn ends "
                  f"(#{position} in line).")
         self.statusBar().showMessage(
-            "Queued — it runs when the current turn ends.")
+            "Queued. It runs when the current turn ends.")
 
     def _drain_message_queue(self):
         """Fire the oldest held message for THIS conversation, if
@@ -23072,7 +23402,7 @@ class ForgeWindow(QMainWindow):
             self.pending_upload_note = saved_note
             self._message_queue.insert(0, entry)
             self._refresh_queue_panel()
-            self.log(f"Queued message held — {self._send_refusal}")
+            self.log(f"Queued message held: {self._send_refusal}")
 
     def _send_next_queued(self):
         """The queue panel's Send next: fire the oldest held
@@ -23103,7 +23433,7 @@ class ForgeWindow(QMainWindow):
         self._message_queue = [e for e in self._message_queue
                                if e.get("id") != entry_id]
         if len(self._message_queue) != before:
-            self.log("Queued message deleted — it will not send.")
+            self.log("Queued message deleted. It will not send.")
         self._queue_editing_id = None
         self._refresh_queue_panel()
 
@@ -23120,7 +23450,7 @@ class ForgeWindow(QMainWindow):
                                if e.get("id") not in ids]
         self._queue_editing_id = None
         self._refresh_queue_panel()
-        self.log(f"Cleared {len(current)} queued message(s) — "
+        self.log(f"Cleared {len(current)} queued message(s): "
                  "none of them will send.")
 
     def _refresh_queue_panel(self):
@@ -23169,11 +23499,11 @@ class ForgeWindow(QMainWindow):
         if count:
             if self._bench_busy():
                 self._queue_count_label.setText(
-                    f"{count} waiting — sends when the current "
+                    f"{count} waiting. Sends when the current "
                     "turn ends")
             else:
                 self._queue_count_label.setText(
-                    f"{count} waiting — Send next runs the oldest")
+                    f"{count} waiting. Send next runs the oldest")
         else:
             self._queue_count_label.setText("")
         self._queue_send_next_btn.setEnabled(
@@ -23288,24 +23618,24 @@ class ForgeWindow(QMainWindow):
                 # decision for ANY phone action to release.
                 holder["result"] = (False,
                     "The driver is revising the plan against a "
-                    "comment — the gate re-opens when the revision "
+                    "comment. The gate re-opens when the revision "
                     "lands.")
             elif action == "approve":
                 self._plan_gate_action("approve")
-                holder["result"] = (True, "Plan approved — working the steps.")
+                holder["result"] = (True, "Plan approved: working the steps.")
             elif action == "kill":
                 self._plan_gate_action("kill")
-                holder["result"] = (True, "Plan killed — nothing was executed.")
+                holder["result"] = (True, "Plan killed: nothing was executed.")
             elif action == "comment":
                 comment = str(holder.get("comment") or "").strip()
                 if not comment:
                     holder["result"] = (False,
-                        "Type the change you want first — an empty "
+                        "Type the change you want first. An empty "
                         "comment can't revise the plan.")
                 else:
                     self._plan_gate_action("comment", comment)
                     holder["result"] = (True,
-                        "Comment sent — the driver is revising the plan.")
+                        "Comment sent. The driver is revising the plan.")
             else:
                 holder["result"] = (False, "Unknown plan action.")
         except Exception as exc:
@@ -23363,12 +23693,12 @@ class ForgeWindow(QMainWindow):
                     "That proposal is already decided or expired.")
             elif self.decide_proposal(proposal_id, accept):
                 holder["result"] = (True,
-                    "Proposal accepted — running through the gate."
+                    "Proposal accepted: running through the gate."
                     if accept else
-                    "Proposal declined — nothing runs.")
+                    "Proposal declined: nothing runs.")
             else:
                 holder["result"] = (False,
-                    "A turn is already running — the proposal "
+                    "A turn is already running. The proposal "
                     "stays pending; accept it again when the "
                     "bench is free.")
         except Exception as exc:
@@ -23441,7 +23771,7 @@ class ForgeWindow(QMainWindow):
         if on == self.council_check.isChecked():
             return
         self.council_check.setChecked(on)
-        self.log(f"📱 Council {'on' if on else 'off'} — switched from the phone")
+        self.log(f"📱 Council {'on' if on else 'off'} · switched from the phone")
 
     # ---------- phone deck: project switching ----------
     def _sync_deck_project(self):
@@ -23484,7 +23814,7 @@ class ForgeWindow(QMainWindow):
             self.log(f"📱 Project already active: {path}")
             return True, f"Already the active project: {Path(path).name}"
         if self.worker and self.worker.isRunning():
-            message = ("The Forge is mid-turn — the bench won't switch projects "
+            message = ("The Forge is mid-turn. The bench won't switch projects "
                        "until the turn ends (same rule as the GUI).")
             self.log("📱 Project switch held: mid-turn.")
             return False, message
@@ -23492,16 +23822,16 @@ class ForgeWindow(QMainWindow):
             self.projects.append({"name": Path(path).name, "path": path})
         self.set_project(path)
         self._sync_deck_project()
-        return True, f"Project active: {Path(path).name} — new conversation started there."
+        return True, f"Project active: {Path(path).name}. New conversation started there."
 
     def _phone_project_command(self, arg: str):
         """'/project' typed into the deck prompt box. Bare = status.
         Returns the (ok, message) the deck reports to the phone."""
         if not arg:
             names = ", ".join(e.get("name", "?") for e in self.projects) or "none yet"
-            self.log(f"📱 Project: {Path(self.workspace).name} — {self.workspace} "
+            self.log(f"📱 Project: {Path(self.workspace).name} · {self.workspace} "
                      f"· known projects: {names}")
-            return True, f"Project: {Path(self.workspace).name} — {self.workspace}"
+            return True, f"Project: {Path(self.workspace).name} · {self.workspace}"
         return self._switch_project_from_deck(arg)
 
     def fork_conversation(self):
@@ -23512,7 +23842,7 @@ class ForgeWindow(QMainWindow):
         # mid-fold persisted the fork and then load_conversation
         # silently refused to open it.
         if self._fold_thread is not None and self._fold_thread.isRunning():
-            self.log("Fork ignored — a context fold is running.")
+            self.log("Fork ignored. A context fold is running.")
             return
         # Item #54: the persistent fork forks the MAIN thread — an
         # open side chat is discarded first so the dialog's message
@@ -23521,7 +23851,7 @@ class ForgeWindow(QMainWindow):
             self.close_side_chat()
         self.persist_conversation()
         if not self.conversation_id:
-            QMessageBox.information(self, "Fork", "Nothing to fork yet — this conversation has no messages.")
+            QMessageBox.information(self, "Fork", "Nothing to fork yet. This conversation has no messages.")
             return
         dialog = ForkDialog(self, self.messages)
         if dialog.exec() != QDialog.Accepted:
@@ -23532,7 +23862,7 @@ class ForgeWindow(QMainWindow):
         new_id = self.store.fork(self.conversation_id, idx)
         if new_id:
             self.load_conversation(new_id)
-            self.log(f"Forked conversation {self.conversation_id} from message {idx + 1} — original untouched.")
+            self.log(f"Forked conversation {self.conversation_id} from message {idx + 1}. Original untouched.")
 
     # ---------- chat tabs (owner directive, 2026-11-08) ----------
 
@@ -23586,25 +23916,25 @@ class ForgeWindow(QMainWindow):
             is_active = cid == active
             saved = by_id.get(cid) if cid is not None else None
             if saved is not None:
-                model = saved.get("model") or "—"
+                model = saved.get("model") or "-"
                 project_full = saved.get("project") or ""
-                activity = saved.get("updated_at") or "—"
+                activity = saved.get("updated_at") or "-"
             elif cid is None:
                 combo = getattr(self, "model_combo", None)
                 model = (combo.currentText().strip()
-                         if combo is not None else "") or "—"
+                         if combo is not None else "") or "-"
                 project_full = self.workspace or ""
                 started = getattr(self, "_turn_started", 0.0) or 0.0
                 activity = (time.strftime("%Y-%m-%d %H:%M:%S",
                                           time.gmtime(started))
-                            if started else "—")
+                            if started else "-")
             else:
                 model, project_full = self.store.meta(cid)
-                model = model or "—"
+                model = model or "-"
                 project_full = project_full or ""
-                activity = "—"
+                activity = "-"
             project = ((Path(project_full).name or project_full)
-                       if project_full else "—")
+                       if project_full else "-")
             rows.append({
                 "id": cid, "title": self._conversation_title(cid),
                 "state": _session_state(is_active, running, gate_pending),
@@ -23856,12 +24186,12 @@ class ForgeWindow(QMainWindow):
             self.mic_btn.setText("🎙 Dictate")
             self._recorder = None
             if len(wav) < 5000:
-                self.log("Dictation too short — nothing transcribed.")
+                self.log("Dictation too short: nothing transcribed.")
                 return
             dest = APP_DIR / "dictation.wav"
             dest.write_bytes(wav)
             out_txt = dest.with_suffix(".txt")
-            self.log("🎙 Dictation captured — transcribing locally…")
+            self.log("🎙 Dictation captured · transcribing locally…")
             self._start_transcription(dest, out_txt,
                                       lambda msg: self._dictation_done(msg, out_txt))
             return
@@ -23895,7 +24225,7 @@ class ForgeWindow(QMainWindow):
             current = self.input.toPlainText()
             self.input.setPlainText((current + " " + text).strip() if current else text)
             self.input.setFocus()
-            self.log("🎙 Dictation is in the input box — edit it, then Send. Nothing was auto-sent.")
+            self.log("🎙 Dictation is in the input box. Edit it, then Send. Nothing was auto-sent.")
 
     # ---------- Item #71: pending attachments ----------
     def _sync_pending(self):
@@ -24044,15 +24374,15 @@ class ForgeWindow(QMainWindow):
         rel = f".forge/uploads/{dest.name}"
         self._append_pending_upload(
             dest.name,
-            f"[Owner attached a file: {dest.name} — saved at {rel} in this project.]")
-        self.log(f"Upload received → {rel} ({dest.stat().st_size} bytes) — shell receipt, not a claim.")
+            f"[Owner attached a file: {dest.name}. Saved at {rel} in this project.]")
+        self.log(f"Upload received → {rel} ({dest.stat().st_size} bytes). Shell receipt, not a claim.")
         self.receipt_bar.setText(f"🧾  SHELL RECEIPT · upload → {rel} · {dest.stat().st_size} bytes · {datetime.now().strftime('%H:%M:%S')}")
         self.eventlog.record("upload", name=dest.name, bytes=dest.stat().st_size)
         if ext in AUDIO_EXTS:
             out_txt = dest.with_suffix(dest.suffix + ".txt")
             self._start_transcription(dest, out_txt,
                                       lambda msg: (self.log(msg), self.eventlog.record("transcribe", detail=msg[:160])))
-            self.log(f"Audio attached — transcription queued ({dest.name}).")
+            self.log(f"Audio attached · transcription queued ({dest.name}).")
 
     def _ingest_attachment_bytes(self, name, data):
         """Item #71: one uploaded file's raw bytes become a pending
@@ -24064,13 +24394,13 @@ class ForgeWindow(QMainWindow):
         import tempfile
         safe = Path(str(name or "")).name or "attachment"
         if not data:
-            return False, "That file was empty — nothing was attached."
+            return False, "That file was empty: nothing was attached."
         ext = Path(safe).suffix.lower()
         if ext in IMAGE_EXTS:
             self._append_pending_image(
                 safe, base64.b64encode(bytes(data)).decode("ascii"))
             self.log(f"Image attached from the phone: {safe}")
-            return True, (f"Image attached: {safe} — it rides the "
+            return True, (f"Image attached: {safe}. It rides the "
                           "next prompt you send.")
         tmpdir = Path(tempfile.mkdtemp(prefix="forge-attach-"))
         try:
@@ -24084,16 +24414,16 @@ class ForgeWindow(QMainWindow):
         rel = f".forge/uploads/{dest.name}"
         self._append_pending_upload(
             dest.name,
-            f"[Owner attached a file: {dest.name} — saved at {rel} in this project.]")
+            f"[Owner attached a file: {dest.name}. Saved at {rel} in this project.]")
         self.log(f"Upload received from the phone → {rel} "
-                 f"({len(data)} bytes) — shell receipt, not a claim.")
+                 f"({len(data)} bytes). Shell receipt, not a claim.")
         self.receipt_bar.setText(f"🧾  SHELL RECEIPT · upload → {rel} · {len(data)} bytes · {datetime.now().strftime('%H:%M:%S')}")
         self.eventlog.record("upload", name=dest.name, bytes=len(data))
         if ext in AUDIO_EXTS:
             out_txt = dest.with_suffix(dest.suffix + ".txt")
             self._start_transcription(dest, out_txt,
                                       lambda msg: (self.log(msg), self.eventlog.record("transcribe", detail=msg[:160])))
-            self.log(f"Audio attached — transcription queued ({dest.name}).")
+            self.log(f"Audio attached · transcription queued ({dest.name}).")
         return True, f"Attached: {dest.name} → project uploads"
 
     def _deck_attachment_remove(self, index, holder):
@@ -24375,7 +24705,7 @@ class ForgeWindow(QMainWindow):
             # right after calling here, and without it they told
             # their caller "received / started" about a turn that
             # never ran.
-            self._send_refusal = "Nothing to send — the prompt was empty."
+            self._send_refusal = "Nothing to send. The prompt was empty."
             return
         # Message queue (2026-11-11): a busy bench no longer
         # refuses the send — it QUEUES it. The button reads
@@ -24388,7 +24718,7 @@ class ForgeWindow(QMainWindow):
         if self._bench_busy():
             if self._edit_target is not None:
                 self._send_refusal = (
-                    "A turn is running — your edit stays in the "
+                    "A turn is running. Your edit stays in the "
                     "box; send it when the turn ends.")
                 self.log(self._send_refusal)
                 self.statusBar().showMessage(self._send_refusal)
@@ -24404,12 +24734,12 @@ class ForgeWindow(QMainWindow):
         if getattr(self, "_side_chat", None) is not None \
                 and self.mode_combo.currentText().lower() == "plan":
             refusal = ("Plan mode is not available in a side chat "
-                       "— close the side chat to plan.")
+                       ". Close the side chat to plan.")
             self._send_refusal = refusal
             self.log("Side chat: Plan mode stays with the main thread "
-                     "— close the side chat to plan.")
+                     ". Close the side chat to plan.")
             self.statusBar().showMessage(
-                "Plan mode is not available in a side chat — close it to plan.")
+                "Plan mode is not available in a side chat. Close it to plan.")
             return
         # Item #64: the parallel-turn cap (Settings → Seats &
         # limits). Background turns count toward it: a send that
@@ -24420,7 +24750,7 @@ class ForgeWindow(QMainWindow):
                            if not self._is_stage(s)]
         if len(live_background) >= self._max_parallel_turns():
             message = (f"Parallel turn limit reached "
-                       f"({self._max_parallel_turns()}) — a turn is "
+                       f"({self._max_parallel_turns()}). A turn is "
                        "still running in another conversation. Finish "
                        "or stop one first (Mission Control).")
             self._send_refusal = message
@@ -24443,14 +24773,14 @@ class ForgeWindow(QMainWindow):
             if perm_mod.is_sensitive_path(token):
                 # H2: refused by the context-attach guard, not by a
                 # missing file — say which, plainly.
-                self.log(f"Mention @{token} names a sensitive file — "
+                self.log(f"Mention @{token} names a sensitive file: "
                          "its content was NOT attached.")
             else:
-                self.log(f"Mention @{token} did not match a file — sent as plain text.")
+                self.log(f"Mention @{token} did not match a file. Sent as plain text.")
         model = self.model_combo.currentText().strip()
         if not model:
             self._send_refusal = ("No model is installed or selected "
-                                  "— nothing was sent.")
+                                  ". Nothing was sent.")
             QMessageBox.warning(self, "No model", "Install or select an Ollama model first."); return
         # Item #69: the registry scope/role guard for provider
         # models. A provider model the registry disables, scopes to
@@ -24466,7 +24796,7 @@ class ForgeWindow(QMainWindow):
                     scope=scope, role="driver"):
                 reason = (f"Model '{model}' is not allowed to drive a "
                           f"{scope} session (registry scope/role in "
-                          "Customize → Providers) — nothing was sent.")
+                          "Customize → Providers): nothing was sent.")
                 self._send_refusal = reason
                 self.log("Provider guard: " + reason)
                 QMessageBox.warning(self, "Provider model refused", reason)
@@ -24490,7 +24820,7 @@ class ForgeWindow(QMainWindow):
         if self.pending_images or \
                 any(m.get("images") for m in self.messages):
             if self._model_accepts_images(model) is False:
-                refusal = (f"{model} can't see images — remove the "
+                refusal = (f"{model} can't see images. Remove the "
                            "attachment or pick a model that takes "
                            "images.")
                 self.log(refusal)
@@ -24617,7 +24947,7 @@ class ForgeWindow(QMainWindow):
         if not self._seen_once(self._seat_refusals_seen, key):
             return
         self.log(f"{label} seat: '{refused}' is not on the governing "
-                 f"roster — seat refused; {resolved} holds the seat "
+                 f"roster. Seat refused; {resolved} holds the seat "
                  f"instead.")
 
     def _bound_turn_model(self, model):
@@ -24642,7 +24972,7 @@ class ForgeWindow(QMainWindow):
             self.settings.get("governing_roster", ""))
         if refused is not None:
             self.log(f"Seat binding {mode} → {seat}: '{refused}' is not "
-                     f"on the governing roster — {model} drives this "
+                     f"on the governing roster: {model} drives this "
                      f"turn instead.")
             return model
         # Item #69: a provider model named by a seat binding skips
@@ -24657,7 +24987,7 @@ class ForgeWindow(QMainWindow):
                     scope=scope, role="driver"):
                 self.log(f"Seat binding {mode} → {seat}: '{resolved}' "
                          f"is not registry-allowed to drive a {scope} "
-                         f"session — {model} drives this turn instead.")
+                         f"session: {model} drives this turn instead.")
                 return model
             if resolved != model:
                 self.log(f"Seat binding: the {seat} seat ({resolved}) "
@@ -24667,7 +24997,7 @@ class ForgeWindow(QMainWindow):
                      for i in range(self.model_combo.count())]
         if not council_mod.model_installed(resolved, installed):
             self.log(f"Seat binding {mode} → {seat}: '{resolved}' is not "
-                     f"installed — {model} drives this turn instead.")
+                     f"installed: {model} drives this turn instead.")
             return model
         if resolved != model:
             self.log(f"Seat binding: the {seat} seat ({resolved}) drives "
@@ -24698,7 +25028,7 @@ class ForgeWindow(QMainWindow):
                     self._provider_config(), tester_model,
                     scope=_scope, role="tester"):
             self.log(f"Tester seat: provider model '{tester_model}' "
-                     "is not registry-allowed as tester — "
+                     "is not registry-allowed as tester: "
                      f"{seats_mod.SEAT_DEFAULTS['tester']} holds the "
                      "seat instead.")
             tester_model = seats_mod.SEAT_DEFAULTS["tester"]
@@ -24724,7 +25054,7 @@ class ForgeWindow(QMainWindow):
                     self._provider_config(), reviewer_model,
                     scope=_scope, role="reviewer"):
             self.log(f"Reviewer seat: provider model '{reviewer_model}' "
-                     "is not registry-allowed as reviewer — "
+                     "is not registry-allowed as reviewer: "
                      f"{seats_mod.SEAT_DEFAULTS['reviewer']} holds the "
                      "seat instead.")
             reviewer_model = seats_mod.SEAT_DEFAULTS["reviewer"]
@@ -25039,30 +25369,30 @@ class ForgeWindow(QMainWindow):
             tasks = [str(item).strip() for item in (items or [])]
         tasks = [task for task in tasks if task]
         if not tasks:
-            return False, ("Type at least one item — one per line.")
+            return False, ("Type at least one item. One per line.")
         if not independent:
             return False, (
                 "Fan-out needs independent items: confirm none of "
-                "these waits on another — dependent steps are "
+                "these waits on another. Dependent steps are "
                 "never fanned out.")
         if getattr(self, "_fanout_run", None) is not None:
-            return False, ("Fan-out refused — a fan-out is already "
+            return False, ("Fan-out refused. A fan-out is already "
                            "running. Wait for it to finish first.")
         started = self.fan_out_batch(
             [{"task": task, "independent": True}
              for task in tasks],
             sequential=sequential)
         if not started:
-            return False, ("Fan-out refused — the activity log "
+            return False, ("Fan-out refused. The activity log "
                            "says why.")
         count = len(tasks)
         run = getattr(self, "_fanout_run", None)
         if run is not None and run.sequential:
             return True, (f"Running {count} item"
                           f"{'s' if count != 1 else ''} one at a "
-                          "time — Mission Control tracks them.")
+                          "time. Mission Control tracks them.")
         return True, (f"Fanned out {count} item"
-                      f"{'s' if count != 1 else ''} — Mission "
+                      f"{'s' if count != 1 else ''}. Mission "
                       "Control tracks them.")
 
     def open_fan_out_dialog(self):
@@ -25093,7 +25423,7 @@ class ForgeWindow(QMainWindow):
         switching conversations does today, and Mission Control
         tracks every stream."""
         if getattr(self, "_fanout_run", None) is not None:
-            message = ("Fan-out refused — a fan-out is already "
+            message = ("Fan-out refused. A fan-out is already "
                        "running. Wait for it to finish first.")
             self.log(message)
             self.statusBar().showMessage(message)
@@ -25119,7 +25449,7 @@ class ForgeWindow(QMainWindow):
         if len([s for s in self._live_streams()
                 if not self._is_stage(s)]) \
                 >= self._max_parallel_turns():
-            message = (f"Fan-out refused — parallel turns are already "
+            message = (f"Fan-out refused. Parallel turns are already "
                        f"at the cap ({self._max_parallel_turns()}). "
                        "Finish or stop one first (Mission Control).")
             self.log(message)
@@ -25133,7 +25463,7 @@ class ForgeWindow(QMainWindow):
             # queue at once, so say so plainly instead of
             # leaving a silent queued run.
             self._fanout_run = None
-            message = ("Fan-out refused — no fanned turn could start "
+            message = ("Fan-out refused. No fanned turn could start "
                        "(the stage turn cannot detach right now). "
                        "Nothing ran; try again when the stage is idle.")
             self.log(message)
@@ -25222,7 +25552,7 @@ class ForgeWindow(QMainWindow):
                           if r.get("unparsed")
                           and r.get("status") not in ("failed", "stalled"))
             clean = len(run.results) - flagged - failed
-            self.log(f"Fan-out finished — {len(run.results)} item(s): "
+            self.log(f"Fan-out finished: {len(run.results)} item(s): "
                      f"{clean} clean handoff(s), {flagged} flagged, "
                      f"{failed} failed; keeper kept {kept['kept']}.")
             self.eventlog.record("fanout_done", items=len(run.results),
@@ -25313,7 +25643,7 @@ class ForgeWindow(QMainWindow):
                              conversation_id=stream["conversation_id"],
                              model=stream["model"])
         self.log(f"Turn in '{stream['title']}' keeps running in the "
-                 "background — Mission Control is watching it.")
+                 "background. Mission Control is watching it.")
         self._sync_deck_turn()
         self._push_deck_streams()
         self._refresh_mission()
@@ -25506,7 +25836,7 @@ class ForgeWindow(QMainWindow):
         elif outcome == "stopped":
             self.log(f"Background turn in '{stream['title']}' stopped.")
         else:
-            self.log(f"Background turn in '{stream['title']}' finished — "
+            self.log(f"Background turn in '{stream['title']}' finished: "
                      "its conversation is updated.")
         self.eventlog.record("stream_settled",
                              conversation_id=stream["conversation_id"],
@@ -25604,7 +25934,7 @@ class ForgeWindow(QMainWindow):
                 files=files, lines=lines, manual=manual,
                 reason="a tester run is already going")
             if manual:
-                self.log("Test now: a tester run is already going — "
+                self.log("Test now: a tester run is already going: "
                          "its report lands here when it finishes.")
                 self.statusBar().showMessage(
                     "A tester run is already going")
@@ -25616,7 +25946,7 @@ class ForgeWindow(QMainWindow):
                 files=files, lines=lines, manual=manual,
                 reason="tester seat unavailable (Tester plugin off)")
             if manual:
-                self.log("Test now: the tester seat is not available — "
+                self.log("Test now: the tester seat is not available: "
                          "enable the Tester plugin in Customize.")
                 self.statusBar().showMessage("Tester seat unavailable")
             return False
@@ -25633,7 +25963,7 @@ class ForgeWindow(QMainWindow):
         else:
             task = ("The owner asked for a test run with nothing on "
                     "the untested tab: check the project's current "
-                    "state — run its own checks and report a verdict "
+                    "state. Run its own checks and report a verdict "
                     "with evidence.")
         # The run covers everything outstanding as of NOW; changes
         # landing during the run count toward the next one. The
@@ -25650,7 +25980,7 @@ class ForgeWindow(QMainWindow):
                      f"(~{owed_lines} lines).")
         else:
             self.log(f"Auto-test: {files} file(s) / ~{lines} line(s) "
-                     f"changed since the tester last ran — tester "
+                     f"changed since the tester last ran. Tester "
                      f"seat running.")
         self.statusBar().showMessage("Tester seat running…")
         self._launch_cadence_run(workspace, entry[1], task)
@@ -25698,7 +26028,7 @@ class ForgeWindow(QMainWindow):
                 acc.note_pass()
             self.eventlog.record("test_cadence_passed",
                                  workspace=workspace)
-            self.log("Tester seat: PASS — every change on the tab "
+            self.log("Tester seat: PASS. Every change on the tab "
                      "is tested; the tab is clear.")
             self.statusBar().showMessage("Tester seat: PASS")
             return
@@ -25707,11 +26037,11 @@ class ForgeWindow(QMainWindow):
             "test_cadence_owed", workspace=workspace, verdict=verdict,
             files=files, lines=lines, report=str(report)[:4000])
         label = "FAIL" if verdict == "fail" else "no verdict"
-        self.log(f"Tester seat: {label} — {files} file(s) / "
+        self.log(f"Tester seat: {label}. {files} file(s) / "
                  f"~{lines} line(s) stay on the untested tab until "
                  f"a passing run.")
         self.statusBar().showMessage(
-            "Tester seat: not passing — changes stay on the tab")
+            "Tester seat: not passing. Changes stay on the tab")
 
     def test_now(self):
         """C3 manual trigger (command palette): run the tester
@@ -25735,7 +26065,7 @@ class ForgeWindow(QMainWindow):
             if stream is not None:
                 stream["gate"] = {"tool": name, "queued": True}
             self.log(f"Approval needed in '{stream['title']}' ({name}) "
-                     "— queued behind the gate on screen.")
+                     ". Queued behind the gate on screen.")
             self._push_deck_streams()
             self._refresh_mission()
             return
@@ -25780,7 +26110,7 @@ class ForgeWindow(QMainWindow):
                 if stream is not None:
                     stream["gate"] = None
                     self.log(f"Queued approval in '{stream['title']}' "
-                             "dropped — that turn already moved on.")
+                             "dropped. That turn already moved on.")
                 continue
             self._present_gate(entry)
 
@@ -25797,7 +26127,7 @@ class ForgeWindow(QMainWindow):
             self._secret_queue.append(entry)
             if stream is not None:
                 stream["secret"] = {"queued": True}
-                self.log(f"Secret scan in '{stream['title']}' — "
+                self.log(f"Secret scan in '{stream['title']}': "
                          "queued behind the decision on screen.")
             self._push_deck_streams()
             self._refresh_mission()
@@ -25865,7 +26195,7 @@ class ForgeWindow(QMainWindow):
                 if stream is not None:
                     stream["secret"] = None
                     self.log(f"Queued secret decision in "
-                             f"'{stream['title']}' dropped — that "
+                             f"'{stream['title']}' dropped. That "
                              "turn already moved on.")
                 continue
             self._present_secret(entry)
@@ -25906,15 +26236,15 @@ class ForgeWindow(QMainWindow):
         gate = stream["gate"]
         if gate:
             if gate["queued"]:
-                return f"Gate queued — {gate['tool']}"
-            return f"Parked at gate — {gate['tool']}"
+                return f"Gate queued: {gate['tool']}"
+            return f"Parked at gate: {gate['tool']}"
         secret = stream.get("secret")
         if secret:
             if secret["queued"]:
                 return "Secret decision queued"
-            return "Paused — secret scan"
+            return "Paused · secret scan"
         status = (stream["status_text"] or "").strip()
-        return f"Running — {status}" if status else "Running"
+        return f"Running: {status}" if status else "Running"
 
     def _push_deck_streams(self):
         """The workstream summary rides the deck state (additive
@@ -26062,7 +26392,7 @@ class ForgeWindow(QMainWindow):
 
     def discard_parallel_job(self, job_id):
         self._parallel_manager().discard(job_id)
-        self.log("Parallel job discarded — nothing landed.")
+        self.log("Parallel job discarded: nothing landed.")
         self._refresh_mission()
 
     def set_parallel_concurrency(self, value):
@@ -26184,7 +26514,7 @@ class ForgeWindow(QMainWindow):
         on new activity. Never stops its turn, never archives —
         the underlying session is untouched."""
         if self._inbox_triage(key, inbox_mod.STATE_DISMISSED):
-            self.log("Inbox: dismissed — it returns on new activity.")
+            self.log("Inbox: dismissed. It returns on new activity.")
             self._refresh_inbox()
 
     def inbox_hold(self, key):
@@ -26196,7 +26526,7 @@ class ForgeWindow(QMainWindow):
             return
         if item.get("triage_state") == inbox_mod.STATE_HELD:
             if self._inbox_triage(key, None):
-                self.log("Inbox: off hold — back in its live group.")
+                self.log("Inbox: off hold. Back in its live group.")
         elif self._inbox_triage(key, inbox_mod.STATE_HELD):
             self.log("Inbox: on hold.")
         self._refresh_inbox()
@@ -26523,7 +26853,7 @@ class ForgeWindow(QMainWindow):
         self.ctx_bar.style().unpolish(self.ctx_bar)
         self.ctx_bar.style().polish(self.ctx_bar)
         self.ctx_text.setText(f"~{est:,} / {num_ctx:,} tokens")
-        tip = (f"Estimated context use — system prompt ~{parts['system']:,} · "
+        tip = (f"Estimated context use · system prompt ~{parts['system']:,} · "
                f"conversation ~{parts['history']:,} · tool schemas ~{parts['tools']:,} tokens. "
                "Counted locally from characters; estimates, never exact. "
                "Right-click to summarize the older messages now.")
@@ -26566,13 +26896,13 @@ class ForgeWindow(QMainWindow):
             return
         model = self.model_combo.currentText().strip()
         if not model:
-            self.log("No model selected — nothing to summarize with.")
+            self.log("No model selected: nothing to summarize with.")
             return
         num_ctx = self._resolve_budget(model)
         plan = context_mod.plan_fold(self.messages, num_ctx,
                                      self._context_schemas(), force=True)
         if plan is None:
-            self.log("Nothing old enough to summarize — the newest exchanges always stay verbatim.")
+            self.log("Nothing old enough to summarize. The newest exchanges always stay verbatim.")
             return
         options = {"temperature": self.settings.get("temperature", .7),
                    "num_predict": self.settings.get("num_predict", 2048),
@@ -26638,7 +26968,7 @@ class ForgeWindow(QMainWindow):
             errors=len(data.get("errors") or []),
             open_items=len(data.get("open_items") or []))
         self.log("Earlier conversation condensed into a fixed-field "
-                 "trajectory summary — the run continues from that, "
+                 "trajectory summary. The run continues from that, "
                  "not the full history.")
         self.persist_conversation()
         self.render()
@@ -26685,7 +27015,7 @@ class ForgeWindow(QMainWindow):
             result = context_mod.prune_archives(self.workspace,
                                                 older_than_days)
         except ValueError as exc:
-            self.log(f"Archive prune refused — {exc}")
+            self.log(f"Archive prune refused: {exc}")
             return dict(empty, error=str(exc))
         if result["deleted"] or result["errors"]:
             self.eventlog.record(
@@ -26734,7 +27064,7 @@ class ForgeWindow(QMainWindow):
                     "context_fold_failed",
                     error=f"archive: {str(exc)[:160]}")
                 self.log("Could not archive the earlier conversation "
-                         "before summarizing it — "
+                         "before summarizing it: "
                          + ("sending as-is." if then_start
                             else "nothing changed."))
                 self.stop_btn.setEnabled(False)
@@ -26756,7 +27086,7 @@ class ForgeWindow(QMainWindow):
                              estimate_before=plan["estimate_before"],
                              num_ctx=num_ctx, manual=not then_start,
                              style=style)
-        self.log(f"Context is ~{plan['estimate_before']:,} of {num_ctx:,} tokens — "
+        self.log(f"Context is ~{plan['estimate_before']:,} of {num_ctx:,} tokens: "
                  f"summarizing the oldest {len(plan['span'])} messages first…")
         self.statusBar().showMessage("Summarizing the earlier conversation to fit the context window…")
 
@@ -26786,7 +27116,7 @@ class ForgeWindow(QMainWindow):
                 if self.conversation_id is not None:
                     notes_mod.append_entry(
                         APP_DIR, self.conversation_id,
-                        "Context was summarized — older turns "
+                        "Context was summarized. Older turns "
                         "folded. Notes kept on disk.")
                     folded = context_mod.with_session_notes(
                         folded, notes_mod.read_notes(
@@ -26797,7 +27127,7 @@ class ForgeWindow(QMainWindow):
                     archive=archive_rel,
                     estimate_before=plan["estimate_before"],
                     estimate_after=context_mod.total_estimate(folded, self._context_schemas()))
-                self.log(f"Earlier conversation summarized — ~{count} messages folded into one summary.")
+                self.log(f"Earlier conversation summarized · ~{count} messages folded into one summary.")
                 self.persist_conversation()
                 self.render()
                 self._update_context_gauge()
@@ -26806,7 +27136,7 @@ class ForgeWindow(QMainWindow):
                 # opted in) gets its run here.
                 self._auto_prune_archives()
             else:
-                self.log("The summary would not have shrunk the conversation — left exactly as it was.")
+                self.log("The summary would not have shrunk the conversation. Left exactly as it was.")
                 # Study item M8: the between-turn fold could not
                 # shrink — the same saturation backstop as the
                 # worker's mid-turn path. The span is replaced with
@@ -26835,7 +27165,7 @@ class ForgeWindow(QMainWindow):
                 if after >= context_mod.FOLD_THRESHOLD * num_ctx:
                     note = (f"Still over the context limit after "
                             f"summarizing (~{after:,} of {num_ctx:,} "
-                            f"tokens) — the turn runs anyway. For "
+                            f"tokens). The turn runs anyway. For "
                             f"more room, start a fresh conversation, "
                             f"or summarize the older messages again "
                             f"from the gauge's right-click menu.")
@@ -26849,7 +27179,7 @@ class ForgeWindow(QMainWindow):
         def _failed(why):
             _settle()
             self.eventlog.record("context_fold_failed", error=str(why)[:200])
-            self.log(f"Could not summarize the earlier conversation ({why}) — "
+            self.log(f"Could not summarize the earlier conversation ({why}): "
                      + ("sending as-is." if then_start else "nothing changed."))
             if then_start:
                 self._start_turn(model, options, text)
@@ -26866,7 +27196,7 @@ class ForgeWindow(QMainWindow):
                 # stays in the conversation, unsent, and the bench
                 # settles back to idle.
                 upd.clear_resume_state(APP_DIR)
-                self.log("Stop pressed — summarizing cancelled, nothing was sent.")
+                self.log("Stop pressed: summarizing cancelled, nothing was sent.")
                 # No drain: the send was stopped on purpose, and a
                 # held queue waits for Send next.
                 self._sync_send_button()
@@ -26874,7 +27204,7 @@ class ForgeWindow(QMainWindow):
                 self.agent_state.setStyleSheet(f"color:{TOKENS['state_idle']};font-weight:700;")
                 self.ember.set_mode("cooling"); self.ember_label.setText("COOLING")
             else:
-                self.log("Summarizing cancelled — nothing changed.")
+                self.log("Summarizing cancelled: nothing changed.")
                 # No drain: the owner stopped the summarizing; the
                 # queue waits for Send next.
                 self._sync_send_button()
@@ -26913,7 +27243,7 @@ class ForgeWindow(QMainWindow):
         self.statusBar().showMessage(status)
         self.log(status)
         if "approval" in status.lower():
-            self.agent_state.setText("●  PAUSED — AWAITING APPROVAL")
+            self.agent_state.setText("●  PAUSED · AWAITING APPROVAL")
             self.agent_state.setStyleSheet(f"color:{TOKENS['accent_amber']};font-weight:700;")
             self.ember.set_mode("paused"); self.ember_label.setText("PAUSED")
 
@@ -27095,7 +27425,7 @@ class ForgeWindow(QMainWindow):
         # thread (and its child process) beyond anyone's reach.
         if self._maintenance_thread is not None \
                 and self._maintenance_thread.isRunning():
-            self.log(f"🛠 A maintenance command is still running — "
+            self.log(f"🛠 A maintenance command is still running: "
                      f"not started: {display}")
             if on_done:
                 on_done(False, "failed")
@@ -27132,7 +27462,7 @@ class ForgeWindow(QMainWindow):
         # closeEvent never waited for the orphan.
         if getattr(self, "_transcriber", None) is not None \
                 and self._transcriber.isRunning():
-            self.log("🎙 A transcription is still running — this "
+            self.log("🎙 A transcription is still running. This "
                      f"clip was not started. Audio kept: {audio_path}")
             return
         thread = TranscribeThread(
@@ -27161,15 +27491,15 @@ class ForgeWindow(QMainWindow):
         command; on success it retries the transcription itself."""
         entry = maint_mod.get_dep(import_name)
         if entry is None:
-            self.log(f"Transcription is unavailable — a needed piece is missing. Audio kept: {audio_path}")
+            self.log(f"Transcription is unavailable. A needed piece is missing. Audio kept: {audio_path}")
             return
-        self.log(f"🎙 {entry.feature} needs its package before it can run — "
+        self.log(f"🎙 {entry.feature} needs its package before it can run: "
                  "the Forge can install it itself, with your OK.")
         argv = maint_mod.install_command(maint_mod.venv_python(ROOT_DIR), import_name)
 
         def _after(ok, detail):
             if ok:
-                self.log("🎙 Package installed — transcribing your audio now.")
+                self.log("🎙 Package installed: transcribing your audio now.")
                 self._start_transcription(audio_path, out_path, done_handler, allow_heal=False)
             elif detail == "declined":
                 self.log(maint_mod.VOICE_DECLINED + f" Audio kept: {audio_path}")
@@ -27328,7 +27658,7 @@ class ForgeWindow(QMainWindow):
                      f"the image refusal: {exc}")
             return
         self.log(f"Removed the stored image(s) from {healed} "
-                 f"message(s) in '{stream['title']}' — the model "
+                 f"message(s) in '{stream['title']}'. The model "
                  "refused them, and leaving them stored would fail "
                  "every later turn in that conversation the same "
                  "way. The message text is untouched.")
@@ -27354,7 +27684,7 @@ class ForgeWindow(QMainWindow):
                 self.persist_conversation()
                 self.log(
                     f"Removed the stored image(s) from {healed} "
-                    "message(s) in this conversation — the model "
+                    "message(s) in this conversation. The model "
                     "refused them, and leaving them stored would "
                     "fail every later turn the same way. The "
                     "message text is untouched; re-attach "
@@ -27526,7 +27856,7 @@ class ForgeWindow(QMainWindow):
                 # say plainly that a turn is outliving the window
                 # instead of letting the thread vanish silently.
                 self.log("Shutdown: a turn is still running after "
-                         "the wait — it ends with the process.")
+                         "the wait. It ends with the process.")
         # Item #64: background turns die with the app too — cancel
         # every other live stream's worker, not just the stage's.
         # (wait is a QThread method; a test stand-in without one is
@@ -27651,7 +27981,7 @@ class _SingleInstanceGuard(QObject):
             # Primary anyway (the lock is held); second launches
             # just can't raise this window — say so and carry on.
             print("Code Forge: single-instance server could not "
-                  "listen — a second launch will exit without "
+                  "listen. A second launch will exit without "
                   "raising this window.")
         return True
 
@@ -27682,7 +28012,7 @@ class _SingleInstanceGuard(QObject):
 
 def _raise_main_window(window):
     """The second-launch answer: bring the running Forge forward."""
-    print("Another Code Forge launch was requested — raising "
+    print("Another Code Forge launch was requested: raising "
           "this window.", flush=True)
     window.raise_()
     window.activateWindow()
@@ -27704,7 +28034,7 @@ def main():
     guard = _SingleInstanceGuard()
     if not guard.try_acquire():
         _notify_running_instance(guard.server_name)
-        print("Code Forge is already running — raising the open "
+        print("Code Forge is already running: raising the open "
               "window.", flush=True)
         return
     _SINGLE_INSTANCE_GUARD = guard

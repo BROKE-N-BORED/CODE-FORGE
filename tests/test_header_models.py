@@ -46,7 +46,7 @@ class ModelsReadoutFormatterTests(unittest.TestCase):
 
     def test_unreachable_is_a_dash(self):
         text, tip = models_readout(_snap(running=False))
-        self.assertEqual(text, "—")
+        self.assertEqual(text, "-")
         self.assertIn("recovers", tip)
 
     def test_missing_sizes_fall_back_to_names(self):
@@ -103,7 +103,7 @@ class HeaderModelsWindowTests(unittest.TestCase):
     def test_readout_starts_as_a_dash(self):
         # Captured in setUpClass, before any test drove a gauge
         # pass through the shared window.
-        self.assertEqual(self.initial_models_text, "—")
+        self.assertEqual(self.initial_models_text, "-")
         self.assertEqual(self.win.models_text.objectName(), "muted")
 
     def test_apply_gauges_drives_the_readout(self):
@@ -122,7 +122,7 @@ class HeaderModelsWindowTests(unittest.TestCase):
         win._apply_gauges(_snap(["a/one:2b"], {"a/one:2b": 1_000_000_000}))
         self.assertEqual(win.models_text.text(), "1 · 1.0 GB")
         win._apply_gauges(_snap(running=False))
-        self.assertEqual(win.models_text.text(), "—")
+        self.assertEqual(win.models_text.text(), "-")
         win._apply_gauges(_snap(["a/one:2b"], {"a/one:2b": 1_000_000_000}))
         self.assertEqual(win.models_text.text(), "1 · 1.0 GB")
 

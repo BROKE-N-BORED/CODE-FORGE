@@ -93,22 +93,39 @@ def skill_fingerprint(folder) -> str | None:
     return digest.hexdigest()
 
 
-def scan_skills(skills_dir: Path) -> list[Skill]:
+def scan_skills_report(skills_dir: Path) -> tuple[list[Skill],
+                                              list[tuple[str, str]]]:
+    """scan_skills plus the load failures it used to swallow: a
+    folder WITH a SKILL.md that cannot be read or parsed is a
+    broken skill, and the owner needs to know which one and why
+    (F10, U19). Returns (skills, broken) where broken is a list
+    of (folder name, plain-language reason). A folder WITHOUT a
+    SKILL.md is not a skill at all — a stray folder, not a broken
+    one — so it is not reported."""
     skills: list[Skill] = []
+    broken: list[tuple[str, str]] = []
     if not Path(skills_dir).is_dir():
-        return skills
+        return skills, broken
     for folder in sorted(Path(skills_dir).iterdir()):
         skill_file = folder / "SKILL.md"
         if folder.is_dir() and skill_file.is_file():
             try:
                 name, description = _parse_header(
                     skill_file.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                broken.append((folder.name, "could not be read"))
+                continue
             except Exception:
+                broken.append((folder.name, "could not be understood"))
                 continue
             skills.append(Skill(name=name or folder.name,
                                 description=description or "(no description)",
                                 folder=folder))
-    return skills
+    return skills, broken
+
+
+def scan_skills(skills_dir: Path) -> list[Skill]:
+    return scan_skills_report(skills_dir)[0]
 
 
 def index_text(skills: list[Skill]) -> str:
