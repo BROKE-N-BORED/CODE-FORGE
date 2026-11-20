@@ -36,7 +36,13 @@ from pathlib import Path
 from forge.tools import TOOL_SCHEMAS, Containment, execute_tool
 
 MAX_CYCLES = 8
-TASK_SECONDS = 240        # per-task wall cap; patchable in tests
+# Per-task wall cap; patchable in tests. 900 s, not the original
+# 240: on CPU-only inference a single generation can take 450-720 s
+# (live-model test, 2026-11-15 — every attempted task hit the 240 s
+# cap with 0 eval tokens, so the bench measured the cap, not the
+# model). 900 covers the slowest observed generation plus working
+# cycles, and a genuinely stuck task still dies in 15 minutes.
+TASK_SECONDS = 900
 VERIFY_TIMEOUT = 30       # seconds for one planted verify command
 
 # The bench tool belt: the built-ins a seat needs to work a small

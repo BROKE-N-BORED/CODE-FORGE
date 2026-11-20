@@ -526,48 +526,43 @@ def parse_breakpoints(text: str, default_file) -> list:
 DEBUG_START_SCHEMA = {
     "type": "function", "function": {
         "name": "debug_start",
-        "description": ("Start a debug session: run a Python file in the "
-                        "workspace under the debugger with breakpoints, "
-                        "stopping at the first breakpoint hit (the "
-                        "program runs to its end if none is hit). One "
-                        "session at a time; requires user approval. "
-                        "Follow with debug_inspect / debug_step / "
-                        "debug_continue / debug_stop."),
+        "description": ("Run a workspace Python file under the debugger, "
+                        "stopping at the first breakpoint hit (to the "
+                        "end if none). One session at a time. Needs "
+                        "approval."),
         "parameters": {"type": "object", "properties": {
-            "path": {"type": "string",
-                     "description": "Python file in the workspace, e.g. app.py"},
+            "path": {"type": "string"},
             "breakpoints": {"type": "string",
                             "description": "Optional, e.g. '12, 30' or "
-                                           "'util.py:9, 12' — bare lines "
+                                           "'util.py:9, 12'; bare lines "
                                            "belong to path"}},
             "required": ["path"]}}}
 
 DEBUG_STEP_SCHEMA = {
     "type": "function", "function": {
         "name": "debug_step",
-        "description": ("Advance the live debug session by one step: "
-                        "over the current line, or INTO a call on it "
-                        "when 'into' is true. Requires user approval."),
+        "description": ("Step the live debug session one line: over it, "
+                        "or into a call on it when 'into' is true. "
+                        "Needs approval."),
         "parameters": {"type": "object", "properties": {
-            "into": {"type": "boolean",
-                     "description": "Step into a call instead of over it"}},
+            "into": {"type": "boolean"}},
             "required": []}}}
 
 DEBUG_CONTINUE_SCHEMA = {
     "type": "function", "function": {
         "name": "debug_continue",
-        "description": ("Let the live debug session run to the next "
-                        "breakpoint (or to the end of the program). "
-                        "Requires user approval."),
+        "description": ("Run the live debug session to the next "
+                        "breakpoint or the end of the program. Needs "
+                        "approval."),
         "parameters": {"type": "object", "properties": {}, "required": []}}}
 
 DEBUG_INSPECT_SCHEMA = {
     "type": "function", "function": {
         "name": "debug_inspect",
         "description": ("Evaluate an expression in the debug session's "
-                        "current frame — a variable's value, len(x), "
-                        "a field. Read-only; with no expression, "
-                        "returns the frame's locals."),
+                        "current frame (a variable, len(x), a field). "
+                        "Read-only; with no expression, returns the "
+                        "frame's locals."),
         "parameters": {"type": "object", "properties": {
             "expression": {"type": "string"}},
             "required": []}}}
@@ -576,5 +571,5 @@ DEBUG_STOP_SCHEMA = {
     "type": "function", "function": {
         "name": "debug_stop",
         "description": ("Stop the live debug session and end its "
-                        "process. Always allowed — stopping is safe."),
+                        "process. Always allowed."),
         "parameters": {"type": "object", "properties": {}, "required": []}}}

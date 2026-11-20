@@ -7,7 +7,7 @@
  "name": "GitHub",
  "tools": [
   {
-   "description": "Look up a public GitHub repo (owner/name): description, stars, language, license, last push.",
+   "description": "Look up a public GitHub repo (owner/name): stars, language, license, last push.",
    "name": "github_repo_info",
    "parameters": {
     "properties": {

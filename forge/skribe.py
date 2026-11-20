@@ -39,6 +39,21 @@ CLASS_LIST = "source file list"
 # the WHOLE rule — no higher passing bar is implied by it.
 FINALIZE_MIN_FZI = 1
 
+# Routing (Joshua, 2026-11-19): the grading gate belongs to the
+# document jobs — planning, writing, research, and the modes whose
+# product is itself a document (architect, design, review). A Code
+# turn's writes are its work, not a document to grade, so the shell
+# passes skribe_writes=False for a turn whose mode is outside this
+# tuple — exactly the gate's long-standing toggle-off behavior for
+# that turn. Ask is absent on purpose: Ask offers no write tools at
+# all, so the queue can never fill there. The mode is read ONCE, at
+# worker construction, from the mode the owner chose for the turn —
+# a Plan turn keeps its grading through the execution phase even
+# though the worker internally lifts its permissions mode to "code"
+# after the owner approves the plan.
+JOB_MODES = ("plan", "write", "research", "architect", "design",
+             "review")
+
 _WRITE_ERROR_PREFIXES = ("Tool error", "Tool notice", "Denied", "Blocked")
 
 

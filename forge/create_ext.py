@@ -51,19 +51,18 @@ CREATE_SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "create_skill",
-        "description": ("Create a NEW skill in the Forge's GLOBAL skill directory (the app's own "
-                        "skills/ folder — available in every project, NOT inside the current "
-                        "project folder). Use this instead of write_file whenever you create a "
-                        "skill. The new skill starts DISABLED — the owner enables it in "
-                        "Customize before load_skill will load it. Requires user approval."),
+        "description": ("Create a NEW skill in the Forge's global skills/ folder (every "
+                        "project, NOT the current project folder). Use this instead of "
+                        "write_file for skills. Starts disabled; the owner enables it in "
+                        "Customize before load_skill will load it. Needs approval."),
         "parameters": {"type": "object",
                        "properties": {
                            "name": {"type": "string",
-                                    "description": "Skill slug: lowercase letters, digits and hyphens (e.g. 'pdf-tables')"},
+                                    "description": "Skill slug: lowercase, digits, hyphens (e.g. 'pdf-tables')"},
                            "description": {"type": "string",
-                                           "description": "One line: what the skill does AND when to use it — this is the only part shown at rest in the skill index"},
+                                           "description": "One line: what it does and when to use it (the skill index line)"},
                            "body": {"type": "string",
-                                    "description": "The skill instructions (Markdown): the procedure, in order, terse and operational"}},
+                                    "description": "Skill instructions (Markdown): the procedure, in order"}},
                        "required": ["name", "description", "body"]},
     },
 }
@@ -72,25 +71,18 @@ CREATE_PLUGIN_SCHEMA = {
     "type": "function",
     "function": {
         "name": "create_plugin",
-        "description": ("Create a NEW plugin in the Forge's GLOBAL plugins directory (the app's "
-                        "own plugins/ folder — available in every project, NOT inside the "
-                        "current project folder). Use this instead of write_file whenever you "
-                        "create a plugin or tool. The code must be a complete plugin.py: it "
-                        "must define HANDLERS = {'tool_name': handler_function, ...} where each "
-                        "handler takes (args, ctx) and returns a string. You may also declare "
-                        "TOOL_SCHEMAS = {'tool_name': {JSON-schema parameters object}, ...} at "
-                        "the top level of the code to give a tool arguments; without it a tool "
-                        "takes no arguments. Tools declared by the "
-                        "plugin require approval. The new plugin starts DISABLED — the owner "
-                        "enables it in Customize. Requires user approval."),
+        "description": ("Create a NEW plugin in the Forge's global plugins/ folder (every "
+                        "project, NOT the current project folder). Use this instead of "
+                        "write_file for plugins. Starts disabled; the owner enables it in "
+                        "Customize. Needs approval."),
         "parameters": {"type": "object",
                        "properties": {
                            "name": {"type": "string",
-                                    "description": "Plugin slug: lowercase letters, digits and hyphens (e.g. 'weather-fetch')"},
+                                    "description": "Plugin slug: lowercase, digits, hyphens (e.g. 'weather-fetch')"},
                            "description": {"type": "string",
                                            "description": "One line: what the plugin does and when to use it"},
                            "code": {"type": "string",
-                                    "description": "Complete Python source of plugin.py, defining HANDLERS"}},
+                                    "description": "Complete plugin.py: HANDLERS = {'tool': fn(args, ctx) -> str}; optional TOOL_SCHEMAS = {'tool': parameters object} gives tools arguments, else none. Plugin tools require approval."}},
                        "required": ["name", "description", "code"]},
     },
 }
@@ -99,22 +91,19 @@ UPDATE_SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "update_skill",
-        "description": ("Update an EXISTING skill in the Forge's GLOBAL skill directory (the "
-                        "app's own skills/ folder). Use this when the skill name already "
-                        "exists — create_skill refuses names that are taken and points "
-                        "here. Replaces the skill's description and instructions "
-                        "(SKILL.md) wholesale; other files in the skill's folder are left "
-                        "alone. Refuses if no skill with that name exists. Whether the "
-                        "skill is enabled stays the owner's Customize choice — an update "
-                        "never switches a skill on or off. Requires user approval."),
+        "description": ("Update an EXISTING skill in the global skills/ folder; "
+                        "create_skill refuses taken names and points here. Replaces the "
+                        "description and body (SKILL.md) wholesale; other files stay. "
+                        "Refuses if the name does not exist. Never changes the enabled "
+                        "state. Needs approval."),
         "parameters": {"type": "object",
                        "properties": {
                            "name": {"type": "string",
-                                    "description": "The existing skill's slug: lowercase letters, digits and hyphens (e.g. 'pdf-tables')"},
+                                    "description": "The existing skill's slug (e.g. 'pdf-tables')"},
                            "description": {"type": "string",
-                                           "description": "The new one line: what the skill does AND when to use it — this replaces the old index line"},
+                                           "description": "New one line: what it does and when to use it"},
                            "body": {"type": "string",
-                                    "description": "The new skill instructions (Markdown), complete: this replaces the old body, it is not appended"}},
+                                    "description": "New instructions (Markdown), complete: replaces the old body, not appended"}},
                        "required": ["name", "description", "body"]},
     },
 }
@@ -123,28 +112,22 @@ UPDATE_PLUGIN_SCHEMA = {
     "type": "function",
     "function": {
         "name": "update_plugin",
-        "description": ("Update an EXISTING plugin in the Forge's GLOBAL plugins directory "
-                        "(the app's own plugins/ folder). Use this when the plugin name "
-                        "already exists — create_plugin refuses names that are taken and "
-                        "points here. The new code passes the SAME validations as "
-                        "create_plugin (it must compile, declare HANDLERS with string keys, "
-                        "and any TOOL_SCHEMAS must be readable) BEFORE anything is "
-                        "written, so a refused update leaves the current plugin untouched. "
-                        "Its plugin.json settings (kind, config keys, per-tool approval "
-                        "flags) are preserved — only the code, the description and the tool "
-                        "list change. One state change is deliberate: if the plugin is "
-                        "currently ENABLED, a successful update switches it OFF — the "
-                        "owner re-enables it in Customize after reviewing the new code. "
-                        "Refuses if no "
-                        "plugin with that name exists. Requires user approval."),
+        "description": ("Update an EXISTING plugin in the global plugins/ folder; "
+                        "create_plugin refuses taken names and points here. The new code "
+                        "is validated like create_plugin (compiles, HANDLERS, readable "
+                        "TOOL_SCHEMAS) before anything is written, so a refused update "
+                        "changes nothing. If the "
+                        "plugin is enabled, a successful update switches it OFF; the "
+                        "owner re-enables it in Customize. Refuses if the name does not "
+                        "exist. Needs approval."),
         "parameters": {"type": "object",
                        "properties": {
                            "name": {"type": "string",
-                                    "description": "The existing plugin's slug: lowercase letters, digits and hyphens (e.g. 'weather-fetch')"},
+                                    "description": "The existing plugin's slug (e.g. 'weather-fetch')"},
                            "description": {"type": "string",
-                                           "description": "The new one line: what the plugin does and when to use it"},
+                                           "description": "New one line: what the plugin does and when to use it"},
                            "code": {"type": "string",
-                                    "description": "The complete new Python source of plugin.py, defining HANDLERS — it replaces the old code wholesale"}},
+                                    "description": "Complete new plugin.py defining HANDLERS; replaces the old code"}},
                        "required": ["name", "description", "code"]},
     },
 }

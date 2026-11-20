@@ -11,7 +11,7 @@
    "parameters": {
     "properties": {
      "model": {
-      "description": "Ollama model tag, e.g. maternion/minicpm5-heretic:2b",
+      "description": "Ollama model tag.",
       "type": "string"
      }
     },

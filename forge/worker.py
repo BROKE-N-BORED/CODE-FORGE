@@ -304,6 +304,12 @@ DEFAULT_TURN_TIMEOUT_MINUTES = 30
 # and tok/s — often enough to see a stuck turn moving, seldom
 # enough to stay cheap.
 PROGRESS_EMIT_SECONDS = 2.0
+# Prompt-eval watchdog (2026-11-19, P1): how often a capped
+# generation's watchdog thread re-checks the turn clock while the
+# stream is quiet — the same poll the client's cancel watch uses.
+# Cheap enough to ride every capped generation, prompt enough that
+# a stalled stream dies within a breath of the cap.
+GENERATION_WATCHDOG_POLL_SECONDS = 0.25
 # Live progress (2026-11-13): what a streaming generation calls
 # itself in the status line, per _generate phase. Unmapped phases
 # report as "Working" — the label is a courtesy, never a gate.
@@ -323,6 +329,105 @@ _PHASE_STATUS_LABELS = {
 _TOOL_RESULT_LOG_CAP = 200_000
 _TOOL_CALL_ARGS_LOG_CAP = 20_000
 BUDGET_STOP_FRACTION = 0.90
+# P0a (live-model Finding #1, 2026-11-17): Code mode's full surface
+# (44 tools, ~6,900 estimated tokens) plus the system prompt does
+# not fit an 8,192 window — the cycle-0 payload measured 10,098
+# tokens, fill 1.23 — so the B18 budget stop fired before the first
+# generation and Code mode offered NO tools at all. The fix is NOT
+# a bigger window (the owner's num_ctx setting is his RAM/KV cap —
+# see providers.resolve_context_budget — and raising the default
+# would not touch an existing install's explicit setting) and NOT a
+# smaller estimate (the estimator is the safety margin). Instead
+# the offer adapts: when the configured surface plus the
+# UNFOLDABLE part of the opening payload (the system prompt and
+# the exchanges no fold can remove — see _unfoldable_estimate)
+# would pass SURFACE_FIT_FRACTION of the driver's window,
+# the surface is trimmed — lowest-priority tools first, per
+# SURFACE_TRIM_ORDER — until it fits, and the model is told plainly
+# which tools are held back this turn. The trim is computed ONCE
+# per turn (the surface never changes mid-turn, Study item M5) and
+# only as much as the window needs: a bigger window or a smaller
+# prompt keeps the full surface. The 11 core tools in
+# forge/tools.py are the FLOOR and are never trimmed; a turn that
+# cannot fit even those stops exactly as before (B18), with the
+# fabrication guard below. 0.85 leaves ~15% of the window for the
+# first round's growth (assistant message + tool results) before
+# the 0.90 budget-stop fraction trips the fold.
+SURFACE_FIT_FRACTION = 0.85
+# The trim order: FIRST name is FIRST dropped. Design shell first
+# (Design mode's bridge), then cloud storage, repo/model search,
+# the self-extension meta-tools, the browse verbs (verify_in_browser
+# last among them — it is the Code-adjacent one), then the resource
+# check, the tester seat, the debugger, the knowledge and source
+# readers, load_skill, and the MCP verbs last — a user's own servers
+# are the last thing the trim touches. A tool NOT on this list and
+# not in the core floor is trimmed largest-first only after every
+# named deferrable is gone (see _trim_schemas_for_budget).
+SURFACE_TRIM_ORDER = (
+    "design_shell",
+    "cloud_upload", "cloud_download", "cloud_delete",
+    "cloud_list", "cloud_read",
+    "github_search_repos", "github_repo_info",
+    "hf_search_models", "hf_model_info",
+    "create_plugin", "update_plugin",
+    "create_skill", "update_skill",
+    "browse_click", "browse_type", "browse_screenshot",
+    "browse_hand_back", "browse_open", "browse_read",
+    "verify_in_browser",
+    "check_resources",
+    "run_tester",
+    "debug_start", "debug_step", "debug_continue",
+    "debug_inspect", "debug_stop",
+    "read_knowledge",
+    "read_source",
+    "load_skill",
+    "mcp_list_tools", "mcp_call",
+)
+# P0a: the trim measures against the UNFOLDABLE payload (see
+# _unfoldable_estimate) — and a fold replaces its span with a
+# summary, so the trim allows this many tokens for that summary.
+# Approximate on purpose: the budget check and the fold machinery
+# still guard the turn, so a summary a little bigger or smaller
+# than this changes nothing but a tool or two at the margin.
+_FOLD_SUMMARY_ALLOWANCE_TOKENS = 500
+# P0a fabrication guard: when the budget stop closes the offer, the
+# model is told — once, as a system note before the settling
+# generation (BUDGET_STOP_NOTE), and again in every dropped-call
+# refusal (DROPPED_CALL_GUARD on the first, DROPPED_CALL_SHORT on
+# the rest of the same generation) — that its calls never ran and
+# it must not present results it did not receive. The live-model
+# test caught the model inventing file contents ("Contents of
+# hello.py (as returned)") for a file that does not exist; the old
+# refusal ("Answer in text with what you already have") read as
+# permission to do exactly that. The guard is scoped to the dropped
+# call itself — earlier rounds of the turn may genuinely have read
+# files and run commands, and their real results still stand.
+BUDGET_STOP_NOTE = (
+    "No tools are available for the rest of this turn: the context "
+    "window is nearly full. Answer in text with what you already "
+    "have. Do not describe file contents, command output, or tool "
+    "results you did not receive. If you cannot answer without "
+    "them, say what is missing.")
+DROPPED_CALL_GUARD = (
+    "Not run: no tools were offered for this generation, so this "
+    "call was never on the table and never ran. Nothing ran for "
+    "this call: no file was read and no command executed. Do not "
+    "present file contents, command output, or tool results you "
+    "did not receive. Do not invent them. If you cannot answer "
+    "without them, say what is missing.")
+DROPPED_CALL_SHORT = (
+    "Not run: no tools were offered for this generation, so this "
+    "call was never on the table and never ran.")
+# P1 (live-model B11): the turn's closing line when the
+# dropped-call anti-rut break ends the turn — the same plain
+# shape as the turn timeout's ending, so a stopped turn never
+# reads as a crash or a dead end. {tool} is the call that would
+# not stop repeating.
+DROPPED_RUT_STOP_LINE = (
+    "Stopped here. The model kept calling '{tool}' even though "
+    "no tools were offered for this turn, so those calls never "
+    "ran. Nothing was lost: your work is saved, and you can ask "
+    "me to continue.")
 # Context continuity (2026-11-09): how many times one turn may fold
 # mid-flight and continue before the B18 wrap-up takes over — enough
 # for genuinely long work, few enough that a ballooning turn cannot
@@ -1046,6 +1151,23 @@ LONG_TURN_TOOL = "long_turn_check"
 RUT_NOTICE_AT = 3
 RUT_BREAK_AT = 5
 
+# P1 (live-model B11): a DROPPED call (Sweep R5: calls that
+# arrive when no tools were offered this generation) is neither
+# a success nor a failure, so it fed NEITHER counter above, and
+# the model could repeat the identical dropped call for the rest
+# of the turn (B11 turn 3: six identical dropped "shell" calls).
+# Dropped calls now count per turn under the same call key as
+# the rut guard; at DROPPED_RUT_BREAK_AT the drop is final and
+# the turn settles instead of generating again. The threshold
+# sits BELOW RUT_BREAK_AT on purpose: a repeat success can be
+# legitimate work, but a dropped call was never on the table and
+# the offer only closes further within a turn, so no repeat of
+# it can ever run, and every repeat is a wasted generation on
+# hardware where a generation is the expensive unit. Three
+# means the identical call has already been refused twice and
+# came back anyway.
+DROPPED_RUT_BREAK_AT = 3
+
 # Item #58: the homework pass is a PHASE, not the turn — the
 # owner's no-tool-cycle-cap rule governs the turn's work, not how
 # long the read pass may run before drafting must begin. A model
@@ -1185,6 +1307,84 @@ def _secret_preview(messages, limit=600):
     if len(preview) > limit:
         preview = preview[:limit] + "…"
     return preview
+
+
+def unfoldable_estimate(messages) -> int:
+    """P0a: the estimated tokens of the payload no fold can
+    remove — the leading system prompt plus the tail
+    split_fold keeps (the last KEEP_EXCHANGES exchanges and
+    the trailing user message), plus the allowance for the
+    summary that replaces the folded span. When nothing is
+    foldable the whole history is unfoldable. The trim
+    measures against THIS, not the full history: a payload
+    that is big only because of foldable history is the fold's
+    job, not the trim's — a trim computed against the full
+    history dropped tools a fold was about to make room for
+    (the continuity tests caught it: the fold count moved).
+
+    Pure and shared (R3-02, 2026-11-19): the worker's per-turn
+    trim and the bench's context gauge must account the same
+    payload, so both call this one function."""
+    split = context_mod.split_fold(messages)
+    if split is None:
+        return context_mod.estimate_messages(messages)
+    head, _span, tail = split
+    return (context_mod.estimate_messages(head + tail)
+            + _FOLD_SUMMARY_ALLOWANCE_TOKENS)
+
+
+def trim_schemas_for_budget(configured, messages, budget):
+    """P0a: shrink the configured surface until the opening
+    payload fits SURFACE_FIT_FRACTION of the window. Returns
+    (offered, held_back_names). The payload that matters is
+    the UNFOLDABLE part (see unfoldable_estimate): foldable
+    history is the fold's job, and trimming against it would
+    drop tools a fold was about to make room for. The core
+    floor (forge/tools.py's TOOL_SCHEMAS) is never trimmed;
+    the named deferrables go first, in SURFACE_TRIM_ORDER;
+    anything left that is not core — a tool added after that
+    list was written — goes largest-first, so the fewest
+    tools are dropped for the tokens freed. Deterministic:
+    same surface, same messages, same budget, same offer.
+    When even the core does not fit, the core is returned
+    whole and the B18 budget stop fires exactly as before
+    (with the fabrication guard).
+
+    Pure and shared (R3-02, 2026-11-19): the worker offers
+    what this returns and the bench's context gauge measures
+    what this returns — one accounting, so the gauge shows
+    the request that is actually sent."""
+    base = unfoldable_estimate(messages)
+    room = int(budget * SURFACE_FIT_FRACTION) - base
+    total = context_mod.estimate_schemas(configured)
+    if total <= room:
+        return configured, []
+    floor = {s["function"]["name"] for s in TOOL_SCHEMAS}
+    by_name = {s["function"]["name"]: s for s in configured}
+    kept = list(configured)
+    held_back = []
+    for name in SURFACE_TRIM_ORDER:
+        if total <= room:
+            break
+        entry = by_name.get(name)
+        if entry is None or name in floor:
+            continue
+        kept.remove(entry)
+        held_back.append(name)
+        total -= context_mod.estimate_schemas([entry])
+    if total > room:
+        rest = sorted(
+            (s for s in kept
+             if s["function"]["name"] not in floor),
+            key=lambda s: context_mod.estimate_schemas([s]),
+            reverse=True)
+        for entry in rest:
+            if total <= room:
+                break
+            kept.remove(entry)
+            held_back.append(entry["function"]["name"])
+            total -= context_mod.estimate_schemas([entry])
+    return kept, held_back
 
 
 class AgentWorker(QThread):
@@ -1411,6 +1611,15 @@ class AgentWorker(QThread):
         self._skribe_bounces = 0
         self._budget_stopped = False
         self._mid_turn_folds = 0
+        # P0a: the offered surface (trimmed, cached per turn — see
+        # _schemas), the fingerprint of the configured surface it
+        # was computed from, and the tools the trim held back this
+        # turn. None means "not computed yet"; run() resets all
+        # three with the other per-turn state (Sweep R6/R19 reset
+        # law).
+        self._offered_schemas = None
+        self._offered_fingerprint = None
+        self._trimmed_away = []
         self.eventlog = eventlog
         # Governing seats (bite #3): the owner's roster extension,
         # consulted at every seat resolution in this worker — the
@@ -1869,7 +2078,15 @@ class AgentWorker(QThread):
         later diagnosis can see the turn recovered — or tried to."""
         self._log("model_start_retry", detail=line)
 
-    def _schemas(self):
+    def _configured_schemas(self):
+        """The CONFIGURED surface: every tool the owner has
+        configured and the mode allows — the kill switch, the
+        Research web switch, and the mode filter, exactly as
+        _schemas used to return. P0a split this out of _schemas:
+        the offered surface is now the configured surface trimmed
+        to fit the window (see _schemas), and _record_surface
+        fingerprints THIS one, so a budget trim never reads as an
+        owner configuration change."""
         all_schemas = TOOL_SCHEMAS + [entry[0] for entry in self.extra_tools.values()]
         if self.disabled_tools:
             # Item #52: the kill switch filters BEFORE the mode
@@ -1906,6 +2123,63 @@ class AgentWorker(QThread):
         # as it was when it arrived unoffered.
         return offered
 
+    def _schemas(self):
+        """The OFFERED surface: the configured surface trimmed to
+        fit the driver's window (P0a — see SURFACE_TRIM_ORDER).
+        Computed once per turn and cached: the surface never
+        changes mid-turn (Study item M5) — with ONE exception,
+        the Plan gate's promotion to Code permissions, which the
+        owner causes by approving the plan. The cache is keyed on
+        the configured surface's fingerprint, so a promotion
+        recomputes the offer (and logs + notes a new trim if one
+        engages) while every other call returns the cached list.
+        When nothing needs trimming this returns the configured
+        surface unchanged — same list, same order. When a trim
+        engages, the held-back tools are logged
+        (tool_surface_trimmed) and named to the model in a system
+        note, appended once per computation — the first _schemas
+        call of a turn always lands before the first generation
+        (homework or the main loop's cycle 0), so the note is
+        part of the opening payload the budget check then
+        measures."""
+        configured = self._configured_schemas()
+        fingerprint = self._surface_fingerprint(configured)
+        if (self._offered_schemas is not None
+                and self._offered_fingerprint == fingerprint):
+            return self._offered_schemas
+        offered, held_back = self._trim_schemas_for_budget(configured)
+        self._offered_schemas = offered
+        self._offered_fingerprint = fingerprint
+        self._trimmed_away = held_back
+        if held_back:
+            self._log("tool_surface_trimmed",
+                      held_back=held_back, tools=len(offered),
+                      of=len(configured))
+            self.messages.append({
+                "role": "system",
+                "content": ("Some tools are not offered this turn "
+                            "because the full tool list does not fit "
+                            "the context window: "
+                            + ", ".join(held_back)
+                            + ". Do not call them. The tools you "
+                              "were offered are the only ones "
+                              "available.")})
+        return offered
+
+    def _unfoldable_estimate(self) -> int:
+        """P0a: the payload no fold can remove (see the module
+        function of the same name — the one implementation,
+        shared with the context gauge since R3-02)."""
+        return unfoldable_estimate(self.messages)
+
+    def _trim_schemas_for_budget(self, configured):
+        """P0a: the offered surface for THIS turn's driver
+        budget (see the module-level trim_schemas_for_budget —
+        the one implementation, shared with the context gauge
+        since R3-02)."""
+        return trim_schemas_for_budget(
+            configured, self.messages, self._driver_budget())
+
     def _read_schemas(self):
         """Item #58: the mode's visible schemas cut to READ-class
         tools only. Study item M5 retired this from the OFFER
@@ -1940,12 +2214,15 @@ class AgentWorker(QThread):
         the worker's inputs are fixed at construction) — logs
         tool_surface_changed with both fingerprints. Forge-internal
         state never reaches this function's inputs: phases and the
-        budget cannot change what _schemas returns. The one
+        budget cannot change what _configured_schemas returns —
+        the P0a budget trim shapes the OFFERED surface (_schemas)
+        only, and its own tool_surface_trimmed event carries that.
+        The one
         mid-turn transition — the Plan gate's promotion to Code
         permissions — is caused by the owner's approval, and its
         site calls this function again so the change is logged
         there too."""
-        schemas = self._schemas()
+        schemas = self._configured_schemas()
         fingerprint = self._surface_fingerprint(schemas)
         mode = self.permissions.get("mode", "code")
         previous = self.surface_state.get("fingerprint")
@@ -2266,6 +2543,69 @@ class AgentWorker(QThread):
         spent = getattr(self, "_turn_gen_seconds", 0.0)
         return spent + (time.time() - gen_started) > limit
 
+    def _watchdog_stream(self, stream, gen_started, phase):
+        """One generation's stream with the prompt-eval watchdog
+        riding it (2026-11-19, P1): the wrapper watches the events
+        pass and keeps the watchdog's picture of the stream — when
+        it last spoke, how much it has said — while the watchdog
+        thread watches the clock. With no turn cap there is
+        nothing to watch for: the stream passes through untouched
+        and no thread is started."""
+        if self._turn_timeout_seconds is None:
+            yield from stream
+            return
+        state = {"last_event": gen_started, "chars": 0,
+                 "progress": gen_started}
+        stop = threading.Event()
+        threading.Thread(
+            target=self._generation_watchdog,
+            args=(gen_started, phase, state, stop),
+            daemon=True, name="forge-generation-watchdog").start()
+        try:
+            for event in stream:
+                state["last_event"] = time.time()
+                if isinstance(event, dict):
+                    content = event.get("message", {}).get(
+                        "content", "")
+                    if content:
+                        state["chars"] += len(content)
+                yield event
+        finally:
+            stop.set()
+
+    def _generation_watchdog(self, gen_started, phase, state, stop):
+        """The prompt-eval watchdog (2026-11-19, P1): the turn
+        timeout's clock, watched from a thread of its own while a
+        generation streams. The per-event check in _generate can
+        only run when an event arrives — a model stuck in prompt
+        evaluation (or a stalled connection) produces none, and a
+        turn once sat silent for 40 minutes that way. This thread
+        checks _generation_overdue on its own clock; on a trip it
+        sets the same triple the per-event check sets, the
+        client's cancel watch force-closes the stalled stream,
+        and the turn settles on the timeout line exactly as if an
+        event had tripped it. An owner's Stop stands it down
+        untouched — a stopped turn is not a timed-out one. While
+        the stream is merely quiet, it keeps the owner company
+        with the live progress line (U16), throttled like the
+        stream loop's own: a silent turn still says it is alive."""
+        while not stop.is_set():
+            if self._cancel:
+                return
+            if self._generation_overdue(gen_started):
+                self._timed_out = True
+                self._cancel = True
+                self._cancel_event.set()
+                return
+            now = time.time()
+            if (now - state["last_event"] >= PROGRESS_EMIT_SECONDS
+                    and now - state["progress"]
+                    >= PROGRESS_EMIT_SECONDS):
+                state["progress"] = now
+                self._emit_generation_progress(
+                    phase, gen_started, state["chars"])
+            stop.wait(GENERATION_WATCHDOG_POLL_SECONDS)
+
     def _emit_generation_progress(self, phase, gen_started, gen_chars):
         """Live progress for a streaming generation (2026-11-13,
         U16): the phase label, elapsed time, tokens so far (estimated
@@ -2374,9 +2714,11 @@ class AgentWorker(QThread):
             self._log("plan_recited",
                       done=len(self._plan_done),
                       total=len(_plan_steps))
-        for event in self._stream_checked(
-                self.model, request_messages, options, schemas,
-                **self._stream_cancel_kwargs(_keep_alive)):
+        for event in self._watchdog_stream(
+                self._stream_checked(
+                    self.model, request_messages, options, schemas,
+                    **self._stream_cancel_kwargs(_keep_alive)),
+                gen_started, phase):
             if self._cancel:
                 break
             # Turn timeout (2026-11-13): the cap is enforced HERE,
@@ -2387,7 +2729,10 @@ class AgentWorker(QThread):
             # stream aborts (the cancel watch) and every loop's
             # existing _cancel check unwinds the turn; _timed_out
             # marks it so the turn ends on the timeout message,
-            # not on a bare stop.
+            # not on a bare stop. A generation that produces no
+            # events at all never reaches this check — the
+            # prompt-eval watchdog riding the stream (2026-11-19,
+            # P1) sets the same triple from its own thread.
             if self._generation_overdue(gen_started):
                 self._timed_out = True
                 self._cancel = True
@@ -2581,6 +2926,25 @@ class AgentWorker(QThread):
                 self._log("homework_budget_stop", reads=len(reads))
                 self.status.emit(
                     "Context nearly full. Drafting with what I have read so far…")
+                break
+            # Homework time budget (2026-11-19): the pass shares
+            # the turn's generation clock, and one slow reading
+            # generation can take minutes on CPU. With no time
+            # guard the pass ate the whole turn cap and the draft
+            # never started (live-model finding B2: five homework
+            # rounds, thirty minutes gone). The pass gets at most
+            # half the turn's cap; past that it stops reading and
+            # drafts with what was gathered, the same shape as the
+            # context-budget stop above. No cap (None) means no
+            # homework cap either.
+            if (self._turn_timeout_seconds is not None
+                    and getattr(self, "_turn_gen_seconds", 0.0)
+                    >= self._turn_timeout_seconds / 2):
+                self._log("homework_time_stop", reads=len(reads),
+                          gen_seconds=round(
+                              getattr(self, "_turn_gen_seconds", 0.0), 1))
+                self.status.emit(
+                    "Reading is taking a while. Drafting with what I have read so far…")
                 break
             text, tool_calls = self._generate(schemas, phase="homework")
             stripped = text.strip()
@@ -4333,6 +4697,12 @@ class AgentWorker(QThread):
             # (tool, args) key, digest-independent — the rut guard's
             # counter (see RUT_NOTICE_AT / RUT_BREAK_AT).
             rut_history: dict[str, int] = {}
+            # P1 (B11): identical DROPPED calls per (tool, args)
+            # key. The anti-rut counter for calls refused at the
+            # Sweep R5 drop site: they never reach
+            # _execute_call_batch, so they feed neither rut_history
+            # nor fail_history (see DROPPED_RUT_BREAK_AT).
+            dropped_history: dict[str, int] = {}
             stop_bounces = 0
             self._skribe_queue = skribe_mod.WriteQueue()
             self._turn_changes = {}
@@ -4359,6 +4729,11 @@ class AgentWorker(QThread):
             self._turn_eval_tokens = 0
             self._budget_stopped = False
             self._mid_turn_folds = 0
+            # P0a: the offered surface is recomputed for the new
+            # turn's opening payload (Sweep R6/R19 reset law).
+            self._offered_schemas = None
+            self._offered_fingerprint = None
+            self._trimmed_away = []
             # Turn timeout (2026-11-13): a fresh turn carries no
             # timed-out flag and no spent generation time.
             self._timed_out = False
@@ -4478,6 +4853,16 @@ class AgentWorker(QThread):
                 elif not self._budget_check(schemas, cycle):
                     self._budget_stopped = True
                     schemas = []
+                    # P0a fabrication guard: the model is told,
+                    # before the settling generation, that its
+                    # tools are gone and it must not present
+                    # results it never received (the live-model
+                    # test caught it inventing file contents
+                    # after exactly this stop). Runs once: this
+                    # branch only fires on the False-to-True
+                    # transition.
+                    self.messages.append({"role": "system",
+                                          "content": BUDGET_STOP_NOTE})
                     self.status.emit(
                         "Context nearly full. Wrapping up without tools…")
                 # Fix F3: no stored plan-progress reminder
@@ -4533,16 +4918,58 @@ class AgentWorker(QThread):
                               count=len(tool_calls),
                               names=[c.get("function", {}).get("name", "")
                                      for c in tool_calls])
-                    for call in tool_calls:
+                    # P0a fabrication guard: the first dropped call
+                    # of the generation carries the full guard (the
+                    # call never ran — present nothing as its
+                    # result); the rest carry the short refusal, so
+                    # a six-call volley does not spend the window
+                    # repeating the guard.
+                    # P1 (B11): every dropped call also feeds the
+                    # turn's dropped-call counter, keyed exactly
+                    # like the M6 rut key in _execute_call_batch.
+                    # A dropped call reaches neither the rut
+                    # counter (it is not a success) nor the
+                    # fail-streak (it is not a failure), so without
+                    # this count the identical dropped call could
+                    # repeat for the rest of the turn.
+                    rut_broken = None
+                    for idx, call in enumerate(tool_calls):
+                        fn = call.get("function", {})
+                        name = fn.get("name", "")
+                        args = fn.get("arguments", {}) or {}
+                        args_json = json.dumps(
+                            args, sort_keys=True, default=str)
+                        call_key = name + "|" + hashlib.sha256(
+                            args_json.encode("utf-8", "replace")
+                        ).hexdigest()
+                        drops = dropped_history.get(call_key, 0) + 1
+                        dropped_history[call_key] = drops
+                        if (drops >= DROPPED_RUT_BREAK_AT
+                                and rut_broken is None):
+                            rut_broken = (name, drops)
                         self.messages.append({
                             "role": "tool",
-                            "tool_name": call.get("function", {}).get(
-                                "name", ""),
-                            "content": ("Not run: no tools were offered "
-                                        "for this generation, so this "
-                                        "call was never on the table. "
-                                        "Answer in text with what you "
-                                        "already have.")})
+                            "tool_name": name,
+                            "content": (DROPPED_CALL_GUARD if idx == 0
+                                        else DROPPED_CALL_SHORT)})
+                    if rut_broken is not None:
+                        # The drop is final: the identical call has
+                        # been refused DROPPED_RUT_BREAK_AT times
+                        # and came back anyway. End the turn here
+                        # (the settle code below still runs) instead
+                        # of spending further generations refusing
+                        # the same call.
+                        self._log("dropped_call_rut_broken",
+                                  tool=rut_broken[0],
+                                  drops=rut_broken[1])
+                        self.status.emit(
+                            "Stopped: the same tool call kept "
+                            "repeating after it was refused.")
+                        self.messages.append({
+                            "role": "assistant",
+                            "content": DROPPED_RUT_STOP_LINE.format(
+                                tool=rut_broken[0])})
+                        break
                     cycle += 1
                     continue
                 if not tool_calls:

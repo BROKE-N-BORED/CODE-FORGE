@@ -491,7 +491,16 @@ class OllamaClient:
         if images and messages:
             messages = [dict(m) for m in messages]
             messages[-1] = {**messages[-1], "images": images}
-        payload = {"model": model, "messages": _strip_thought_signatures(messages), "stream": True, "options": options, "tools": tools, "keep_alive": keep_alive}
+        # Speed fix (2026-11-19): "think" is a TOP-LEVEL /api/chat
+        # field, not an options entry. Thinking models (the Qwen3
+        # family) otherwise default to thinking ON: a long hidden
+        # reasoning pass burns generation time on a CPU-only box
+        # before a single visible token arrives, which is the
+        # slowness the owner measured against raw Ollama. False asks
+        # for a direct answer. Models without thinking support
+        # ignore the field, so it is safe to send unconditionally —
+        # no per-model branching.
+        payload = {"model": model, "messages": _strip_thought_signatures(messages), "stream": True, "options": options, "tools": tools, "keep_alive": keep_alive, "think": False}
         # StartFix: the attempt loop. Attempt 1 is the generation
         # exactly as before; a llama-server start timeout (HTTP 500,
         # Ollama's own wording) raised BEFORE any chunk was yielded

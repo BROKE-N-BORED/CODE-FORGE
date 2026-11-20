@@ -212,8 +212,10 @@ canvas#firebar{width:100%;height:26px;display:block;background:#141210;border:1p
 #tabbar .tab.active{color:@{accent_amber}@}
 #tabbar .tab.active::after{content:'';position:absolute;top:-7px;left:24%;right:24%;height:2px;background:@{accent_amber}@;border-radius:2px}
 .badge{position:absolute;top:3px;right:calc(50% - 21px);background:@{state_error}@;color:@{text_white}@;font-size:10px;font-weight:700;min-width:16px;height:16px;line-height:16px;border-radius:8px;text-align:center;padding:0 4px;box-sizing:border-box}
-.collaphead{width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;padding:2px 0;color:@{text_base}@;font-size:15px;text-align:left}
+.collaphead{width:100%;display:flex;justify-content:space-between;align-items:center;background:none;border:none;padding:2px 0;color:@{text_base}@;font-size:15px;text-align:left;position:relative}
 .collaphead .sec{margin-bottom:0}
+/* J05 (2026-11-20): the collapse header is a 22px tall button (15px text line plus 2px padding top and bottom; the session variant's 13px text makes it shorter still), too small a touch target. This transparent ::after extends its hit area to at least 44px tall (13px past the box, top and bottom) without touching the button: literal padding would grow every header's box and push the page's sections apart, a visual change, so the hit area grows here, invisibly. Same pattern as the T13 attachment disc below. */
+.collaphead::after{content:'';position:absolute;left:0;right:0;top:-13px;bottom:-13px}
 .collap .collapbody{margin-top:8px}
 .collap.closed .collapbody{display:none}
 .collap .chev{color:@{text_muted}@;font-size:13px;transition:transform .15s}

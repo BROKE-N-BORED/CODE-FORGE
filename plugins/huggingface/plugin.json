@@ -26,7 +26,7 @@
    "requires_approval": false
   },
   {
-   "description": "Inspect one HF repo (owner/name): license, downloads, files with sizes — GGUFs especially.",
+   "description": "Inspect one HF repo (owner/name): license, downloads, file sizes, GGUFs especially.",
    "name": "hf_model_info",
    "parameters": {
     "properties": {

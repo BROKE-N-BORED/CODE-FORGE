@@ -171,3 +171,87 @@ def render(recipe: dict, values: dict | None) -> str:
         return resolved[pname]
 
     return PLACEHOLDER_RE.sub(_substitute, str(recipe.get("prompt", "")))
+
+
+def _slugify(name) -> str:
+    """A recipe display name as a filename slug (the house pattern
+    from run_skill.slugify_goal / artifacts._slug: lowercase
+    letters, digits, hyphens). Falls back to "recipe" when the
+    name has nothing slug-shaped in it."""
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower())
+    slug = re.sub(r"-+", "-", slug).strip("-")[:50].strip("-")
+    return slug or "recipe"
+
+
+def save_recipe(app_dir, data) -> tuple[bool, str]:
+    """Write one owner-authored recipe (R3-17) to
+    app_dir/"recipes" as <slug>.json, in exactly the shape
+    load_recipes reads. Returns (True, slug) on success and
+    (False, reason) — a plain-words reason, NOTHING written —
+    when the recipe cannot be saved:
+
+    - the data fails the loader's own validation
+      (_normalize_recipe raises ValueError with the reason);
+    - the prompt uses a {{placeholder}} the params never declare
+      (render() would refuse it at run time — an authoring bug
+      is loud here instead of on every run);
+    - a loaded recipe already carries the same name, compared
+      case-insensitively (the dialog lists recipes by name, so
+      two same-named recipes would be indistinguishable there);
+    - the target file already exists (a save never overwrites
+      another recipe's file).
+
+    The file carries the normalized shape (name / description /
+    prompt / params / mode, no slug key — the loader derives the
+    slug from the filename), serialized like the app's other
+    recipe writer (run_skill.draft_recipe) and written
+    atomically: temp file + replace.
+    """
+    if not isinstance(data, dict):
+        return False, "not a JSON object"
+    try:
+        normalized = _normalize_recipe(data, _slugify(data.get("name")))
+    except ValueError as exc:
+        return False, str(exc)
+    declared = {p["name"] for p in normalized["params"]}
+    for pname in PLACEHOLDER_RE.findall(normalized["prompt"]):
+        if pname not in declared:
+            return False, (
+                f"the prompt uses '{{{{{pname}}}}}' but no parameter "
+                f"named '{pname}' is declared. Add the parameter or "
+                "fix the prompt.")
+    existing, _problems = load_recipes(app_dir)
+    for recipe in existing:
+        if recipe["name"].lower() == normalized["name"].lower():
+            return False, (
+                f"a recipe named '{normalized['name']}' already "
+                "exists. Pick a different name.")
+    folder = Path(app_dir) / "recipes"
+    slug = normalized["slug"]
+    target = folder / f"{slug}.json"
+    if target.exists():
+        return False, (
+            f"the file {target.name} already exists in the recipes "
+            "folder. Pick a different name.")
+    payload = {"name": normalized["name"],
+               "description": normalized["description"],
+               "prompt": normalized["prompt"],
+               "params": normalized["params"],
+               "mode": normalized["mode"]}
+    text = json.dumps(payload, ensure_ascii=False, indent=2,
+                      sort_keys=True) + "\n"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return False, f"could not create the recipes folder: {exc}"
+    tmp = folder / f".{slug}.json.tmp"
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(target)
+    except Exception as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False, f"could not write the recipe file: {exc}"
+    return True, slug

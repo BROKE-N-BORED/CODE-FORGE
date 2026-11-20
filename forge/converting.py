@@ -413,8 +413,16 @@ def _html_to_text(src, dest):
 
 def _html_to_md(src, dest):
     from .browser.html2md import html_to_markdown
-    Path(dest).write_text(html_to_markdown(_read_text(src)),
-                          encoding="utf-8")
+    # html_to_markdown takes the page's base URL (its other callers
+    # pass the fetched page's final URL) and returns a (title,
+    # markdown, links) tuple. A converted file's page is the file
+    # itself, so its own URI is the base: relative links resolve
+    # against the folder the file lives in. Only the markdown is
+    # the document; the title and link list are the browser
+    # callers' surfaces, not this file's.
+    _title, markdown, _links = html_to_markdown(
+        _read_text(src), Path(src).absolute().as_uri())
+    Path(dest).write_text(markdown, encoding="utf-8")
 
 
 def _txt_to_md(src, dest):

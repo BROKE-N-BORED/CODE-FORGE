@@ -9,13 +9,17 @@ starts and cleared when a turn completes cleanly.
 """
 from __future__ import annotations
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 STATE_NAME = "resume_state.json"
@@ -365,3 +369,408 @@ def format_update_preview(preview, sidecar) -> str:
         _section(f"UNSAFE entries. The update will be refused "
                  f"({len(refused)}):", refused)
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------
+# Auto-update (Joshua's standing order, 2026-11-17): on launch the
+# app silently checks its GitHub repo for a newer Release; up to
+# date means nothing happens; an update found is a popup that asks,
+# and only the owner's tap pulls it; the pull verifies against the
+# release's own checksum sidecar before anything installs; after a
+# verified pull the owner is asked "restart now, yes or no" — No
+# records the verified zip as pending and the NEXT launch applies
+# it before the window opens, re-verified against the recorded
+# hash. Everything in this section is Qt-free: the window drives
+# it through two small threads and does the asking; the checking,
+# downloading, verifying and pending-record keeping live here
+# where tests can reach them without a display. The check is a
+# plain unauthenticated GET to GitHub's public API — no token,
+# nothing identifying is sent.
+
+LATEST_RELEASE_URL = ("https://api.github.com/repos/BROKE-N-BORED/"
+                      "CODE-FORGE/releases/latest")
+RELEASES_PAGE_URL = "https://github.com/BROKE-N-BORED/CODE-FORGE/releases"
+CHECK_TIMEOUT_S = 8
+DOWNLOAD_TIMEOUT_S = 30
+PENDING_NAME = "pending_update.json"
+UPDATES_DIR_NAME = "updates"
+
+_VERSION_RE = re.compile(r"^v?(\d+(?:\.\d+)*)$")
+
+
+class UpdateError(Exception):
+    """A plain-words update failure: the check could not run, the
+    download failed, or a downloaded file did not verify. Whoever
+    catches it shows str(exc) as it stands."""
+
+
+class DownloadCancelled(UpdateError):
+    """The owner cancelled the download. The partial file stays on
+    disk so the next attempt resumes where this one stopped."""
+
+
+def parse_version(text):
+    """A version string as a tuple of ints — "2.6" becomes (2, 6),
+    "v2.6" the same — or None when it is not a version at all.
+    Anything but an optional "v" followed by numbers and dots is
+    refused, so a tag like "v2.5-f11f13" reads as no usable
+    version rather than a wrong one."""
+    if not isinstance(text, str):
+        return None
+    match = _VERSION_RE.match(text.strip())
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def is_newer(latest, current):
+    """True when the latest version is newer than the running one.
+    Either side unparsable means no — an unknown version is never
+    reported as an update. The compare is numeric, not
+    lexicographic: 2.10 is newer than 2.9. Shorter tuples are
+    padded with zeros, so 2.6 and 2.6.0 compare equal."""
+    latest_parsed = parse_version(latest)
+    current_parsed = parse_version(current)
+    if latest_parsed is None or current_parsed is None:
+        return False
+    width = max(len(latest_parsed), len(current_parsed))
+    latest_padded = latest_parsed + (0,) * (width - len(latest_parsed))
+    current_padded = current_parsed + (0,) * (width - len(current_parsed))
+    return latest_padded > current_padded
+
+
+def _asset_entry(raw):
+    """One release asset normalized to {"name", "url", "size"},
+    or None when the payload's entry is unusable. The name is
+    reduced to its final path part — it becomes a file name on
+    disk here, so nothing path-like may ride in on it."""
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name")
+    url = raw.get("browser_download_url")
+    if not isinstance(name, str) or not name:
+        return None
+    if not isinstance(url, str) or not url:
+        return None
+    size = raw.get("size")
+    return {"name": Path(name).name, "url": url,
+            "size": size if isinstance(size, int) else None}
+
+
+def pick_release_assets(assets):
+    """The downloadable pair from a release's asset list: the
+    update zip and its checksum sidecar. The zip is the .zip
+    asset that HAS a "<name>.sha256" partner when one exists (a
+    release can carry other zips); otherwise the first .zip.
+    Returns {"zip": entry | None, "sidecar": entry | None}."""
+    entries = [entry for entry in
+               (_asset_entry(raw) for raw in assets or [])
+               if entry is not None]
+    by_name = {entry["name"]: entry for entry in entries}
+    zips = [entry for entry in entries
+            if entry["name"].lower().endswith(".zip")]
+    chosen = None
+    for entry in zips:
+        if entry["name"] + SIDECAR_SUFFIX in by_name:
+            chosen = entry
+            break
+    if chosen is None and zips:
+        chosen = zips[0]
+    sidecar = None
+    if chosen is not None:
+        sidecar = by_name.get(chosen["name"] + SIDECAR_SUFFIX)
+    return {"zip": chosen, "sidecar": sidecar}
+
+
+def fetch_latest_release(urlopen=None):
+    """The latest Code Forge release from GitHub's public
+    endpoint: {"version", "url", "notes", "zip", "sidecar"}.
+    Raises UpdateError with a plain reason when the network
+    fails, the answer is not JSON, or it names no usable
+    version. urlopen is a test seam — pass a stub and no network
+    is touched."""
+    opener = urlopen or urllib.request.urlopen
+    try:
+        with opener(LATEST_RELEASE_URL,
+                    timeout=CHECK_TIMEOUT_S) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, TimeoutError):
+            raise UpdateError("the update check timed out")
+        raise UpdateError(f"could not reach GitHub: {reason}")
+    except TimeoutError:
+        raise UpdateError("the update check timed out")
+    except (ValueError, UnicodeDecodeError, http.client.HTTPException):
+        raise UpdateError(
+            "the releases page did not answer in a form "
+            "Code Forge understands")
+    if not isinstance(payload, dict):
+        raise UpdateError(
+            "the releases page did not answer in a form "
+            "Code Forge understands")
+    tag = payload.get("tag_name")
+    if not isinstance(tag, str) or not tag:
+        raise UpdateError("the releases page did not name a version")
+    version = parse_version(tag)
+    if version is None:
+        raise UpdateError(
+            "the latest release tag did not look like a version: "
+            f"{tag}")
+    picked = pick_release_assets(payload.get("assets"))
+    return {"version": ".".join(str(part) for part in version),
+            "url": payload.get("html_url") or RELEASES_PAGE_URL,
+            "notes": payload.get("body") or "",
+            "zip": picked["zip"], "sidecar": picked["sidecar"]}
+
+
+def check_for_update(current_version, urlopen=None):
+    """One call, three outcomes, never an exception for a network
+    or parsing problem:
+
+    {"state": "newer", ...}   — a newer release is out; "zip" and
+    "sidecar" carry its downloadable pair (either may be None
+    when the release carries no such asset).
+    {"state": "current", ...} — the running version is the newest
+    (or newer than the latest release: a dev tree).
+    {"state": "unknown", "reason": plain words, ...} — the check
+    could not run; the caller stays silent unless the owner asked
+    for the check by hand.
+    """
+    try:
+        release = fetch_latest_release(urlopen=urlopen)
+    except UpdateError as exc:
+        return {"state": "unknown", "latest": None, "url": None,
+                "reason": str(exc), "notes": "",
+                "zip": None, "sidecar": None}
+    state = ("newer" if is_newer(release["version"], current_version)
+             else "current")
+    return {"state": state, "latest": release["version"],
+            "url": release["url"], "reason": "",
+            "notes": release["notes"], "zip": release["zip"],
+            "sidecar": release["sidecar"]}
+
+
+def _response_total(response, status, resumed_from):
+    """The full size of the body being read, from the headers:
+    the Content-Range total on a 206, Content-Length otherwise;
+    None when the server never said."""
+    headers = getattr(response, "headers", None)
+
+    def _get(name):
+        try:
+            return headers.get(name) if headers is not None else None
+        except Exception:
+            return None
+
+    if status == 206:
+        content_range = _get("Content-Range") or ""
+        tail = content_range.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+        length = _get("Content-Length")
+        if length is not None and str(length).isdigit():
+            return resumed_from + int(length)
+        return None
+    length = _get("Content-Length")
+    if length is not None and str(length).isdigit():
+        return int(length)
+    return None
+
+
+def download_file(url, dest, progress=None, cancel_event=None,
+                  urlopen=None):
+    """Download url to dest, resuming a partial file when one is
+    already there (U24): the request carries a Range header for
+    the bytes on disk, and a server that ignores it (a plain 200)
+    simply restarts the file. progress(done, total) is called as
+    bytes land; total is None when the server never said.
+    cancel_event is anything with is_set() — a threading.Event in
+    the app. Returns the final size in bytes. Raises
+    DownloadCancelled when cancelled (the partial stays for the
+    next attempt) and UpdateError with plain words for anything
+    else."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    opener = urlopen or urllib.request.urlopen
+    for attempt in range(2):
+        existing = dest.stat().st_size if dest.is_file() else 0
+        headers = {}
+        if existing:
+            headers["Range"] = f"bytes={existing}-"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            response = opener(request, timeout=DOWNLOAD_TIMEOUT_S)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and existing and attempt == 0:
+                # The resume point is past the end of the file
+                # the server has: the partial cannot be trusted.
+                # Clear it and start the file over, once.
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+                continue
+            raise UpdateError(
+                f"the server answered {exc.code} for the download")
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, TimeoutError):
+                raise UpdateError("the download timed out")
+            raise UpdateError(f"could not reach the server: {reason}")
+        except TimeoutError:
+            raise UpdateError("the download timed out")
+        with response:
+            status = getattr(response, "status", None)
+            if status is None:
+                try:
+                    status = response.getcode()
+                except Exception:
+                    status = 200
+            if status == 416 and existing and attempt == 0:
+                # Same refusal, delivered as a response instead of
+                # an exception (a stub or a proxy can do either).
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+                continue
+            if status not in (200, 206):
+                raise UpdateError(
+                    f"the server answered {status} for the download")
+            resumed = existing if status == 206 else 0
+            total = _response_total(response, status, resumed)
+            done = resumed
+            with open(dest, "ab" if resumed else "wb") as fh:
+                while True:
+                    if (cancel_event is not None
+                            and cancel_event.is_set()):
+                        raise DownloadCancelled(
+                            "the download was cancelled; the part "
+                            "already here is kept, and the next "
+                            "try resumes from it")
+                    chunk = response.read(1024 * 256)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    done += len(chunk)
+                    if progress is not None:
+                        progress(done, total)
+            if total is not None and done != total:
+                raise UpdateError(
+                    f"the download ended early ({done:,} of "
+                    f"{total:,} bytes); run it again and it "
+                    "resumes from what is already here")
+            if progress is not None:
+                progress(done, total)
+            return done
+    raise UpdateError("the download could not be completed")
+
+
+def make_pending_record(zip_path, sha256, version):
+    """The pending-update record's shape, built in one place: the
+    zip path, the sha256 it verified against at pull time, and
+    the version it will install."""
+    return {"zip": str(zip_path), "sha256": sha256,
+            "version": version,
+            "recorded_at": datetime.now(timezone.utc).isoformat()}
+
+
+def write_pending_update(data_dir, record) -> None:
+    """Record a downloaded, verified update the owner chose to
+    install at the next launch (the "No" answer to the restart
+    question). Written atomically, like every state file here."""
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _atomic_write_json(data_dir / PENDING_NAME, record)
+
+
+def read_pending_update(data_dir) -> dict | None:
+    try:
+        record = json.loads(
+            (Path(data_dir) / PENDING_NAME).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def clear_pending_update(data_dir) -> None:
+    try:
+        (Path(data_dir) / PENDING_NAME).unlink()
+    except OSError:
+        pass
+
+
+def apply_pending_update(root_dir, data_dir, current_version) -> dict:
+    """The next-launch half of the deferred install, run before
+    the main window opens. A pending record's zip is re-verified
+    against the hash recorded when it was pulled — before
+    anything installs it — so a zip swapped or damaged while it
+    waited is still caught. Returns {"status", "reason",
+    "record"}:
+
+      "none"    — no record; startup proceeds untouched.
+      "applied" — verified and handed to the updater; the caller
+                  exits without opening the window, and the
+                  updater installs and relaunches as usual.
+      "dropped" — the record was incomplete, no longer newer
+                  (stale), pointed at a missing or unreadable
+                  file, or the zip no longer matches the recorded
+                  hash: the record is cleared and NOTHING is
+                  installed.
+      "error"   — verified, but the updater could not be
+                  spawned; the record is kept for the next launch.
+    """
+    record = read_pending_update(data_dir)
+    if record is None:
+        return {"status": "none", "reason": "", "record": None}
+
+    def dropped(reason):
+        clear_pending_update(data_dir)
+        return {"status": "dropped", "reason": reason,
+                "record": record}
+
+    zip_path = record.get("zip")
+    sha256 = record.get("sha256")
+    version = record.get("version")
+    if (not isinstance(zip_path, str) or not zip_path
+            or not isinstance(sha256, str)
+            or not _HEX64_RE.match(sha256)):
+        return dropped(
+            "the pending update record was incomplete, so it "
+            "was cleared without installing anything")
+    if not is_newer(version, current_version):
+        return dropped(
+            "the pending update is no longer newer than the "
+            "running version, so it was cleared without "
+            "installing anything")
+    zip_file = Path(zip_path)
+    if not zip_file.is_file():
+        return dropped(
+            "the downloaded update file is gone, so the pending "
+            "update was cleared")
+    try:
+        actual = _hash_file(zip_file)
+    except OSError:
+        return dropped(
+            "the downloaded update file could not be read, so "
+            "the pending update was cleared")
+    if actual.lower() != sha256.lower():
+        return dropped(
+            "the downloaded update no longer matches the "
+            "checksum it verified with, so it was NOT installed "
+            "and the pending record was cleared")
+    try:
+        spawn_updater(root_dir, data_dir, zip_path)
+    except Exception as exc:
+        return {"status": "error",
+                "reason": "the updater could not be started "
+                          f"({exc}); the verified update stays "
+                          "pending for the next launch",
+                "record": record}
+    clear_pending_update(data_dir)
+    return {"status": "applied",
+            "reason": "installing the verified update "
+                      f"(Code Forge {version}) downloaded last "
+                      "session",
+            "record": record}

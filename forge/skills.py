@@ -142,7 +142,7 @@ LOAD_SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "load_skill",
-        "description": "Load the full instructions of a skill from the skill directory by name.",
+        "description": "Load a skill's full instructions from the skill directory by name.",
         "parameters": {"type": "object",
                        "properties": {"name": {"type": "string"}},
                        "required": ["name"]},

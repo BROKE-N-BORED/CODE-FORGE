@@ -37,15 +37,46 @@ def _parse_messages(raw, conversation_id):
 class ConversationStore:
     def __init__(self, path: Path):
         self.path = path
-        with self._connect() as db:
-            db.execute("CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, messages TEXT NOT NULL)")
-            cols = {r[1] for r in db.execute("PRAGMA table_info(conversations)")}
-            if "model" not in cols:
-                db.execute("ALTER TABLE conversations ADD COLUMN model TEXT")
-            if "project" not in cols:
-                db.execute("ALTER TABLE conversations ADD COLUMN project TEXT")
+        existed = self.path.exists()
+        try:
+            self._init_schema()
+        except sqlite3.DatabaseError:
+            # Audit P0-2: a corrupt database file used to brick
+            # startup. sqlite3.connect is lazy, so the first
+            # statement raised here, uncaught, and the app exited
+            # before any window opened. Mirror the settings-file
+            # quarantine (Sweep R40): move the unreadable file aside
+            # to <name>.corrupt, best-effort, and start fresh. The
+            # owner's history stays readable in the .corrupt file
+            # for a future repair instead of being overwritten. A
+            # path that did not exist cannot be corrupt: re-raise.
+            if not existed:
+                raise
+            try:
+                self.path.replace(
+                    self.path.with_name(self.path.name + ".corrupt"))
+            except OSError:
+                pass
+            self._init_schema()
         # S2: the database holds whole conversations — private file.
         fileperms.ensure_private_file(self.path)
+
+    def _init_schema(self):
+        # The connection is closed explicitly in the finally: used
+        # as a context manager it commits or rolls back on exit but
+        # stays open, and an open handle can block the quarantine
+        # rename on some platforms.
+        db = self._connect()
+        try:
+            with db:
+                db.execute("CREATE TABLE IF NOT EXISTS conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, messages TEXT NOT NULL)")
+                cols = {r[1] for r in db.execute("PRAGMA table_info(conversations)")}
+                if "model" not in cols:
+                    db.execute("ALTER TABLE conversations ADD COLUMN model TEXT")
+                if "project" not in cols:
+                    db.execute("ALTER TABLE conversations ADD COLUMN project TEXT")
+        finally:
+            db.close()
 
     def _connect(self):
         # Sweep R149 (locking half): overlapping writers (the main

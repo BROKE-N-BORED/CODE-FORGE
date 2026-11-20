@@ -408,15 +408,11 @@ READ_KNOWLEDGE_SCHEMA = {
     "function": {
         "name": "read_knowledge",
         "description": ("Load an owner-approved project knowledge entry "
-                        "by its index name. Entries load in 7,000-char "
-                        "slices — when a slice ends with a footer "
-                        "naming an offset, pass that offset to continue."),
+                        "by index name, in 7,000-char slices; a footer "
+                        "naming an offset means pass it to continue."),
         "parameters": {"type": "object",
                        "properties": {"name": {"type": "string"},
-                                      "offset": {"type": "integer",
-                                                 "description":
-                                                 "Char offset to start "
-                                                 "from (default 0)."}},
+                                      "offset": {"type": "integer"}},
                        "required": ["name"]},
     },
 }

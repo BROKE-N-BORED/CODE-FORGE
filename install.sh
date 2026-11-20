@@ -64,7 +64,16 @@ if command -v dpkg-query >/dev/null && command -v apt-cache >/dev/null; then
       echo "  $pkg: $installed -> $candidate"
     fi
   done
-  [ ${#SYS_OUTDATED[@]} -eq 0 ] && echo "  all up to date"
+  # "All up to date" must account for MISSING too: a package that
+  # was never installed is not outdated, but it is not up to date
+  # either — the install step below still has work to do.
+  if [ ${#SYS_OUTDATED[@]} -eq 0 ]; then
+    if [ ${#MISSING[@]} -eq 0 ]; then
+      echo "  all up to date"
+    else
+      echo "  all installed packages up to date"
+    fi
+  fi
 else
   echo "  (dpkg/apt not available — skipped)"
 fi
@@ -116,7 +125,12 @@ else
   echo "  not installed — get it from https://ollama.com/download (install.sh never installs Ollama itself)"
 fi
 
-if [ ${#SYS_OUTDATED[@]} -eq 0 ] && [ ${#PY_OUTDATED[@]} -eq 0 ] && [ "$OLLAMA_STATE" = "ok" ]; then
+# The headline verdict requires EVERYTHING to be in place: no
+# outdated packages, no missing ones, an existing environment and
+# a healthy Ollama. With packages missing or no venv yet, the
+# install step below is about to install things, so "nothing
+# needs updating" would be a lie (B32).
+if [ ${#SYS_OUTDATED[@]} -eq 0 ] && [ ${#PY_OUTDATED[@]} -eq 0 ] && [ ${#MISSING[@]} -eq 0 ] && [ "$VENV_EXISTED" -eq 1 ] && [ "$OLLAMA_STATE" = "ok" ]; then
   echo "Everything is up to date — nothing needs updating."
 fi
 

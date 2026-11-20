@@ -106,3 +106,61 @@ def write_layout(settings: dict, state: dict) -> dict:
     settings["layout_panel_sizes"] = _sanitize_panel_sizes(
         state.get("panel_sizes"), fallback=settings.get("layout_panel_sizes"))
     return settings
+
+
+# ------------------------------------------------------------------
+# The Write room's canvas split (B28b): the Editor tab's three
+# columns (session / document / suggestions) ride their own
+# QSplitter. It shipped with fixed start sizes and no persistence
+# at all — a drag snapped back on the next launch, unlike the main
+# window's panels above. Same discipline, its own key:
+#
+#     layout_canvas_sizes : [session px, document px, suggestions px]
+#
+# The defaults are the sizes the split shipped with, so a settings
+# file without the key reopens exactly as before. Bounds keep a
+# hand-edited or corrupt triple from crushing a column shut.
+CANVAS_DEFAULTS = (300, 560, 300)
+CANVAS_BOUNDS = ((120, 1200), (240, 4000), (120, 1200))
+
+
+def _sanitize_canvas_sizes(raw, fallback=None):
+    """Coerce a stored canvas-size triple into [session, document,
+    suggestions] ints inside CANVAS_BOUNDS. Anything unusable falls
+    back to `fallback` (itself sanitized against the defaults)."""
+    def clean(triple):
+        if not isinstance(triple, (list, tuple)) or len(triple) != 3:
+            return None
+        out = []
+        for value, (lo, hi) in zip(triple, CANVAS_BOUNDS):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return None
+            out.append(max(lo, min(hi, int(value))))
+        return out
+    cleaned = clean(raw)
+    if cleaned is not None:
+        return cleaned
+    cleaned = clean(fallback)
+    if cleaned is not None:
+        return cleaned
+    return list(CANVAS_DEFAULTS)
+
+
+def read_canvas_sizes(settings) -> list:
+    """The Write room's saved canvas sizes, sanitized. Never raises
+    and never trusts the file, exactly like read_layout."""
+    if not isinstance(settings, dict):
+        settings = {}
+    return _sanitize_canvas_sizes(settings.get("layout_canvas_sizes"))
+
+
+def write_canvas_sizes(settings: dict, sizes) -> dict:
+    """Store the canvas sizes into a settings dict (mutates and
+    returns it). Only the canvas key is touched. An unusable
+    `sizes` keeps the pair already stored rather than resetting
+    the owner's columns to defaults."""
+    if not isinstance(settings, dict):
+        settings = {}
+    settings["layout_canvas_sizes"] = _sanitize_canvas_sizes(
+        sizes, fallback=settings.get("layout_canvas_sizes"))
+    return settings

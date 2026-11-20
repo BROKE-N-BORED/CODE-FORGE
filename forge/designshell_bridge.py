@@ -83,63 +83,42 @@ DESIGN_SHELL_SCHEMA = {
     "function": {
         "name": "design_shell",
         "description": (
-            "Drive the Design Shell (the standalone design & asset "
-            "workshop installed on this PC) for this project: draft "
-            "asset plans from plain words, build approved assets "
-            "(3D scenes, UI art, images) with Blender and import the "
-            "results into the project, generate candidate reference "
-            "images, and search the shell's library. Actions: plan "
-            "(words -> a draft job + its plain-English summary; it "
-            "STOPS there — the owner approves the plan at Forge's "
-            "gate, never you), show/status/search (read the shell), "
-            "build (an approved job; imports the outputs into the "
-            "project), images (prompt -> a batch of 3 candidates + "
-            "the picker page to open), pick_status (what the owner "
-            "kept/rejected), decide (keep/reject one candidate), "
-            "reroll (another round), file (file a reviewed job into "
-            "the shell library), import (copy a job's outputs — or "
-            "a filed library asset's files — into the project). "
-            "There is deliberately NO approve action for you: "
-            "approval is the owner's, at the gate."),
+            "Drive the Design Shell app for this project: plan "
+            "(asset in words to a draft job; stops for the "
+            "owner's approval, never yours), show, status, search, "
+            "build (approved job; imports outputs), images "
+            "(prompt to 3 candidates plus picker), pick_status, "
+            "decide, reroll, file, import (a job's or library "
+            "asset's files into the project). No approve action "
+            "for you."),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                           "enum": list(ACTIONS),
-                           "description": "What to do."},
+                           "enum": list(ACTIONS)},
                 "words": {"type": "string",
-                          "description": "For plan: the plain-words "
-                                         "description of the asset."},
+                          "description": "Plan: the asset in words."},
                 "kind": {"type": "string",
-                         "description": "For plan: the asset kind "
-                                        "(default 'scene')."},
+                         "description": "Plan: kind (default "
+                                        "'scene')."},
                 "job": {"type": "string",
-                        "description": "A job name, for show / build "
-                                       "/ images / file / import."},
-                "query": {"type": "string",
-                          "description": "For search: what to look "
-                                         "for in the library."},
+                        "description": "Job name (show, build, "
+                                       "images, file, import)."},
+                "query": {"type": "string"},
                 "prompt": {"type": "string",
-                           "description": "For images: the image "
-                                         "prompt."},
+                           "description": "Images: the prompt."},
                 "batch": {"type": "string",
-                          "description": "A batch folder (the full "
-                                         "path the images action "
-                                         "returned), for pick / "
-                                         "pick_status / decide / "
-                                         "reroll."},
+                          "description": "Batch folder from images "
+                                         "(pick_status, decide, "
+                                         "reroll)."},
                 "file": {"type": "string",
-                         "description": "For decide: the candidate "
-                                        "file name (e.g. cand-01.png)."},
+                         "description": "Decide: candidate file "
+                                        "name."},
                 "decision": {"type": "string",
-                             "enum": ["keep", "reject"],
-                             "description": "For decide: keep or "
-                                            "reject the candidate."},
+                             "enum": ["keep", "reject"]},
                 "asset": {"type": "string",
-                          "description": "For import: a filed "
-                                         "library asset's folder "
-                                         "name to copy instead of "
-                                         "a job."},
+                          "description": "Import: library asset "
+                                         "folder name."},
             },
             "required": ["action"],
         },
