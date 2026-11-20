@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-20 — Version 2.6: live-model fixes, the fit and truth pass, and auto-update
+
+- Code mode now offers the tools that fit the model's window instead of offering all of them and dropping the calls. The old surface overflowed the 8K window, turns died at the first step, and the model invented results for calls that never ran. A dropped call now says plainly that it was dropped, and repeating the same dropped call three times ends the turn instead of looping.
+- A damaged conversations file no longer stops the app from starting: it is set aside and a fresh one is started, the same way damaged settings were already handled.
+- Closing the Bench window during a run no longer crashes the app; it waits for the run to stop first. Bench tasks get 15 minutes each instead of 4, which real generations on a small machine need.
+- Homework rounds stop at half the turn's time budget instead of eating the whole turn, and a stuck generation is now caught even when the model goes quiet. Local models no longer spend time thinking before answering, which is the speed fix.
+- The tool surface is 25 percent lighter, so a fresh Code chat offers all 44 tools inside the window, and the context gauge reads what is actually sent: a fresh chat reads 85 percent, not 106.
+- The SKRIBE grading check now runs only on job modes (Plan, Write, Research, Architect, Design, Review) instead of on every file-writing turn in every mode.
+- Fit and truth pass: the sidebar project list scrolls instead of crushing rows; the Customize, UI builder, and Research windows fit a 1366x768 screen; the View menu is split into Windows and Dialogs submenus; the app no longer claims a request was sent before the safety check has passed; a failed turn leaves a plain note in the transcript and the status settles back to Ready; Artifacts buttons dim when nothing is picked; long skill and plugin rows shorten with the full text on hover; the empty-history card opens at the top; mode-room copy is cleaned up.
+- Recipes can be written inside the app: the Recipes window has a New recipe form (name, prompt, parameters), and a recipe that could never run is refused at saving, with the reason.
+- The installer's verdict is honest: it no longer says nothing needs updating when packages are missing or the environment does not exist yet. The Write window remembers its panel sizes, the Debugger no longer pre-picks a file, and the Testing window answers in plain words when no test command is typed.
+- Converting an HTML file to Markdown works again, the Run window remembers your file pick per project, and the phone deck's section headers have full-size touch targets.
+- Code Forge now checks for updates on launch: silent when you are current, a popup when a newer release exists, the download starts only on your tap, the checksum is verified before anything installs, and you choose whether to restart now or on the next launch. The Help menu has a Check for updates entry. Version numbers are plain from here on: this is 2.6.
+- One-time note: after this update, re-enable the six bundled plugins once in Customize. Their descriptions changed, so the app asks you to confirm them again. That is by design.
+- Full test suite: 3,209 tests. One known item, not a regression: a pre-existing FFmpeg probe test whose premise is stale.
+
 ## 2026-11-16 — Spark glow, memory check before loading, menu trim, motion, deck wrap
 
 - The brand spark now glows from the inside on its slow pulse — the halo was being clipped by the widget, so the glow never showed. Fixed: the halo spills out around the spark at the peak of each breath.
