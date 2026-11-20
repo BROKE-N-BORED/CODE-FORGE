@@ -338,5 +338,46 @@ class ConverterWindowProbeTests(_QtCase):
         self.assertEqual(window.targets_list.count(), 2)
 
 
+class HtmlToMarkdownConvertTests(_QtCase):
+    """M09: HTML -> Markdown raised every time. converting's call
+    site passed html_to_markdown neither the base_url it requires
+    nor unpacked its (title, markdown, links) tuple, so the pair
+    the capability matrix advertises never converted anything.
+    These tests run the public convert() door end to end."""
+
+    def test_html_file_converts_to_markdown(self):
+        src = self.dir / "page.html"
+        src.write_text(
+            "<html><head><title>Notes</title></head><body>"
+            "<h1>Hello</h1><p>Body text.</p></body></html>")
+        dest = self.dir / "page.md"
+        result = converting.convert(src, "md", dest)
+        self.assertTrue(dest.exists())
+        self.assertGreater(result["size"], 0)
+        text = dest.read_text()
+        self.assertIn("# Hello", text)
+        self.assertIn("Body text.", text)
+
+    def test_relative_links_resolve_against_the_files_folder(self):
+        # The base for a converted file is the file itself: a
+        # relative href must come out resolved against the folder
+        # the source file lives in, not left relative or dropped.
+        src = self.dir / "page.html"
+        src.write_text(
+            "<html><body><p>See "
+            "<a href=\"other.html\">the other page</a> and "
+            "<a href=\"docs/guide.html\">the guide</a>."
+            "</p></body></html>")
+        dest = self.dir / "page.md"
+        converting.convert(src, "md", dest)
+        text = dest.read_text()
+        self.assertIn(
+            f"[the other page]({(self.dir / 'other.html').as_uri()})",
+            text)
+        self.assertIn(
+            f"[the guide]({(self.dir / 'docs/guide.html').as_uri()})",
+            text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1327,10 +1327,10 @@ class ContextBudgetTests(unittest.TestCase):
         # The exemption: the pending SKRIBE grading generation keeps
         # its tools even when the payload is already past the stop
         # fraction. Measured fixture: with this script the estimated
-        # payloads are 1499 (write), 1557 (quiet answer), 1779
-        # (grading) — a 1850-token window stays under 90% for the
-        # first two generations (0.81, 0.84) and crosses it only at
-        # the grading generation (0.96), which is exactly the one
+        # payloads are 1124 (write), 1182 (quiet answer), 1404
+        # (grading) — a 1450-token window stays under 90% for the
+        # first two generations (0.78, 0.82) and crosses it only at
+        # the grading generation (0.97), which is exactly the one
         # the exemption protects. The client records the estimate of
         # every call so the fixture cannot silently drift under the
         # threshold: the test asserts the crossing really happened.
@@ -1344,14 +1344,18 @@ class ContextBudgetTests(unittest.TestCase):
         # the same three relationships. Recalibrated 2026-11-13:
         # the export_replay tool added one built-in schema, ~113
         # estimated tokens on every generation — the window moved
-        # from 1700 to 1850 to keep the same three relationships.)
+        # from 1700 to 1850 to keep the same three relationships.
+        # Recalibrated 2026-11-19 (8K LOAD build): the description
+        # slim removed ~375 estimated tokens of schema payload from
+        # every generation — the window moved from 1850 to 1450 to
+        # keep the same three relationships.)
         from forge.worker import AgentWorker
         with tempfile.TemporaryDirectory() as td:
             log = _FakeEventLog()
             client = _GradingClient()
             worker = AgentWorker(
                 client, "maternion/minicpm5-heretic:2b",
-                [{"role": "user", "content": "go"}], {"num_ctx": 1850},
+                [{"role": "user", "content": "go"}], {"num_ctx": 1450},
                 td, eventlog=log)
             worker.approval_needed.connect(
                 lambda *a: worker.resolve_approval(True))
@@ -1361,10 +1365,10 @@ class ContextBudgetTests(unittest.TestCase):
             worker.run()
             self.assertEqual(client.calls, 3)
             # The first two generations were under the fraction…
-            self.assertLess(client.estimates[0], 0.90 * 1850)
-            self.assertLess(client.estimates[1], 0.90 * 1850)
+            self.assertLess(client.estimates[0], 0.90 * 1450)
+            self.assertLess(client.estimates[1], 0.90 * 1450)
             # …the grading generation was over it…
-            self.assertGreaterEqual(client.estimates[2], 0.90 * 1850)
+            self.assertGreaterEqual(client.estimates[2], 0.90 * 1450)
             # …and still kept its tools, with no budget trip logged.
             self.assertTrue(client.schemas_seen[2])
             self.assertNotIn("context_budget_stop", log.kinds())
@@ -1373,6 +1377,713 @@ class ContextBudgetTests(unittest.TestCase):
             self.assertEqual(len(verdicts), 1)
             self.assertEqual(verdicts[0]["decision"], "finalize")
             self.assertTrue(finished)
+
+
+class _TwoCallClient:
+    """One generation with TWO tool calls, then settles in text —
+    the shape the fabrication-guard test needs (the first dropped
+    call of a generation carries the full guard, the rest the
+    short form)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat_stream(self, model, messages, options, schemas, keep_alive=None):
+        self.calls += 1
+        if self.calls == 1:
+            yield {"message": {"content": "", "tool_calls": [
+                {"function": {"name": "read_file",
+                              "arguments": {"path": "hello.py"}}},
+                {"function": {"name": "write_file",
+                              "arguments": {"path": "should_not_exist.txt",
+                                            "content": "x"}}},
+            ]}}
+        else:
+            yield {"message": {"content": "settled", "tool_calls": []}}
+
+
+class P0aSurfaceTrimTests(unittest.TestCase):
+    """P0a (live-model Finding #1, 2026-11-17): Code mode's full
+    surface (44 tools, ~6,900 estimated tokens) plus the system
+    prompt did not fit an 8,192 window, so the budget stop fired
+    at cycle 0 and Code mode offered NO tools — and the model then
+    fabricated tool results as fact. The offer now trims to fit
+    (lowest-priority tools first, core floor never trimmed), the
+    model is told which tools are held back, and a budget stop or
+    a dropped call carries the fabrication guard. Sizes are
+    estimator-driven (deterministic): every fixture measures its
+    pieces with the tree's own estimator and asserts the room
+    relationship as a guard, so a future estimator change fails
+    loudly here instead of silently changing the trim outcome."""
+
+    @staticmethod
+    def _schema(name, pad_chars=0, properties=None):
+        return {"type": "function",
+                "function": {"name": name,
+                             "description": "test " + ("x" * pad_chars),
+                             "parameters": {"type": "object",
+                                            "properties": properties or {}}}}
+
+    @staticmethod
+    def _system_message(tokens):
+        from forge import context as ctx
+        return {"role": "system",
+                "content": "x" * int(tokens * ctx.CHARS_PER_TOKEN)}
+
+    def _worker(self, extra=None, messages=None, num_ctx=8192,
+                mode="code", disabled=None, log=None, script=None):
+        from forge.worker import AgentWorker
+        return AgentWorker(
+            _ScriptedClient(script or [{"content": "end"}]), "fake",
+            messages or [{"role": "user", "content": "go"}],
+            {"num_ctx": num_ctx}, tempfile.mkdtemp(),
+            extra_tools=extra or {}, eventlog=log,
+            permissions={"mode": mode, "classes": {}},
+            disabled_tools=disabled)
+
+    @staticmethod
+    def _names(schemas):
+        return [s["function"]["name"] for s in schemas]
+
+    def _real_code_extras(self):
+        """The real Code-mode extra tools: the 13 built-ins from
+        ForgeWindow._extra_tools plus the shipped plugin registry
+        (dummy handlers — the offer is what is under test)."""
+        from pathlib import Path
+        from forge.skills import LOAD_SKILL_SCHEMA
+        from forge import create_ext as create_mod
+        from forge import debugger as debugger_mod
+        from forge import knowledge as knowledge_mod
+        from forge import designshell_bridge as dsbridge_mod
+        from forge import projects as proj
+        from forge.plugins import load_plugins, PluginContext
+        extra = {}
+        builtins = [
+            ("load_skill", LOAD_SKILL_SCHEMA, False),
+            ("create_skill", create_mod.CREATE_SKILL_SCHEMA, True),
+            ("create_plugin", create_mod.CREATE_PLUGIN_SCHEMA, True),
+            ("update_skill", create_mod.UPDATE_SKILL_SCHEMA, True),
+            ("update_plugin", create_mod.UPDATE_PLUGIN_SCHEMA, True),
+            ("debug_start", debugger_mod.DEBUG_START_SCHEMA, True),
+            ("debug_step", debugger_mod.DEBUG_STEP_SCHEMA, True),
+            ("debug_continue", debugger_mod.DEBUG_CONTINUE_SCHEMA, True),
+            ("debug_inspect", debugger_mod.DEBUG_INSPECT_SCHEMA, False),
+            ("debug_stop", debugger_mod.DEBUG_STOP_SCHEMA, False),
+            ("read_knowledge", knowledge_mod.READ_KNOWLEDGE_SCHEMA, False),
+            ("design_shell", dsbridge_mod.DESIGN_SHELL_SCHEMA, True),
+            ("read_source", proj.READ_SOURCE_SCHEMA, False),
+        ]
+        for name, schema, appr in builtins:
+            extra[name] = (schema, lambda args: "ok", appr, "test")
+        root = Path(__file__).resolve().parent.parent
+        pctx = PluginContext(workspace="/tmp",
+                             base_url="http://127.0.0.1:11434",
+                             config={}, log=None)
+        _plugins, registry = load_plugins(root / "plugins", pctx)
+        for name, entry in registry.items():
+            extra[name] = (entry[0], lambda args: "ok", entry[2],
+                           entry[3])
+        return extra
+
+    def test_real_code_surface_trims_to_fit_at_8192(self):
+        from forge import context as ctx
+        from forge.tools import TOOL_SCHEMAS
+        extra = self._real_code_extras()
+        messages = [self._system_message(3164),
+                    {"role": "user",
+                     "content": "Create hello.py that prints my name, "
+                                "then run it"}]
+        worker = self._worker(extra=extra, messages=messages)
+        configured = worker._configured_schemas()
+        # The Finding #1 shape, after the 8K LOAD build
+        # (2026-11-19) slimmed the tool descriptions: still 44
+        # tools (the count is the invariant), but the surface is
+        # ~5,200 tokens, not the ~6,900 that overflowed the
+        # window in the 2026-11-17 finding. With THIS test's
+        # 3,164-token system message the trim still engages and
+        # still fits the offer (below); on a fresh real prompt it
+        # no longer engages at all (ToolSurfaceLoadTests).
+        self.assertEqual(len(configured), 44)
+        self.assertGreaterEqual(ctx.estimate_schemas(configured), 4000)
+        self.assertLessEqual(ctx.estimate_schemas(configured), 5300)
+        offered = worker._schemas()
+        self.assertLess(len(offered), len(configured))
+        # The core floor is intact, and the trimmed offer fits the
+        # window with room to spare at cycle 0 AND cycle 1.
+        core = {s["function"]["name"] for s in TOOL_SCHEMAS}
+        self.assertTrue(core <= set(self._names(offered)))
+        self.assertLess(
+            ctx.fill_fraction(worker.messages, 8192, offered), 0.90)
+        self.assertTrue(worker._budget_check(offered, 0))
+        self.assertTrue(worker._budget_check(offered, 1))
+        # Control: the UNTRIMMED surface still stops at cycle 0 —
+        # the original bug, reproduced on a fresh worker.
+        control = self._worker(extra=extra, messages=messages)
+        self.assertFalse(
+            control._budget_check(control._configured_schemas(), 0))
+
+    def test_trim_drops_in_priority_order(self):
+        from forge import context as ctx
+        from forge.tools import TOOL_SCHEMAS
+        from forge.worker import SURFACE_FIT_FRACTION
+        extra = {
+            "design_shell": (self._schema("design_shell", 2000),
+                             lambda a: "ok", False, "test"),
+            "cloud_read": (self._schema("cloud_read", 400),
+                           lambda a: "ok", False, "test"),
+            "mcp_call": (self._schema("mcp_call", 300),
+                         lambda a: "ok", False, "test"),
+            "unknown_huge": (self._schema("unknown_huge", 1600),
+                             lambda a: "ok", False, "test"),
+        }
+        core = ctx.estimate_schemas(TOOL_SCHEMAS)
+        sizes = {n: ctx.estimate_schemas([s])
+                 for n, (s, _h, _a, _p) in extra.items()}
+        total = core + sum(sizes.values())
+        target = int(8192 * SURFACE_FIT_FRACTION)
+        # Room after dropping design_shell + cloud_read, and no
+        # more: total - design - cloud <= room < total - design.
+        room = total - sizes["design_shell"] - sizes["cloud_read"]
+        sys_tokens = target - room - 13  # 13 = the two messages' overhead
+        if sys_tokens % 2:
+            sys_tokens -= 1  # keep the char math exact (3.5/token)
+        messages = [self._system_message(sys_tokens),
+                    {"role": "user", "content": "go"}]
+        base = ctx.estimate_messages(messages)
+        actual_room = target - base
+        self.assertLessEqual(total - sizes["design_shell"]
+                             - sizes["cloud_read"], actual_room)
+        self.assertLess(actual_room, total - sizes["design_shell"])
+        worker = self._worker(extra=extra, messages=messages)
+        offered = self._names(worker._schemas())
+        self.assertEqual(worker._trimmed_away,
+                         ["design_shell", "cloud_read"])
+        self.assertIn("mcp_call", offered)
+        self.assertIn("unknown_huge", offered)
+
+    def test_core_floor_never_trimmed(self):
+        from forge.tools import TOOL_SCHEMAS
+        extra = {
+            "design_shell": (self._schema("design_shell", 2000),
+                             lambda a: "ok", False, "test"),
+            "mcp_call": (self._schema("mcp_call", 300),
+                         lambda a: "ok", False, "test"),
+            "unknown_huge": (self._schema("unknown_huge", 1600),
+                             lambda a: "ok", False, "test"),
+        }
+        # A 2,048 window with a 3,000-token system message: the
+        # messages alone exceed the fit target, so every
+        # deferrable goes — and the core still stands.
+        messages = [self._system_message(3000),
+                    {"role": "user", "content": "go"}]
+        worker = self._worker(extra=extra, messages=messages,
+                              num_ctx=2048)
+        offered = self._names(worker._schemas())
+        core = {s["function"]["name"] for s in TOOL_SCHEMAS}
+        self.assertEqual(set(offered), core)
+        # Named deferrables first (trim order), then the unknown
+        # tool via the largest-first fallback.
+        self.assertEqual(worker._trimmed_away,
+                         ["design_shell", "mcp_call", "unknown_huge"])
+
+    def test_no_trim_when_it_fits(self):
+        log = _FakeEventLog()
+        worker = self._worker(log=log)
+        offered = worker._schemas()
+        self.assertEqual(self._names(offered),
+                         self._names(worker._configured_schemas()))
+        self.assertEqual(worker._trimmed_away, [])
+        self.assertFalse(any("not offered this turn" in
+                             m.get("content", "")
+                             for m in worker.messages))
+        self.assertNotIn("tool_surface_trimmed", log.kinds())
+
+    def test_trim_stable_and_noted_once(self):
+        from forge import context as ctx
+        log = _FakeEventLog()
+        # Fixture pad 2000 -> 4000 (8K LOAD build, 2026-11-19):
+        # the slim took the real core floor to 1,117 tokens, so
+        # the old pad's total (1,879) no longer overflowed the
+        # room (1,950) and the trim never engaged. The mechanism
+        # under test is unchanged; only the fake's size moved.
+        extra = {
+            "design_shell": (self._schema("design_shell", 4000),
+                             lambda a: "ok", False, "test"),
+            "cloud_read": (self._schema("cloud_read", 400),
+                           lambda a: "ok", False, "test"),
+        }
+        messages = [self._system_message(5000),
+                    {"role": "user", "content": "go"}]
+        worker = self._worker(extra=extra, messages=messages, log=log)
+        first = worker._schemas()
+        self.assertIs(worker._schemas(), first)
+        self.assertIs(worker._schemas(), first)
+        notes = [m for m in worker.messages
+                 if m.get("role") == "system"
+                 and "not offered this turn" in m.get("content", "")]
+        self.assertEqual(len(notes), 1)
+        for name in worker._trimmed_away:
+            self.assertIn(name, notes[0]["content"])
+        trims = [f for k, f in log.events
+                 if k == "tool_surface_trimmed"]
+        self.assertEqual(len(trims), 1)
+        self.assertEqual(trims[0]["held_back"], worker._trimmed_away)
+        self.assertEqual(trims[0]["tools"], len(first))
+
+    def test_trim_respects_disabled_tools_and_mode_filter(self):
+        from forge import context as ctx
+        from forge.tools import TOOL_SCHEMAS
+        from forge.worker import SURFACE_FIT_FRACTION
+        extra = {
+            "design_shell": (self._schema("design_shell", 2000),
+                             lambda a: "ok", False, "test"),
+            "cloud_read": (self._schema("cloud_read", 400),
+                           lambda a: "ok", False, "test"),
+        }
+        core = ctx.estimate_schemas(TOOL_SCHEMAS)
+        cloud = ctx.estimate_schemas([extra["cloud_read"][0]])
+        target = int(8192 * SURFACE_FIT_FRACTION)
+        # With design_shell disabled the surface is core +
+        # cloud_read: size the system message so that alone
+        # overflows the target but the core alone fits.
+        sys_tokens = target - core - 23
+        if sys_tokens % 2:
+            sys_tokens -= 1  # keep the char math exact (3.5/token)
+        messages = [self._system_message(sys_tokens),
+                    {"role": "user", "content": "go"}]
+        base = ctx.estimate_messages(messages)
+        self.assertLessEqual(base + core, target)
+        self.assertGreater(base + core + cloud, target)
+        # A disabled tool is gone BEFORE the trim: it is neither
+        # offered nor held back (it was never on the table).
+        worker = self._worker(extra=extra, messages=messages,
+                              disabled={"design_shell"})
+        worker._schemas()
+        self.assertNotIn("design_shell", worker._trimmed_away)
+        self.assertIn("cloud_read", worker._trimmed_away)
+        # Ask mode's read-only surface is small enough to fit the
+        # same messages whole — no trim at all.
+        asker = self._worker(extra=extra, messages=messages, mode="ask")
+        asker._schemas()
+        self.assertEqual(asker._trimmed_away, [])
+
+    def test_unknown_tools_trim_largest_first(self):
+        from forge import context as ctx
+        from forge.tools import TOOL_SCHEMAS
+        from forge.worker import SURFACE_FIT_FRACTION
+        extra = {
+            "huge_a": (self._schema("huge_a", 2800),
+                       lambda a: "ok", False, "test"),
+            "huge_b": (self._schema("huge_b", 1400),
+                       lambda a: "ok", False, "test"),
+        }
+        core = ctx.estimate_schemas(TOOL_SCHEMAS)
+        sizes = {n: ctx.estimate_schemas([s])
+                 for n, (s, _h, _a, _p) in extra.items()}
+        self.assertGreater(sizes["huge_a"], sizes["huge_b"])
+        total = core + sum(sizes.values())
+        target = int(8192 * SURFACE_FIT_FRACTION)
+        # Room after dropping huge_a only.
+        room = total - sizes["huge_a"]
+        sys_tokens = target - room - 13
+        if sys_tokens % 2:
+            sys_tokens -= 1
+        messages = [self._system_message(sys_tokens),
+                    {"role": "user", "content": "go"}]
+        base = ctx.estimate_messages(messages)
+        actual_room = target - base
+        self.assertLessEqual(total - sizes["huge_a"], actual_room)
+        self.assertLess(actual_room, total)
+        worker = self._worker(extra=extra, messages=messages)
+        offered = self._names(worker._schemas())
+        self.assertEqual(worker._trimmed_away, ["huge_a"])
+        self.assertIn("huge_b", offered)
+
+    def test_record_surface_fingerprints_configured_surface(self):
+        log = _FakeEventLog()
+        state = {}
+        extra = {
+            # Pad 4000: same 8K LOAD fixture resize as
+            # test_trim_stable_and_noted_once.
+            "design_shell": (self._schema("design_shell", 4000),
+                             lambda a: "ok", False, "test"),
+        }
+        big = [self._system_message(5000),
+               {"role": "user", "content": "go"}]
+        worker = self._worker(extra=extra, messages=big, log=log)
+        worker.surface_state = state
+        worker._schemas()  # the trim engages here
+        self.assertEqual(worker._trimmed_away, ["design_shell"])
+        worker._record_surface()
+        baseline = [f for k, f in log.events if k == "tool_surface"]
+        self.assertEqual(len(baseline), 1)
+        # The record counts the CONFIGURED surface (11 core + the
+        # extra), not the trimmed offer — a budget trim is not an
+        # owner configuration change.
+        self.assertEqual(baseline[0]["tools"], 12)
+        # A second turn with the same configuration but a small
+        # prompt (no trim) logs NO change: only the trim differed.
+        small = [{"role": "user", "content": "go"}]
+        worker2 = self._worker(extra=extra, messages=small, log=log)
+        worker2.surface_state = state
+        worker2._schemas()
+        self.assertEqual(worker2._trimmed_away, [])
+        worker2._record_surface()
+        self.assertNotIn("tool_surface_changed", log.kinds())
+
+    def test_budget_stop_appends_fabrication_note(self):
+        from forge.worker import BUDGET_STOP_NOTE
+        log = _FakeEventLog()
+        extra = {
+            "design_shell": (self._schema("design_shell", 2000),
+                             lambda a: "ok", False, "test"),
+        }
+        # A 1,500-token window with a 1,400-token system message:
+        # even the core floor cannot fit, so the budget stops at
+        # cycle 0 and the turn settles in text.
+        messages = [self._system_message(1400),
+                    {"role": "user", "content": "go"}]
+        worker = self._worker(extra=extra, messages=messages,
+                              num_ctx=1500, log=log,
+                              script=[{"content": "settled"}])
+        finished = []
+        worker.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        worker.run()
+        self.assertIn("context_budget_stop", log.kinds())
+        notes = [m for m in worker.messages
+                 if m.get("content") == BUDGET_STOP_NOTE]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["role"], "system")
+        self.assertTrue(finished)
+
+    def test_dropped_calls_carry_fabrication_guard(self):
+        from forge.worker import AgentWorker, DROPPED_CALL_GUARD, DROPPED_CALL_SHORT
+        log = _FakeEventLog()
+        with tempfile.TemporaryDirectory() as td:
+            messages = [self._system_message(1400),
+                        {"role": "user", "content": "go"}]
+            worker = AgentWorker(
+                _TwoCallClient(), "fake", messages, {"num_ctx": 1500},
+                td, eventlog=log,
+                permissions={"mode": "code", "classes": {}})
+            worker.run()
+            # Both calls were dropped (the offer was empty), and
+            # neither executed: the write target does not exist.
+            self.assertFalse(
+                Path(td, "should_not_exist.txt").exists())
+            drops = [f for k, f in log.events
+                     if k == "unoffered_tool_calls_dropped"]
+            self.assertEqual(len(drops), 1)
+            self.assertEqual(drops[0]["count"], 2)
+            refusals = [m.get("content", "")
+                        for m in worker.messages
+                        if m.get("role") == "tool"]
+            self.assertEqual(len(refusals), 2)
+            # The first refusal of the generation carries the full
+            # guard; the second carries the short form (both keep
+            # "never on the table", which the older R5 test pins).
+            self.assertEqual(refusals[0], DROPPED_CALL_GUARD)
+            self.assertEqual(refusals[1], DROPPED_CALL_SHORT)
+            self.assertIn("Do not invent them", refusals[0])
+            self.assertNotIn("Do not invent them", refusals[1])
+
+    def test_trimmed_tool_call_still_executes(self):
+        """The trim shapes the OFFER, not execution: a held-back
+        tool the model calls anyway still runs (through the usual
+        approval gate for write-class tools) — the trim only stops
+        its schema eating the window every generation."""
+        from forge import context as ctx
+        from forge.tools import TOOL_SCHEMAS
+        from forge.worker import SURFACE_FIT_FRACTION
+        hits = {"n": 0}
+
+        def handler(args):
+            hits["n"] += 1
+            return "source-content"
+        extra = {
+            "read_source": (self._schema(
+                "read_source", 2000,
+                properties={"name": {"type": "string"}}),
+                handler, False, "test"),
+        }
+        core = ctx.estimate_schemas(TOOL_SCHEMAS)
+        size = ctx.estimate_schemas([extra["read_source"][0]])
+        total = core + size
+        target = int(8192 * SURFACE_FIT_FRACTION)
+        # Room for the core, not for the core + read_source.
+        room = core + 100
+        sys_tokens = target - room - 13
+        if sys_tokens % 2:
+            sys_tokens -= 1
+        messages = [self._system_message(sys_tokens),
+                    {"role": "user", "content": "go"}]
+        base = ctx.estimate_messages(messages)
+        actual_room = target - base
+        self.assertLessEqual(core, actual_room)
+        self.assertLess(actual_room, total)
+        script = [{"tool": "read_source", "args": {"name": "x.py"}},
+                  {"content": "settled"}]
+        worker = self._worker(extra=extra, messages=messages,
+                              script=script)
+        worker.run()
+        self.assertEqual(worker._trimmed_away, ["read_source"])
+        self.assertNotIn("read_source",
+                         self._names(worker._schemas()))
+        self.assertEqual(hits["n"], 1)
+        results = [m.get("content", "") for m in worker.messages
+                   if m.get("role") == "tool"]
+        self.assertIn("source-content", results)
+
+    def test_trim_recomputed_on_next_turn(self):
+        """Sweep R6/R19 reset law: a worker reused across turns
+        recomputes the trim for the new turn's opening payload —
+        a trim from a heavy turn never leaks into a light one."""
+        extra = {
+            # Pad 4000: same 8K LOAD fixture resize as
+            # test_trim_stable_and_noted_once.
+            "design_shell": (self._schema("design_shell", 4000),
+                             lambda a: "ok", False, "test"),
+        }
+        big = [self._system_message(5000),
+               {"role": "user", "content": "go"}]
+        worker = self._worker(extra=extra, messages=big)
+        worker._schemas()
+        self.assertEqual(worker._trimmed_away, ["design_shell"])
+        worker.messages = [{"role": "user", "content": "go"}]
+        worker.run()
+        self.assertEqual(worker._trimmed_away, [])
+        self.assertEqual(self._names(worker._schemas()),
+                         self._names(worker._configured_schemas()))
+
+    def test_foldable_history_does_not_trigger_trim(self):
+        """The trim measures the UNFOLDABLE payload, not the full
+        history: a turn whose payload is big only because of
+        foldable history keeps its whole surface — the fold is
+        what makes room, and a trim computed against the full
+        history dropped tools a fold was about to make room for
+        (the continuity tests caught it: the fold count moved).
+        Fixture shape mirrors ContextContinuityTests: three fat
+        older exchanges plus three recent ones, 8,000 window."""
+        from forge import context as ctx
+        extra = {
+            "big_tool": (self._schema("big_tool", 100),
+                         lambda a: "R" * 20000, False, "test"),
+        }
+        msgs = []
+        for i in range(3):
+            msgs.append({"role": "user",
+                         "content": f"earlier request {i}"})
+            msgs.append({"role": "assistant", "content": "A" * 16000})
+        for i in range(3, 6):
+            msgs.append({"role": "user",
+                         "content": f"recent request {i}"})
+            msgs.append({"role": "assistant", "content": "done"})
+        msgs.append({"role": "user", "content": "go"})
+        worker = self._worker(extra=extra, messages=msgs, num_ctx=8000)
+        # Guard: the FULL payload far exceeds the window — the
+        # fixture really is a fat-history turn.
+        self.assertGreater(
+            ctx.total_estimate(msgs, worker._configured_schemas()),
+            8000)
+        offered = self._names(worker._schemas())
+        self.assertEqual(worker._trimmed_away, [])
+        self.assertIn("big_tool", offered)
+
+    def test_plan_promotion_recomputes_the_offer(self):
+        """Study item M5's one legitimate mid-turn surface change:
+        the Plan gate's promotion to Code permissions. The offer
+        cache is keyed on the configured surface's fingerprint, so
+        a promotion recomputes the offer — the work phase gets
+        Code's tools, not the cached Plan surface (which has no
+        run_command, no edit_file, and no shell)."""
+        worker = self._worker(mode="plan")
+        plan_offer = self._names(worker._schemas())
+        self.assertNotIn("run_command", plan_offer)
+        self.assertNotIn("edit_file", plan_offer)
+        # The promotion itself (worker.py's gate approval, same
+        # shape: permissions rebuilt with mode code).
+        worker.permissions = {**worker.permissions, "mode": "code"}
+        code_offer = self._names(worker._schemas())
+        self.assertIn("run_command", code_offer)
+        self.assertIn("edit_file", code_offer)
+        self.assertNotEqual(plan_offer, code_offer)
+
+
+class _RepeatCallClient:
+    """Every generation returns the same tool call(s) and never
+    settles in text — the B11 shape. A safety cap settles the
+    turn after `cap` generations, so a missing anti-rut break
+    fails the test's call-count assertion instead of hanging
+    the suite."""
+
+    def __init__(self, calls, cap=10):
+        self.calls_spec = calls
+        self.cap = cap
+        self.calls = 0
+
+    def chat_stream(self, model, messages, options, schemas,
+                    keep_alive=None):
+        self.calls += 1
+        if self.calls > self.cap:
+            yield {"message": {"content": "safety settle",
+                               "tool_calls": []}}
+            return
+        yield {"message": {"content": "", "tool_calls": [
+            {"function": {"name": name, "arguments": args}}
+            for name, args in self.calls_spec]}}
+
+
+class DroppedCallAntiRutTests(unittest.TestCase):
+    """P1 (live-model B11): a dropped call (Sweep R5: calls that
+    arrive when no tools were offered) fed NEITHER the M6 rut
+    counter (it is not a success) NOR the Item 11 fail-streak
+    (it is not a failure), so a model could repeat the identical
+    dropped call for the rest of the turn — B11 turn 3 had six
+    identical dropped "shell" calls and nothing stopped the
+    loop. Dropped calls now count per turn under the same call
+    key as the rut guard; at DROPPED_RUT_BREAK_AT the drop is
+    final and the turn settles instead of generating again.
+    The fixture is the P0a budget-stop shape (a window too
+    small for the opening payload), so the offer is empty from
+    cycle 0 and every call the client makes is dropped."""
+
+    @staticmethod
+    def _system_message(tokens):
+        from forge import context as ctx
+        return {"role": "system",
+                "content": "x" * int(tokens * ctx.CHARS_PER_TOKEN)}
+
+    def _worker(self, client, log):
+        from forge.worker import AgentWorker
+        messages = [self._system_message(1400),
+                    {"role": "user", "content": "go"}]
+        return AgentWorker(
+            client, "fake", messages, {"num_ctx": 1500},
+            tempfile.mkdtemp(), eventlog=log,
+            permissions={"mode": "code", "classes": {}})
+
+    @staticmethod
+    def _events(log, kind):
+        return [f for k, f in log.events if k == kind]
+
+    @staticmethod
+    def _refusals(worker):
+        return [m.get("content", "") for m in worker.messages
+                if m.get("role") == "tool"]
+
+    def _run(self, client, log):
+        worker = self._worker(client, log)
+        finished = []
+        worker.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        worker.run()
+        return worker, "".join(finished)
+
+    def test_repeated_identical_dropped_call_breaks_the_turn(self):
+        from forge.worker import (DROPPED_CALL_GUARD,
+                                  DROPPED_RUT_BREAK_AT,
+                                  DROPPED_RUT_STOP_LINE)
+        log = _FakeEventLog()
+        client = _RepeatCallClient([("shell", {"command": "ls"})])
+        worker, finished = self._run(client, log)
+        # The turn generated exactly DROPPED_RUT_BREAK_AT times:
+        # the third identical drop was final, no fourth
+        # generation was spent refusing the same call.
+        self.assertEqual(client.calls, DROPPED_RUT_BREAK_AT)
+        drops = self._events(log, "unoffered_tool_calls_dropped")
+        self.assertEqual(len(drops), DROPPED_RUT_BREAK_AT)
+        broken = self._events(log, "dropped_call_rut_broken")
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0]["tool"], "shell")
+        self.assertEqual(broken[0]["drops"], DROPPED_RUT_BREAK_AT)
+        # Nothing ever executed: the batch pipeline never ran.
+        self.assertNotIn("tool_call", log.kinds())
+        # Each generation's single refusal is its first, so each
+        # carries the full fabrication guard, exactly as today.
+        self.assertEqual(self._refusals(worker),
+                         [DROPPED_CALL_GUARD] * DROPPED_RUT_BREAK_AT)
+        # The turn ends on the plain stop line, in the
+        # transcript and in the finished text the window shows.
+        stop_line = DROPPED_RUT_STOP_LINE.format(tool="shell")
+        contents = [m.get("content", "") for m in worker.messages]
+        self.assertIn(stop_line, contents)
+        self.assertIn(stop_line, finished)
+
+    def test_volley_of_identical_calls_in_one_generation_breaks(self):
+        from forge.worker import (DROPPED_CALL_GUARD,
+                                  DROPPED_CALL_SHORT,
+                                  DROPPED_RUT_BREAK_AT,
+                                  DROPPED_RUT_STOP_LINE)
+        log = _FakeEventLog()
+        volley = [("shell", {"command": "ls"})] * DROPPED_RUT_BREAK_AT
+        client = _RepeatCallClient(volley)
+        worker, finished = self._run(client, log)
+        # One generation was enough: its DROPPED_RUT_BREAK_AT
+        # identical calls reached the threshold together.
+        self.assertEqual(client.calls, 1)
+        drops = self._events(log, "unoffered_tool_calls_dropped")
+        self.assertEqual(len(drops), 1)
+        self.assertEqual(drops[0]["count"], DROPPED_RUT_BREAK_AT)
+        broken = self._events(log, "dropped_call_rut_broken")
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0]["drops"], DROPPED_RUT_BREAK_AT)
+        # The generation's refusals keep today's shape: the
+        # full guard on the first, the short form on the rest,
+        # one per call so the transcript stays paired.
+        self.assertEqual(
+            self._refusals(worker),
+            [DROPPED_CALL_GUARD]
+            + [DROPPED_CALL_SHORT] * (DROPPED_RUT_BREAK_AT - 1))
+        self.assertIn(DROPPED_RUT_STOP_LINE.format(tool="shell"),
+                      finished)
+
+    def test_distinct_dropped_calls_do_not_trip_the_break(self):
+        log = _FakeEventLog()
+        # Same tool with different arguments is a different call
+        # (the key is name + serialized args); the one repeat
+        # below stays under the threshold.
+        script = [{"tool": "shell", "args": {"command": "a"}},
+                  {"tool": "shell", "args": {"command": "b"}},
+                  {"tool": "read_file", "args": {"path": "x.py"}},
+                  {"tool": "shell", "args": {"command": "a"}},
+                  {"content": "settled"}]
+        client = _ScriptedClient(script)
+        worker, finished = self._run(client, log)
+        self.assertEqual(client.calls, 5)
+        self.assertEqual(
+            len(self._events(log, "unoffered_tool_calls_dropped")),
+            4)
+        self.assertEqual(
+            self._events(log, "dropped_call_rut_broken"), [])
+        self.assertEqual(finished, "settled")
+
+    def test_dropped_calls_below_the_threshold_behave_as_today(self):
+        from forge.worker import (DROPPED_CALL_GUARD,
+                                  DROPPED_RUT_STOP_LINE)
+        log = _FakeEventLog()
+        # The identical call twice (under the threshold), then
+        # the model takes the refusal's instruction and settles
+        # in text: the turn runs its normal course.
+        script = [{"tool": "shell", "args": {"command": "ls"}},
+                  {"tool": "shell", "args": {"command": "ls"}},
+                  {"content": "settled"}]
+        client = _ScriptedClient(script)
+        worker, finished = self._run(client, log)
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(
+            len(self._events(log, "unoffered_tool_calls_dropped")),
+            2)
+        self.assertEqual(
+            self._events(log, "dropped_call_rut_broken"), [])
+        # Refusals unchanged: each generation's first (and only)
+        # dropped call carries the full guard.
+        self.assertEqual(self._refusals(worker),
+                         [DROPPED_CALL_GUARD, DROPPED_CALL_GUARD])
+        contents = [m.get("content", "") for m in worker.messages]
+        self.assertNotIn(
+            DROPPED_RUT_STOP_LINE.format(tool="shell"), contents)
+        self.assertEqual(finished, "settled")
 
 
 class _ContinuityClient:
@@ -4903,6 +5614,160 @@ class SkribeWorkerTests(unittest.TestCase):
         self.assertTrue(any("made_by_cmd.py" in r and "FZI 88" in r
                             and r.endswith("VERIFIED")
                             for r in receipts if r.startswith("SKRIBE")))
+        self.assertTrue(finished)
+
+
+class SkribeRoutingTests(unittest.TestCase):
+    """Routing (Joshua, 2026-11-19): SKRIBE grading belongs to the
+    document jobs. The turn's mode — the owner's own pick in the
+    mode combo — decides at worker construction whether the gate
+    is armed: plan / write / research / architect / design /
+    review turns are graded exactly as before, while a Code
+    turn's worker is built with skribe_writes=False, the gate's
+    long-standing toggle-off behavior, so its writes are never
+    graded. The seat half of the routing lives in forge/seats.py
+    (GoverningSeatTests / SeatBindingWindowTests) and the gate
+    itself in SkribeWorkerTests; what is pinned here is the
+    wiring between them: mode -> the boolean the window hands
+    the worker, plus one worker-level run proving a Code turn
+    built the routed way never invokes the grading path."""
+
+    DRIVER = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _fresh_window(self):
+        import time
+        from unittest import mock
+        import forge.main as main_mod
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        patcher = mock.patch.object(main_mod, "APP_DIR", root)
+        patcher.start()
+        try:
+            win = main_mod.ForgeWindow()
+        finally:
+            patcher.stop()
+        win.store = ConversationStore(root / "c.db")
+        win.eventlog = EventLog(root / "log")
+        # Drain the startup model refresh before populating the
+        # combo (the SeatBindingWindowTests pattern).
+        deadline = time.time() + 30
+        while (win._models_thread is not None
+               and win._models_thread.isRunning()
+               and time.time() < deadline):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+        win.model_combo.clear()
+        win.model_combo.addItems([self.DRIVER])
+        win.model_combo.setCurrentText(self.DRIVER)
+        win.worker = None
+        return win, temp
+
+    def _turn_kwargs(self, win, mode):
+        """Drive one turn in *mode* with the recording gate worker
+        standing in for AgentWorker; return the kwargs _start_turn
+        handed the worker."""
+        from unittest import mock
+        import forge.main as main_mod
+        win.worker = None
+        _GateWorker.instances = []
+        with mock.patch.object(main_mod, "AgentWorker",
+                               _RecordingGateWorker):
+            win.mode_combo.setCurrentText(mode)
+            win.input.setPlainText("do the job")
+            win.send_message()
+        self.assertEqual(len(_GateWorker.instances), 1)
+        return _GateWorker.instances[0].kwargs
+
+    def test_job_modes_table_is_exactly_the_document_modes(self):
+        from forge import permissions as perms_mod
+        from forge import skribe as skribe_mod
+        self.assertEqual(set(skribe_mod.JOB_MODES),
+                         {"plan", "write", "research", "architect",
+                          "design", "review"})
+        # Every entry is a real mode, and Code + Ask are the only
+        # modes outside the table (Ask offers no write tools, so
+        # the queue could never fill there anyway).
+        self.assertEqual(set(perms_mod.MODES) - set(skribe_mod.JOB_MODES),
+                         {"code", "ask"})
+
+    def test_code_turn_worker_is_built_without_the_gate(self):
+        win, temp = self._fresh_window()
+        try:
+            self.assertTrue(win._skribe_enabled())  # toggle + skill on
+            kwargs = self._turn_kwargs(win, "Code")
+            self.assertIs(kwargs["skribe_writes"], False)
+        finally:
+            win.worker = None
+            win.close()
+            temp.cleanup()
+
+    def test_document_mode_turns_keep_the_gate(self):
+        win, temp = self._fresh_window()
+        try:
+            self.assertTrue(win._skribe_enabled())
+            for mode in ("Plan", "Write", "Research", "Architect",
+                         "Design", "Review"):
+                kwargs = self._turn_kwargs(win, mode)
+                self.assertIs(kwargs["skribe_writes"], True, mode)
+        finally:
+            win.worker = None
+            win.close()
+            temp.cleanup()
+
+    def test_ask_turn_worker_is_built_without_the_gate(self):
+        win, temp = self._fresh_window()
+        try:
+            kwargs = self._turn_kwargs(win, "Ask")
+            self.assertIs(kwargs["skribe_writes"], False)
+        finally:
+            win.worker = None
+            win.close()
+            temp.cleanup()
+
+    def test_owner_toggle_off_still_disarms_a_document_mode(self):
+        win, temp = self._fresh_window()
+        try:
+            win.settings["skribe_writes"] = False
+            kwargs = self._turn_kwargs(win, "Write")
+            self.assertIs(kwargs["skribe_writes"], False)
+        finally:
+            win.worker = None
+            win.close()
+            temp.cleanup()
+
+    def test_code_turn_built_the_routed_way_never_grades_a_write(self):
+        # Worker level: the boolean the window now hands a Code
+        # turn, run end to end — the write lands, no grading
+        # generation is invoked, no SKRIBE receipt is emitted.
+        from forge.worker import AgentWorker
+        ws = Path(tempfile.mkdtemp())
+        script = [{"tool": "write_file",
+                   "args": {"path": "a.py", "content": "x = 1"}},
+                  {"content": "written"}]
+        worker = AgentWorker(_ScriptedClient(script), self.DRIVER,
+                             [{"role": "user", "content": "go"}], {},
+                             str(ws),
+                             permissions={"rules": [], "mode": "code",
+                                          "classes": {}},
+                             skribe_writes=False)
+        worker.approval_needed.connect(
+            lambda *a: worker.resolve_approval(True))
+        receipts, finished = [], []
+        worker.receipt.connect(receipts.append)
+        worker.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        worker.run()
+        self.assertEqual(worker.client.calls, 2)  # work + quiet, no grading
+        self.assertTrue((ws / "a.py").is_file())
+        self.assertFalse(any("SKRIBE GATE" in m.get("content", "")
+                             for m in worker.messages))
+        self.assertFalse(any(r.startswith("SKRIBE") for r in receipts))
         self.assertTrue(finished)
 
 
@@ -8849,7 +9714,7 @@ class AuditSweepSourceTests(unittest.TestCase):
 
     def test_app_start_and_title_share_the_version_constant(self):
         source = self._main_source()
-        self.assertIn('APP_VERSION = "2.5"', source)
+        self.assertIn('APP_VERSION = "2.6"', source)
         self.assertIn("version=APP_VERSION", source)
         self.assertIn("CODE FORGE v{APP_VERSION}", source)
 
@@ -14560,9 +15425,15 @@ class ContextWindowTests(unittest.TestCase):
     # --- the gauge ---
     def test_gauge_reflects_estimate(self):
         from forge import context as ctx
+        from forge import worker as worker_mod
         self.win.messages = self._big_history()
         self.win._update_context_gauge()
-        est = ctx.total_estimate(self.win.messages, self.win._context_schemas())
+        # R3-02: the gauge measures the OFFERED surface (the
+        # worker's P0a trim), not the configured one — the same
+        # accounting the worker's budget check uses.
+        offered, _held = worker_mod.trim_schemas_for_budget(
+            self.win._context_schemas(), self.win.messages, 8192)
+        est = ctx.total_estimate(self.win.messages, offered)
         self.assertEqual(self.win.ctx_text.text(), f"~{est:,} / 8,192 tokens")
         frac = est / 8192
         self.assertEqual(self.win.ctx_bar.value(),
@@ -14572,7 +15443,10 @@ class ContextWindowTests(unittest.TestCase):
 
     def test_gauge_color_bands(self):
         from forge import context as ctx
-        self.win.messages = self._big_history()
+        # A history fat enough that the P0a trim never engages at
+        # the budgets below (the offered surface is the configured
+        # one), so the bands measure the WARN/CRIT fractions alone.
+        self.win.messages = _ctx_history(6, chars=6000)
         est = ctx.total_estimate(self.win.messages, self.win._context_schemas())
         self.win.settings["num_ctx"] = int(est / 0.5)
         self.win._update_context_gauge()
@@ -14793,6 +15667,289 @@ class ContextWindowTests(unittest.TestCase):
                 self.win.settings.pop("fold_style", None)
             else:
                 self.win.settings["fold_style"] = old_style
+
+
+class ContextGaugeTruthTests(unittest.TestCase):
+    """R3-02 (2026-11-19): the context gauge tells the truth on a
+    fresh conversation. It accounts the OFFERED tool surface (the
+    worker's P0a trim — the request that is actually sent), so the
+    fixed overhead no longer reads 100% CRITICAL before a word is
+    typed; a genuinely long conversation still reaches critical;
+    and the summarize remedy is offered only when older messages
+    exist to summarize. All numbers below come from the real
+    system prompt and the real configured surface in this env,
+    never a mocked budget."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentIndex(
+            cls.win.model_combo.findText(cls.MODEL))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._saved_ctx = self.win.settings.get("num_ctx")
+        self.win.settings["num_ctx"] = 8192
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win.messages = [{"role": "system",
+                              "content": self.win.build_system_prompt()}]
+
+    def tearDown(self):
+        if self._saved_ctx is None:
+            self.win.settings.pop("num_ctx", None)
+        else:
+            self.win.settings["num_ctx"] = self._saved_ctx
+        self.win.messages = []
+
+    def _offered(self):
+        from forge import worker as worker_mod
+        return worker_mod.trim_schemas_for_budget(
+            self.win._context_schemas(), self.win.messages, 8192)
+
+    def test_fresh_chat_gauge_is_not_critical(self):
+        from forge import context as ctx
+        # The premise, with the REAL overhead: since the 8K LOAD
+        # build (2026-11-19) slimmed the tool descriptions, the
+        # configured surface fits the 8,192 budget on a fresh
+        # chat on its own. The R3-02 world, where the fixed
+        # overhead alone overflowed the budget and the trim had
+        # to hold tools back, is gone. If the surface ever grows
+        # back over the budget this test must say so instead of
+        # passing vacuously.
+        parts_full = ctx.breakdown(self.win.messages,
+                                   self.win._context_schemas())
+        total_full = (parts_full["system"] + parts_full["history"]
+                      + parts_full["tools"])
+        self.assertLessEqual(total_full, 8192,
+                             "premise gone: the configured surface "
+                             "overflows the budget on its own again")
+        self.win._update_context_gauge()
+        self.assertNotEqual(self.win.ctx_bar.objectName(), "crit")
+        self.assertLess(self.win.ctx_bar.value(), 100)
+        # ...and the reading is exactly the offered accounting,
+        # which is now the FULL configured surface: on a fresh
+        # chat the trim has nothing to hold back.
+        offered, held = self._offered()
+        self.assertEqual(held, [])
+        self.assertEqual(offered, self.win._context_schemas())
+        est = ctx.total_estimate(self.win.messages, offered)
+        self.assertEqual(self.win.ctx_text.text(),
+                         f"~{est:,} / 8,192 tokens")
+        self.assertEqual(self.win.ctx_bar.value(),
+                         max(0, min(100, round(est / 8192 * 100))))
+        self.assertNotIn("held back", self.win.ctx_bar.toolTip())
+
+    def test_fresh_chat_breakdown_sums_to_label(self):
+        from forge import context as ctx
+        self.win._update_context_gauge()
+        offered, _held = self._offered()
+        parts = ctx.breakdown(self.win.messages, offered)
+        est = parts["system"] + parts["history"] + parts["tools"]
+        self.assertEqual(self.win.ctx_text.text(),
+                         f"~{est:,} / 8,192 tokens")
+        tip = self.win.ctx_bar.toolTip()
+        self.assertIn(f"system prompt ~{parts['system']:,}", tip)
+        self.assertIn(f"conversation ~{parts['history']:,}", tip)
+        self.assertIn(f"tool schemas ~{parts['tools']:,}", tip)
+
+    def test_long_conversation_still_reaches_critical(self):
+        msgs = [{"role": "system",
+                 "content": self.win.build_system_prompt()}]
+        for i in range(10):
+            msgs.append({"role": "user",
+                         "content": f"ask {i} " + "x" * 6000})
+            msgs.append({"role": "assistant",
+                         "content": f"answer {i} " + "y" * 6000})
+        self.win.messages = msgs
+        self.win._update_context_gauge()
+        self.assertEqual(self.win.ctx_bar.value(), 100)
+        self.assertEqual(self.win.ctx_bar.objectName(), "crit")
+        # A foldable history earns the remedy line.
+        self.assertIn("Right-click to summarize the older "
+                      "messages now.", self.win.ctx_bar.toolTip())
+
+    def test_remedy_offered_only_when_older_messages_exist(self):
+        # Fresh chat: no older messages, so no trim remedy — the
+        # tooltip says what is true instead.
+        self.win._update_context_gauge()
+        tip = self.win.ctx_bar.toolTip()
+        self.assertNotIn("summarize the older messages", tip)
+        self.assertIn("No older messages to summarize yet.", tip)
+        # Six exchanges: a foldable span exists, remedy appears.
+        self.win.messages = (
+            [{"role": "system",
+              "content": self.win.build_system_prompt()}]
+            + _ctx_history(6, chars=700)[1:])
+        self.win._update_context_gauge()
+        self.assertIn("Right-click to summarize the older "
+                      "messages now.", self.win.ctx_bar.toolTip())
+
+    def test_gauge_menu_summarize_enabled_only_when_foldable(self):
+        # The menu is driven through a fake QMenu swapped into
+        # forge.main's namespace: a real QMenu.exec opens a modal
+        # loop (and PySide6 does not let a test patch the method
+        # on the class), so the fake records the actions and the
+        # exec returns at once. What is pinned is the enablement
+        # _context_gauge_menu computes, which is the R3-02 change.
+        import forge.main as main_mod
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+
+        class FakeAction:
+            def __init__(self, text):
+                self._text = text
+                self._enabled = True
+
+            def text(self):
+                return self._text
+
+            def setEnabled(self, on):
+                self._enabled = bool(on)
+
+            def isEnabled(self):
+                return self._enabled
+
+        class FakeMenu:
+            last = None
+
+            def __init__(self, parent=None):
+                self._actions = []
+                FakeMenu.last = self
+
+            def addAction(self, text):
+                act = FakeAction(text)
+                self._actions.append(act)
+                return act
+
+            def exec(self, *args, **kwargs):
+                return None
+
+        def menu_actions():
+            with mock.patch.object(main_mod, "QMenu", FakeMenu):
+                self.win._context_gauge_menu(QPoint(0, 0))
+            return {a.text(): a.isEnabled()
+                    for a in FakeMenu.last._actions}
+
+        fresh = menu_actions()
+        self.assertFalse(fresh["Summarize older messages now"])
+        self.assertTrue(fresh["What the AI sees…"])
+        self.win.messages = (
+            [{"role": "system",
+              "content": self.win.build_system_prompt()}]
+            + _ctx_history(6, chars=700)[1:])
+        folded = menu_actions()
+        self.assertTrue(folded["Summarize older messages now"])
+
+
+class ToolSurfaceLoadTests(unittest.TestCase):
+    """8K LOAD build (2026-11-19, Joshua's order): the full-bar
+    problem. A fresh Code-mode conversation used to open at 106%
+    of an 8,192 window (44 tools, ~6,900 schema tokens, half of
+    it description prose); the P0a trim held back 10 tools, and
+    on v2.5-f7f10 the budget stop fired at turn start and
+    offered ZERO tools. The build slimmed ONLY description text
+    and the configured surface fell to ~5,200 tokens: a fresh
+    chat now offers every configured tool, holds nothing back,
+    and passes the budget bar untrimmed.
+
+    The 60% goal was NOT reached and this class does not pretend
+    otherwise: with every description deleted the surface still
+    floors at ~3,100 tokens of JSON structure, and the fresh
+    system prompt adds ~1,800, so ~63% is the floor for ANY
+    description text at all. Closing the rest is the on-demand
+    loading design (Phase 3 of the brief), documented in the
+    build report and deliberately not landed there."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentIndex(
+            cls.win.model_combo.findText(cls.MODEL))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self._saved_ctx = self.win.settings.get("num_ctx")
+        self.win.settings["num_ctx"] = 8192
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win.messages = [{"role": "system",
+                              "content": self.win.build_system_prompt()}]
+
+    def tearDown(self):
+        if self._saved_ctx is None:
+            self.win.settings.pop("num_ctx", None)
+        else:
+            self.win.settings["num_ctx"] = self._saved_ctx
+        self.win.messages = []
+
+    def test_fresh_chat_offers_every_tool_and_fits(self):
+        from forge import context as ctx
+        from forge import worker as worker_mod
+        configured = self.win._context_schemas()
+        self.assertEqual(len(configured), 44)
+        offered, held = worker_mod.trim_schemas_for_budget(
+            configured, self.win.messages, 8192)
+        # Nothing held back: the whole configured surface is the
+        # offer on a fresh chat.
+        self.assertEqual(held, [])
+        self.assertEqual(offered, configured)
+        # And the untrimmed request clears the budget bar
+        # (fill under the critical fraction), so the Finding #1
+        # zero-tools stop cannot fire on a fresh chat.
+        self.assertLess(
+            ctx.fill_fraction(self.win.messages, 8192, configured),
+            ctx.CRIT_FRACTION)
+
+    def test_tool_structure_matches_pin(self):
+        # The slim changed description text ONLY. Names, offer
+        # order, parameter names/types, required lists, enums and
+        # defaults are pinned here as data (generated from the
+        # pre-slim census); any structural drift fails loudly.
+        configured = self.win._context_schemas()
+        names = [s["function"]["name"] for s in configured]
+        self.assertEqual(names, _SURFACE_ORDER)
+        for schema in configured:
+            fn = schema["function"]
+            params = fn.get("parameters", {})
+            props, enums, defaults = {}, {}, {}
+            for pname, pdef in params.get(
+                    "properties", {}).items():
+                props[pname] = pdef.get("type")
+                if "enum" in pdef:
+                    enums[pname] = pdef["enum"]
+                if "default" in pdef:
+                    defaults[pname] = pdef["default"]
+            self.assertEqual(
+                {"required": params.get("required", []),
+                 "props": props, "enums": enums,
+                 "defaults": defaults},
+                _SURFACE_PIN[fn["name"]], fn["name"])
+
+
+_SURFACE_ORDER = ['list_directory', 'read_file', 'code_graph', 'write_file', 'append_file', 'edit_file', 'copy_file', 'move_file', 'delete_file', 'run_command', 'export_replay', 'browse_open', 'browse_read', 'browse_click', 'browse_type', 'browse_screenshot', 'browse_hand_back', 'verify_in_browser', 'cloud_list', 'cloud_read', 'cloud_download', 'cloud_upload', 'cloud_delete', 'github_repo_info', 'github_search_repos', 'hf_search_models', 'hf_model_info', 'mcp_list_tools', 'mcp_call', 'check_resources', 'run_tester', 'load_skill', 'create_skill', 'create_plugin', 'update_skill', 'update_plugin', 'debug_start', 'debug_step', 'debug_continue', 'debug_inspect', 'debug_stop', 'read_knowledge', 'design_shell', 'read_source']
+
+_SURFACE_PIN = {'list_directory': {'required': ['path'], 'props': {'path': 'string'}, 'enums': {}, 'defaults': {}}, 'read_file': {'required': ['path'], 'props': {'path': 'string', 'offset': 'integer', 'limit': 'integer'}, 'enums': {}, 'defaults': {}}, 'code_graph': {'required': ['action', 'target'], 'props': {'action': 'string', 'target': 'string'}, 'enums': {}, 'defaults': {}}, 'write_file': {'required': ['path', 'content'], 'props': {'path': 'string', 'content': 'string'}, 'enums': {}, 'defaults': {}}, 'append_file': {'required': ['path', 'content'], 'props': {'path': 'string', 'content': 'string'}, 'enums': {}, 'defaults': {}}, 'edit_file': {'required': ['path', 'old_text', 'new_text'], 'props': {'path': 'string', 'old_text': 'string', 'new_text': 'string', 'replace_all': 'boolean'}, 'enums': {}, 'defaults': {}}, 'copy_file': {'required': ['source', 'destination'], 'props': {'source': 'string', 'destination': 'string'}, 'enums': {}, 'defaults': {}}, 'move_file': {'required': ['source', 'destination'], 'props': {'source': 'string', 'destination': 'string'}, 'enums': {}, 'defaults': {}}, 'delete_file': {'required': ['path'], 'props': {'path': 'string'}, 'enums': {}, 'defaults': {}}, 'run_command': {'required': ['command'], 'props': {'command': 'string'}, 'enums': {}, 'defaults': {}}, 'export_replay': {'required': [], 'props': {}, 'enums': {}, 'defaults': {}}, 'browse_open': {'required': ['url'], 'props': {'url': 'string'}, 'enums': {}, 'defaults': {}}, 'browse_read': {'required': [], 'props': {}, 'enums': {}, 'defaults': {}}, 'browse_click': {'required': ['selector'], 'props': {'selector': 'string'}, 'enums': {}, 'defaults': {}}, 'browse_type': {'required': ['selector', 'text'], 'props': {'selector': 'string', 'text': 'string'}, 'enums': {}, 'defaults': {}}, 'browse_screenshot': {'required': [], 'props': {}, 'enums': {}, 'defaults': {}}, 'browse_hand_back': {'required': ['reason'], 'props': {'reason': 'string'}, 'enums': {}, 'defaults': {}}, 'verify_in_browser': {'required': ['target'], 'props': {'target': 'string'}, 'enums': {}, 'defaults': {}}, 'cloud_list': {'required': ['remote'], 'props': {'remote': 'string'}, 'enums': {}, 'defaults': {}}, 'cloud_read': {'required': ['remote'], 'props': {'remote': 'string'}, 'enums': {}, 'defaults': {}}, 'cloud_download': {'required': ['remote', 'local'], 'props': {'local': 'string', 'remote': 'string'}, 'enums': {}, 'defaults': {}}, 'cloud_upload': {'required': ['local', 'remote'], 'props': {'local': 'string', 'remote': 'string'}, 'enums': {}, 'defaults': {}}, 'cloud_delete': {'required': ['remote'], 'props': {'remote': 'string'}, 'enums': {}, 'defaults': {}}, 'github_repo_info': {'required': ['repo'], 'props': {'repo': 'string'}, 'enums': {}, 'defaults': {}}, 'github_search_repos': {'required': ['query'], 'props': {'limit': 'integer', 'query': 'string'}, 'enums': {}, 'defaults': {}}, 'hf_search_models': {'required': ['query'], 'props': {'limit': 'integer', 'query': 'string'}, 'enums': {}, 'defaults': {}}, 'hf_model_info': {'required': ['repo_id'], 'props': {'repo_id': 'string'}, 'enums': {}, 'defaults': {}}, 'mcp_list_tools': {'required': ['server'], 'props': {'server': 'string'}, 'enums': {}, 'defaults': {}}, 'mcp_call': {'required': ['server', 'tool'], 'props': {'arguments_json': 'string', 'server': 'string', 'tool': 'string'}, 'enums': {}, 'defaults': {}}, 'check_resources': {'required': [], 'props': {'model': 'string'}, 'enums': {}, 'defaults': {}}, 'run_tester': {'required': ['task'], 'props': {'model': 'string', 'task': 'string'}, 'enums': {}, 'defaults': {}}, 'load_skill': {'required': ['name'], 'props': {'name': 'string'}, 'enums': {}, 'defaults': {}}, 'create_skill': {'required': ['name', 'description', 'body'], 'props': {'name': 'string', 'description': 'string', 'body': 'string'}, 'enums': {}, 'defaults': {}}, 'create_plugin': {'required': ['name', 'description', 'code'], 'props': {'name': 'string', 'description': 'string', 'code': 'string'}, 'enums': {}, 'defaults': {}}, 'update_skill': {'required': ['name', 'description', 'body'], 'props': {'name': 'string', 'description': 'string', 'body': 'string'}, 'enums': {}, 'defaults': {}}, 'update_plugin': {'required': ['name', 'description', 'code'], 'props': {'name': 'string', 'description': 'string', 'code': 'string'}, 'enums': {}, 'defaults': {}}, 'debug_start': {'required': ['path'], 'props': {'path': 'string', 'breakpoints': 'string'}, 'enums': {}, 'defaults': {}}, 'debug_step': {'required': [], 'props': {'into': 'boolean'}, 'enums': {}, 'defaults': {}}, 'debug_continue': {'required': [], 'props': {}, 'enums': {}, 'defaults': {}}, 'debug_inspect': {'required': [], 'props': {'expression': 'string'}, 'enums': {}, 'defaults': {}}, 'debug_stop': {'required': [], 'props': {}, 'enums': {}, 'defaults': {}}, 'read_knowledge': {'required': ['name'], 'props': {'name': 'string', 'offset': 'integer'}, 'enums': {}, 'defaults': {}}, 'design_shell': {'required': ['action'], 'props': {'action': 'string', 'words': 'string', 'kind': 'string', 'job': 'string', 'query': 'string', 'prompt': 'string', 'batch': 'string', 'file': 'string', 'decision': 'string', 'asset': 'string'}, 'enums': {'action': ['plan', 'show', 'status', 'search', 'approve', 'build', 'images', 'pick', 'pick_status', 'decide', 'reroll', 'file', 'import'], 'decision': ['keep', 'reject']}, 'defaults': {}}, 'read_source': {'required': ['name'], 'props': {'name': 'string', 'offset': 'integer'}, 'enums': {}, 'defaults': {}}}
 
 
 class DiffEngineTests(unittest.TestCase):
@@ -16749,8 +17906,13 @@ class ShellRound2Tests(unittest.TestCase):
         import forge.main as main_mod
         opened = []
 
-        class _FakeSettings:
+        class _FakeSettings(QDialog):
+            # A real QDialog since C10: open_settings installs
+            # geometry memory on the dialog it opens, and the
+            # memory filter parents itself to the dialog — a
+            # plain object cannot take either.
             def __init__(self, parent, settings):
+                super().__init__(parent)
                 opened.append(parent)
 
             def exec(self):
@@ -17735,6 +18897,101 @@ class DeckTouchTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[:400])
 
 
+class DeckCollapTouchTests(unittest.TestCase):
+    """J05: the deck's collapse headers (.collaphead) are 22px
+    tall buttons, under the 44px touch minimum. Like T13's
+    attachment disc, the hit area grows invisibly: a transparent
+    ::after extends it 13px past the box top and bottom, which
+    also covers the shorter session variant (13px text). The
+    button's own box is untouched, so no section moves. Every
+    assertion runs against the SERVED page (build_page(TOKENS)),
+    never a source grep, and the hit height is computed from the
+    served CSS the way DeckTouchTests computes T13's."""
+
+    def _served_page(self):
+        from forge.deck import build_page
+        from forge.main import TOKENS
+        return build_page(TOKENS)
+
+    def _rule(self, page, selector):
+        import re
+        m = re.search(re.escape(selector) + r"\{([^}]*)\}", page)
+        self.assertIsNotNone(m, "missing rule %s" % selector)
+        return m.group(1)
+
+    def _hit_height(self, page, font_selector):
+        import re
+        head = self._rule(page, ".collaphead")
+        font_rule = (self._rule(page, font_selector)
+                     if font_selector else head)
+        size = int(re.search(r"font-size:(\d+)px", font_rule).group(1))
+        pad = int(re.search(r"padding:(\d+)px 0", head).group(1))
+        # 'normal' line-height in the deck's browser is 1.2 times
+        # the font size: 15px text plus 2px padding top and
+        # bottom is the 22.0px the joint suite measured for this
+        # button, and the 13px session text makes a 19.6px box.
+        box = size * 1.2 + 2 * pad
+        after = self._rule(page, ".collaphead::after")
+        top = int(re.search(r"top:-(\d+)px", after).group(1))
+        bottom = int(re.search(r"bottom:-(\d+)px", after).group(1))
+        return box + top + bottom
+
+    def test_hit_area_rule_present_in_served_page(self):
+        page = self._served_page()
+        body = self._rule(page, ".collaphead::after")
+        self.assertIn("content:''", body)
+        self.assertIn("position:absolute", body)
+        head = self._rule(page, ".collaphead")
+        self.assertIn("position:relative", head)
+
+    def test_hit_area_is_at_least_44px(self):
+        page = self._served_page()
+        self.assertGreaterEqual(self._hit_height(page, None), 44)
+        # The session variant shrinks the text to 13px; its hit
+        # area must clear the same minimum.
+        self.assertGreaterEqual(
+            self._hit_height(page, ".sessionbox .collaphead"), 44)
+
+    def test_button_box_unchanged(self):
+        # Only the hit area grew: same padding, same font size,
+        # and no height of any kind on the button itself, so the
+        # sections render exactly where they did.
+        page = self._served_page()
+        head = self._rule(page, ".collaphead")
+        self.assertIn("padding:2px 0", head)
+        self.assertIn("font-size:15px", head)
+        self.assertNotIn("height", head)
+
+    def test_hit_area_extension_is_out_of_flow(self):
+        # The ::after is absolutely positioned and sizes from its
+        # offsets alone: it cannot shift the header, its section,
+        # or anything else in the layout.
+        page = self._served_page()
+        after = self._rule(page, ".collaphead::after")
+        self.assertIn("position:absolute", after)
+        self.assertNotIn("width:", after)
+        self.assertNotIn("height:", after)
+
+    def test_served_script_still_parses(self):
+        # J05 touches the template; the deck rule says the served
+        # script must still parse. (DeckPageScriptTests guards
+        # this too; this pins it for this change's diff.)
+        import re, shutil, subprocess, tempfile
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not available for JS syntax check")
+        page = self._served_page()
+        m = re.search(r"<script>(.*?)</script>", page, re.S)
+        self.assertIsNotNone(m)
+        with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                         delete=False) as f:
+            f.write(m.group(1))
+            path = f.name
+        r = subprocess.run([node, "--check", path],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+
 class DeckOverflowWrapTests(unittest.TestCase):
     """F23 (GUIFX audit task list, Build 13, 2026-11-16): a long
     unbroken token (a 200-char URL/hash with no spaces) overflows
@@ -17801,6 +19058,20 @@ class DeckOverflowWrapTests(unittest.TestCase):
         r = subprocess.run([node, "--check", path],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr[:400])
+
+
+def _menu_tree_contains(menu, target):
+    """True when target is an action anywhere in the menu tree
+    (the menu itself or any submenu under it). R3-01 grouped the
+    View menu into submenus, so path checks search the tree,
+    not just the top level."""
+    for act in menu.actions():
+        if act is target:
+            return True
+        sub = act.menu()
+        if sub is not None and _menu_tree_contains(sub, target):
+            return True
+    return False
 
 
 class HowToUseTests(unittest.TestCase):
@@ -17878,14 +19149,16 @@ class HowToUseTests(unittest.TestCase):
             self.assertIn(getattr(win, attr),
                           win.main_menu.actions(), attr)
         # F11 moved these to the View menu; the paths still exist.
+        # R3-01 grouped View into submenus: search the whole tree.
         for attr in ("view_act_settings", "view_act_customize",
                      "view_act_snapshots", "view_act_checkpoints",
                      "view_act_bench", "view_act_recipes",
                      "view_act_models", "view_act_plan_window",
                      "view_act_run"):
             self.assertTrue(hasattr(win, attr), attr)
-            self.assertIn(getattr(win, attr),
-                          win.view_menu.actions(), attr)
+            self.assertTrue(
+                _menu_tree_contains(win.view_menu,
+                                    getattr(win, attr)), attr)
         for attr in ("model_combo", "mode_combo", "menu_btn",
                      "view_btn", "send_btn", "input"):
             self.assertTrue(hasattr(win, attr), attr)
@@ -17905,8 +19178,8 @@ class HowToUseTests(unittest.TestCase):
         start = [body for title, body in HOW_TO_USE_SECTIONS
                  if title == "Start here"][0]
         self.assertIn("Customize lives in View", start)
-        self.assertIn(self.win.view_act_customize,
-                      self.win.view_menu.actions())
+        self.assertTrue(_menu_tree_contains(
+            self.win.view_menu, self.win.view_act_customize))
 
     def test_window_fits_1366x768(self):
         win = self.win.howto_win
@@ -18283,6 +19556,100 @@ class RunNoPreselectTests(unittest.TestCase):
         self.assertEqual(self.win.run_file_list.currentRow(), -1)
         self.assertFalse(self.win.run_start_btn.isEnabled())
         self.win.run_win.close()
+
+
+class RunSelectionProjectSwitchTests(unittest.TestCase):
+    """C06: the Run list lost the owner's pick on a project
+    switch. refresh() cleared and repopulated the list and
+    nothing remembered what he had picked in the project he
+    left, so coming back showed row -1 and a disabled Run.
+    refresh now records the pick per project on a switch and
+    restores it on return. U6 is untouched: a project never
+    picked in opens unselected, and a same-project refresh
+    still drops the selection (RunNoPreselectTests' F16 pin)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp_a = tempfile.TemporaryDirectory()
+        self.temp_b = tempfile.TemporaryDirectory()
+        self.a = Path(self.temp_a.name)
+        self.b = Path(self.temp_b.name)
+        (self.a / "a_one.py").write_text("print('a1')\n")
+        (self.a / "a_two.py").write_text("print('a2')\n")
+        (self.b / "b_one.py").write_text("print('b1')\n")
+        self.win.workspace = str(self.a)
+        self.win.run_win.refresh()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.run_win.close()
+        self.temp_a.cleanup()
+        self.temp_b.cleanup()
+
+    def _row_of(self, rel):
+        for row, entry in enumerate(self.win.run_win._entries):
+            if entry["rel"] == rel:
+                return row
+        self.fail(f"{rel} not in the run list")
+
+    def _switch_to(self, root):
+        self.win.workspace = str(root)
+        self.win.run_win.refresh()
+        self.app.processEvents()
+
+    def test_pick_survives_switch_away_and_back(self):
+        row = self._row_of("a_two.py")
+        self.win.run_file_list.setCurrentRow(row)
+        self.app.processEvents()
+        self.assertTrue(self.win.run_start_btn.isEnabled())
+        self._switch_to(self.b)
+        # Nothing was ever picked in B: it opens unselected.
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertIsNone(self.win.run_win.selected_entry())
+        self._switch_to(self.a)
+        self.assertEqual(self.win.run_file_list.currentRow(), row)
+        self.assertEqual(
+            self.win.run_win.selected_entry()["rel"], "a_two.py")
+        self.assertTrue(self.win.run_start_btn.isEnabled())
+
+    def test_each_project_keeps_its_own_pick(self):
+        self.win.run_file_list.setCurrentRow(self._row_of("a_one.py"))
+        self._switch_to(self.b)
+        self.win.run_file_list.setCurrentRow(self._row_of("b_one.py"))
+        self._switch_to(self.a)
+        self.assertEqual(
+            self.win.run_win.selected_entry()["rel"], "a_one.py")
+        self._switch_to(self.b)
+        self.assertEqual(
+            self.win.run_win.selected_entry()["rel"], "b_one.py")
+
+    def test_same_project_refresh_still_drops_the_selection(self):
+        # The F16 pin, restated for this class's setup: a rescan
+        # in the same project is not a switch, so nothing is
+        # restored and the selection drops.
+        self.win.run_file_list.setCurrentRow(self._row_of("a_one.py"))
+        self.win.run_win.refresh()
+        self.app.processEvents()
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertFalse(self.win.run_start_btn.isEnabled())
+
+    def test_pick_for_a_vanished_file_is_not_restored(self):
+        self.win.run_file_list.setCurrentRow(self._row_of("a_two.py"))
+        self._switch_to(self.b)
+        (self.a / "a_two.py").unlink()
+        self._switch_to(self.a)
+        self.assertEqual(self.win.run_file_list.currentRow(), -1)
+        self.assertIsNone(self.win.run_win.selected_entry())
 
 
 class InboxNoPreselectTests(unittest.TestCase):
@@ -19752,10 +21119,45 @@ class EmDashGuardTests(unittest.TestCase):
     # send dip + the 182-line F12/F14 helper block, incl. the
     # _clamped_rect fix). Recompute whenever main.py gains/loses
     # lines above the split sites.
+    # Bench-crash fix recomputed these: all six moved +27 (the
+    # stopping-state block in BenchDialog, above every site).
+    # R3-08 recomputed these: all six moved +29 (the 2 STYLE
+    # lines + the ProjectScrollArea class block, both above
+    # every site).
+    # R3-02 recomputed these: all six moved +1 (the worker_mod
+    # import line, above every site).
+    # R3B3 recomputed these: the first two moved +82 (the
+    # Customize page wrap + fit-to-screen block, the UI builder
+    # palette wrap and the Research tab wrap, all above them);
+    # the last four moved +104 (those 82 + the 22-line
+    # _clamped_open_size helper above them).
+    # Live-model bug batch recomputed these: the first two moved
+    # +69 (the WriteWindow canvas-persistence block and the
+    # DebugWindow preselect fix, above every site), the last four
+    # +79 (those 69 + the TestingWindow B21 block).
+    # Model routing recomputed these: all six moved +1 (the
+    # skribe_mod import line, above every site).
+    # Joint-test follow-ups recomputed these: all six moved
+    # +36 (the C06 RunWindow pick-memory block, above every
+    # site).
+    # R3B5 recomputed these: all six moved +31 (the Artifacts
+    # window's _sync_buttons block, above every site; the
+    # R3-09/R3-10 edits sit below all six).
+    # R3B6 recomputed these: the first two moved +153 (the
+    # clip-batch blocks above them, mostly the CustomizeDialog
+    # skill and plugin row elision); the last four moved +157
+    # (those 153 + 4 more clip-batch lines above them).
+    # R3B7 recomputed these: all six moved +161 (the Recipes
+    # dialog's _refresh_list/_open_new_recipe block and the
+    # NewRecipeDialog class, above every site).
+    # Auto-update recomputed these: the first two moved +88
+    # (the UpdateCheckThread and UpdateDownloadThread classes,
+    # above every site); the last four moved +97 (those 88 +
+    # the 9 __init__ attribute lines above them).
     ALLOWED = {
-        ("forge/main.py", 12797), ("forge/main.py", 12936),
-        ("forge/main.py", 17570), ("forge/main.py", 17578),
-        ("forge/main.py", 17594), ("forge/main.py", 17615),
+        ("forge/main.py", 13475), ("forge/main.py", 13614),
+        ("forge/main.py", 18293), ("forge/main.py", 18301),
+        ("forge/main.py", 18317), ("forge/main.py", 18338),
     }
 
     @staticmethod
@@ -19864,8 +21266,8 @@ class MenuTrimTests(unittest.TestCase):
         "New conversation", "Fork conversation", "Export chat",
         "How to use Code Forge", "Scheduled runs", "Phone deck",
         "Donate / Support Code Forge", "Deck QR code",
-        "Rescan skills", "Update", "Forge maintenance",
-        "Approve Design Shell job",
+        "Rescan skills", "Update", "Check for updates",
+        "Forge maintenance", "Approve Design Shell job",
     )
 
     @classmethod
@@ -19919,7 +21321,11 @@ class MenuTrimTests(unittest.TestCase):
 
     def test_remaining_menu_entries_still_exist(self):
         texts = self._menu_texts()
-        self.assertEqual(len(texts), 12, texts)
+        # 12 from the F11 trim, plus Check for updates (the
+        # auto-update build): a new function that lives nowhere
+        # else, beside Update and restart — not a restored
+        # duplicate of anything in View.
+        self.assertEqual(len(texts), 13, texts)
         for label in self.KEPT:
             self.assertTrue(
                 any(label in t for t in texts), label)
@@ -19987,14 +21393,164 @@ class MenuTrimTests(unittest.TestCase):
                       "Approve Design Shell job"):
             self.assertIn(label, menu, label)
         # The other sections that named a menu path follow the move.
-        self.assertIn("View, then Models window",
+        # R3-01: View gained Windows/Dialogs submenus, so the
+        # named paths carry the group step.
+        self.assertIn("View, then Windows, then Models window",
                       sections["Pick a model"])
-        self.assertIn("View, then Snapshots",
+        self.assertIn("View, then Dialogs, then Snapshots",
                       sections["Restore a snapshot"])
-        self.assertIn("View, then Checkpoints",
+        self.assertIn("View, then Dialogs, then Checkpoints",
                       sections["Restore a snapshot"])
         self.assertIn("Customize lives in View",
                       sections["Start here"])
+
+
+class ViewMenuStructureTests(unittest.TestCase):
+    """R3-01 (GUIFX Round 3): the View menu held 27 entries in
+    one flat list; its natural height (~830 px) passed a 768
+    screen, so Qt wrapped it into two columns and stranded the
+    tail in a half-empty second column. The entries now sit in
+    two submenus by kind — Windows and Dialogs — with the two
+    panel toggles still at the top level after the separator.
+    Nothing removed or renamed: this census is the full 27,
+    in order, with the same actions wired."""
+
+    WINDOWS_ATTRS = (
+        "view_act_run", "view_act_debug", "view_act_artifacts",
+        "view_act_converter", "view_act_sessions",
+        "view_act_privacy", "view_act_notes", "view_act_sees",
+        "view_act_models", "view_act_mission",
+        "view_act_proposals", "view_act_inbox",
+        "view_act_templates", "view_act_testing",
+        "view_act_provider_chat", "view_act_timeline",
+        "view_act_design_canvas", "view_act_plan_window",
+    )
+    DIALOGS_ATTRS = (
+        "view_act_builder", "view_act_snapshots",
+        "view_act_checkpoints", "view_act_bench",
+        "view_act_recipes", "view_act_customize",
+        "view_act_settings",
+    )
+    LABELS = {
+        "view_act_run": "Run window",
+        "view_act_debug": "Debug window",
+        "view_act_artifacts": "Artifacts window",
+        "view_act_converter": "Converter window",
+        "view_act_sessions": "Sessions window",
+        "view_act_privacy": "Privacy window",
+        "view_act_notes": "Session notes window",
+        "view_act_sees": "What the AI sees window",
+        "view_act_models": "Models window",
+        "view_act_mission": "Mission control",
+        "view_act_proposals": "Proposals window",
+        "view_act_inbox": "Inbox",
+        "view_act_templates": "Templates",
+        "view_act_testing": "Testing window",
+        "view_act_provider_chat": "Provider chat",
+        "view_act_timeline": "Turn timeline",
+        "view_act_design_canvas": "Design canvas",
+        "view_act_plan_window": "Plan window",
+        "view_act_builder": "UI builder",
+        "view_act_snapshots": "Snapshots",
+        "view_act_checkpoints": "Checkpoints",
+        "view_act_bench": "Forge Bench",
+        "view_act_recipes": "Recipes",
+        "view_act_customize": "Customize",
+        "view_act_settings": "Agent settings",
+        "view_act_dock_receipts": "Receipts panel",
+        "view_act_dock_activity": "Activity log panel",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        import forge.main as main_mod
+        # Menu geometry is a styled-geometry fact: the real app
+        # runs under STYLE (main() applies it), so the fit
+        # assertions run under it too. Cleared in tearDownClass
+        # so no global state leaks into other classes.
+        cls.app.setStyleSheet(main_mod.STYLE)
+        cls.win = main_mod.ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+        cls.app.setStyleSheet("")
+
+    def tearDown(self):
+        self.win.run_win.close()
+        self.win.plan_win.close()
+        self.win.set_dock_open("receipts", True)
+        self.win.set_dock_open("activity", True)
+        self.app.processEvents()
+
+    def test_top_level_shape(self):
+        acts = self.win.view_menu.actions()
+        self.assertEqual(len(acts), 5, [a.text() for a in acts])
+        self.assertIs(acts[0].menu(), self.win.view_windows_menu)
+        self.assertEqual(acts[0].text(), "Windows")
+        self.assertIs(acts[1].menu(), self.win.view_dialogs_menu)
+        self.assertEqual(acts[1].text(), "Dialogs")
+        self.assertTrue(acts[2].isSeparator())
+        self.assertIs(acts[3], self.win.view_act_dock_receipts)
+        self.assertIs(acts[4], self.win.view_act_dock_activity)
+
+    def test_census_all_27_in_order_with_labels(self):
+        win = self.win
+        self.assertEqual(
+            win.view_windows_menu.actions(),
+            [getattr(win, a) for a in self.WINDOWS_ATTRS])
+        self.assertEqual(
+            win.view_dialogs_menu.actions(),
+            [getattr(win, a) for a in self.DIALOGS_ATTRS])
+        leaves = []
+
+        def walk(menu):
+            for act in menu.actions():
+                if act.isSeparator():
+                    continue
+                sub = act.menu()
+                if sub is not None:
+                    walk(sub)
+                else:
+                    leaves.append(act)
+        walk(win.view_menu)
+        self.assertEqual(len(leaves), 27)
+        for attr, label in self.LABELS.items():
+            act = getattr(win, attr)
+            self.assertIn(act, leaves, attr)
+            self.assertIn(label, act.text(), attr)
+
+    def test_every_level_fits_a_768_screen(self):
+        # Usable height on the owner's Mint PC: 768 minus the
+        # ~36 px panel = 732. No level may pass it (that is
+        # what made Qt wrap the old flat menu into two columns).
+        for menu in (self.win.view_menu, self.win.view_windows_menu,
+                     self.win.view_dialogs_menu):
+            hint = menu.sizeHint()
+            self.assertLessEqual(hint.height(), 732, menu.title())
+            self.assertLessEqual(hint.width(), 1366, menu.title())
+
+    def test_group_titles_carry_no_emdash(self):
+        for menu in (self.win.view_windows_menu,
+                     self.win.view_dialogs_menu):
+            self.assertNotIn("—", menu.title())
+
+    def test_entries_still_wired_after_the_move(self):
+        win = self.win
+        win.view_act_run.trigger()
+        self.app.processEvents()
+        self.assertTrue(win.run_win.isVisible())
+        win.view_act_plan_window.trigger()
+        self.app.processEvents()
+        self.assertTrue(win.plan_win.isVisible())
+        self.assertTrue(win.view_act_dock_receipts.isCheckable())
+        self.assertTrue(win.view_act_dock_activity.isCheckable())
+        win.set_dock_open("receipts", True)
+        win.view_act_dock_receipts.trigger()
+        self.assertFalse(win._dock_open["receipts"])
+        win.set_dock_open("receipts", True)
 
 
 class PaletteNoMatchTests(unittest.TestCase):
@@ -23370,6 +24926,118 @@ class _CouncilKeepAliveClient:
         yield {"message": {"content": item["content"], "tool_calls": []}}
 
 
+class ThinkFalseSpeedTests(unittest.TestCase):
+    """Speed fix (2026-11-19): local generations carry think:false
+    as a TOP-LEVEL /api/chat field, so thinking models (the Qwen3
+    family) skip the long hidden reasoning pass that made Forge
+    feel slow next to raw Ollama. The field lives on the one
+    payload OllamaClient.chat_stream builds, so every local seat
+    (driver, homework, council reviewer, bench) gets it; provider
+    payloads (Groq / Gemini / EXAONE) never carry it."""
+
+    # -- local: the payload carries think:false at the top level ----
+    def test_local_payload_carries_top_level_think_false(self):
+        from unittest import mock
+        from forge.ollama_client import OllamaClient
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _FakeHTTPResponse(b'{"message": {"content": "ok"}}\n')
+
+        client = OllamaClient("http://127.0.0.1:11434")
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            events = list(client.chat_stream(
+                "m", [{"role": "user", "content": "hi"}],
+                {"num_ctx": 8192}, []))
+        self.assertEqual(events[0]["message"]["content"], "ok")
+        payload = captured["payload"]
+        self.assertIs(payload["think"], False)
+        # Top level only: it is not an options entry.
+        self.assertNotIn("think", payload["options"])
+        # The rest of the established shape is intact.
+        self.assertEqual(payload["model"], "m")
+        self.assertIs(payload["stream"], True)
+        self.assertEqual(payload["keep_alive"], "30m")
+
+    # -- local: sent for every model, no per-model branching --------
+    def test_think_false_sent_for_every_model_name(self):
+        from unittest import mock
+        from forge.ollama_client import OllamaClient
+        seen = []
+
+        def fake_urlopen(req, timeout=None):
+            seen.append(json.loads(req.data.decode("utf-8")))
+            return _FakeHTTPResponse(b'{"message": {"content": "ok"}}\n')
+
+        client = OllamaClient("http://127.0.0.1:11434")
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            for name in ("qwen3:8b", "plain-model:2b"):
+                list(client.chat_stream(
+                    name, [{"role": "user", "content": "hi"}], {}, []))
+        self.assertEqual([p["model"] for p in seen],
+                         ["qwen3:8b", "plain-model:2b"])
+        for payload in seen:
+            self.assertIs(payload["think"], False)
+
+    # -- cloud paths: think is never forwarded ----------------------
+    def test_groq_payload_never_carries_think(self):
+        from forge import providers as p
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [{"delta": {"content": "ok"},
+                                         "finish_reason": "stop"}]}),
+                "[DONE]"]))
+
+        client = p.GroqClient("test-key", urlopen=fake_urlopen)
+        events = list(client.chat_stream(
+            "groq:llama-x", [{"role": "user", "content": "hi"}],
+            {"temperature": 0.7, "num_predict": 64}, []))
+        self.assertEqual(events[0]["message"]["content"], "ok")
+        self.assertNotIn("think", captured["payload"])
+        self.assertNotIn("think", json.dumps(captured["payload"]))
+
+    def test_gemini_payload_never_carries_think(self):
+        from forge import providers as p
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"candidates": [{"content": {"parts": [
+                    {"text": "ok"}]}, "finishReason": "STOP"}]})]))
+
+        client = p.GeminiClient("g-key", urlopen=fake_urlopen)
+        events = list(client.chat_stream(
+            "gemini:gemini-y", [{"role": "user", "content": "hi"}],
+            {"temperature": 0.7, "num_predict": 64}, []))
+        self.assertEqual(events[0]["message"]["content"], "ok")
+        self.assertNotIn("think", captured["payload"])
+        self.assertNotIn("think", json.dumps(captured["payload"]))
+
+    def test_exaone_payload_never_carries_think(self):
+        from forge import providers as p
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return _ProviderFakeResponse(_sse([
+                json.dumps({"choices": [{"delta": {"content": "ok"},
+                                         "finish_reason": "stop"}]}),
+                "[DONE]"]))
+
+        client = p.ExaoneClient("ex-key", urlopen=fake_urlopen)
+        events = list(client.chat_stream(
+            "exaone:k-exaone_v2.5", [{"role": "user", "content": "hi"}],
+            {"temperature": 0.7, "num_predict": 64}, []))
+        self.assertEqual(events[0]["message"]["content"], "ok")
+        self.assertNotIn("think", captured["payload"])
+        self.assertNotIn("think", json.dumps(captured["payload"]))
+
+
 class ResidencyPolicyTests(unittest.TestCase):
     """Audit B20 (item #20): keep_alive is a per-request residency
     policy, not the old hard-coded "5m" that unloaded the model
@@ -24492,6 +26160,52 @@ class BenchRunnerTests(unittest.TestCase):
         self.assertFalse(record["passed"])
         self.assertIn("wall cap", record["note"])
 
+    def test_default_wall_cap_fits_cpu_generations(self):
+        # The cap was 240 s; the live-model test watched single
+        # CPU generations of 450-720 s, so every task died at the
+        # cap with 0 eval tokens and the bench measured the cap,
+        # not the model. The default must clear the slowest
+        # observed generation with room for working cycles.
+        from forge import bench
+        self.assertEqual(bench.TASK_SECONDS, 900)
+        self.assertGreaterEqual(bench.TASK_SECONDS, 720)
+
+    def test_slow_generation_inside_the_cap_still_passes(self):
+        import time as _time
+        from forge import bench
+
+        class SlowStarter:
+            timeout = 1800
+
+            def __init__(self):
+                self.calls = 0
+
+            def chat_stream(self, model, messages, options, tools,
+                            keep_alive=None):
+                self.calls += 1
+                if self.calls == 1:
+                    _time.sleep(1.2)   # one slow CPU generation
+                    yield {"message": {"content": "", "tool_calls": [
+                        {"function": {"name": "write_file", "arguments": {
+                            "path": "greet.py",
+                            "content": "def greet(name):\n"
+                                       "    return 'Hello, ' + name + '!'\n"}}}]}}
+                    yield {"done": True, "eval_count": 5,
+                           "prompt_eval_count": 9}
+                else:
+                    yield {"message": {"content": "DONE", "tool_calls": []}}
+                    yield {"done": True, "eval_count": 3,
+                           "prompt_eval_count": 4}
+
+        old = bench.TASK_SECONDS
+        bench.TASK_SECONDS = 2
+        try:
+            report = self._run(SlowStarter(), ["write-greet-module"])
+        finally:
+            bench.TASK_SECONDS = old
+        record = report["tasks"][0]
+        self.assertTrue(record["passed"], record["note"])
+
     def test_cancel_mid_run_skips_the_rest(self):
         import threading as _threading
         event = _threading.Event()
@@ -24707,6 +26421,121 @@ class BenchDialogTests(unittest.TestCase):
             self.assertFalse(dlg.stop_btn.isEnabled())
         finally:
             dlg.close()
+
+
+class BenchDialogCloseWhileRunningTests(unittest.TestCase):
+    """Bench-crash fix: closing the Bench dialog mid-run used to
+    destroy it while BenchThread still ran against it (stop() only
+    sets the cancel event, and a blocking model call can hold the
+    thread for minutes), and Qt aborted the whole process. The
+    dialog now refuses the close, shows a stopping state, and
+    closes when the thread's finished signal fires. The fake
+    run_bench below stands in for the blocking model call: it
+    returns only when the test releases it."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import threading
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+
+    def _fake_run_bench(self, model, client, cancel_event=None,
+                        on_task=None, disabled_tools=None,
+                        max_cycles=None, light_machine=False):
+        # The blocking "model call": returns only when released.
+        # The 30 s cap keeps a broken test from hanging the suite.
+        self.release.wait(30)
+        return {"model": model, "started": "", "passed": 0,
+                "total": 0, "seconds": 0.0, "tasks": []}
+
+    def _dialog(self):
+        from forge.main import BenchDialog
+        return BenchDialog(None, ["bench-a:latest"], object())
+
+    def _pump_until(self, predicate, timeout=10.0):
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return predicate()
+
+    def _start_blocked_run(self, dlg):
+        from unittest import mock
+        from forge import bench as bench_mod
+        patcher = mock.patch.object(bench_mod, "run_bench",
+                                    self._fake_run_bench)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        dlg.show()
+        dlg._start()
+        thread = dlg._thread
+        self.assertIsNotNone(thread)
+        return thread
+
+    def test_close_mid_run_stays_alive_in_stopping_state_then_closes(self):
+        dlg = self._dialog()
+        thread = self._start_blocked_run(dlg)
+        self.assertTrue(thread.isRunning())
+        dlg.close()
+        # The close was refused: the dialog is alive and stopping,
+        # the cancel reached the thread, the controls are parked.
+        self.assertTrue(dlg.isVisible())
+        self.assertTrue(dlg._stopping)
+        self.assertTrue(thread.cancel_event.is_set())
+        self.assertIn("Stopping the bench", dlg.results.toPlainText())
+        self.assertFalse(dlg.run_btn.isEnabled())
+        self.assertFalse(dlg.stop_btn.isEnabled())
+        # The "model call" returns; the thread finishes and the
+        # dialog closes on its own.
+        self.release.set()
+        self.assertTrue(thread.wait(10000))
+        self.assertTrue(self._pump_until(lambda: not dlg.isVisible()))
+        self.assertFalse(dlg._stopping)
+
+    def test_close_while_idle_closes_immediately(self):
+        dlg = self._dialog()
+        dlg.show()
+        self.assertTrue(dlg.isVisible())
+        dlg.close()
+        self.assertFalse(dlg.isVisible())
+        self.assertFalse(dlg._stopping)
+
+    def test_second_close_while_stopping_does_not_stack_or_crash(self):
+        dlg = self._dialog()
+        thread = self._start_blocked_run(dlg)
+        self.assertTrue(thread.isRunning())
+        dlg.close()
+        self.assertTrue(dlg._stopping)
+        # A second close attempt while stopping: refused again,
+        # the same single stopping state, nothing stacks.
+        dlg.close()
+        self.assertTrue(dlg.isVisible())
+        self.assertTrue(dlg._stopping)
+        self.assertIn("Stopping the bench", dlg.results.toPlainText())
+        self.release.set()
+        self.assertTrue(thread.wait(10000))
+        self.assertTrue(self._pump_until(lambda: not dlg.isVisible()))
+
+    def test_run_finishing_on_its_own_keeps_dialog_open(self):
+        dlg = self._dialog()
+        self.release.set()
+        thread = self._start_blocked_run(dlg)
+        self.assertTrue(thread.wait(10000))
+        # bench_done landed (_finish_run cleared the thread) and
+        # the finished handler did NOT close anything: no close
+        # was ever requested.
+        self.assertTrue(self._pump_until(lambda: dlg._thread is None))
+        self.assertTrue(dlg.isVisible())
+        self.assertFalse(dlg._stopping)
+        dlg.close()
+        self.assertFalse(dlg.isVisible())
 
 
 class SeatFileTests(unittest.TestCase):
@@ -27594,7 +29423,7 @@ class TokensTests(unittest.TestCase):
     # The pinned STYLE literal: originally the pre-G7 snapshot;
     # regenerated programmatically from build_style(TOKENS) after
     # the 2026-11-09 palette re-base (do not hand-edit — regenerate).
-    EXPECTED_STYLE = "\nQWidget { background:#12100d; color:#eae6df; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }\nQMainWindow { background:#12100d; }\nQFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332e26, stop:0.05 #221f1a, stop:1 #201c17); border:0; }\nQFrame#sidebar { border-right:1px solid rgba(255,179,71,0.30); }\nQFrame#inspector { border-left:1px solid rgba(255,179,71,0.30); }\nQFrame#header { background:#221f1a; border-bottom:1px solid rgba(255,179,71,0.30); }\nQLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:#f3ede0; }\nQLabel#stamp { color:#c9aa7f; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }\nQLabel#muted { color:#a39a8b; }\nQLabel#section { color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQLabel#big { font-size:15px; font-weight:700; color:#f8f7f5; }\nQPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #38322a, stop:1 #2d2922); border:1px solid #554c3e; border-radius:7px; padding:8px 12px; color:#f0ede7; }\nQPushButton:hover { background:#433c31; border-color:rgba(255,179,71,0.45); }\nQPushButton:pressed { background:#201c17; }\nQPushButton:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c2611a, stop:1 #a34d12); border-color:#c2611a; color:white; font-weight:700; }\nQPushButton#primary:hover { background:#c2611a; }\nQPushButton#primary:pressed { background:#a34d12; }\nQPushButton#primary:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#nav { text-align:left; background:transparent; border:0; padding:9px 10px; color:#c4bdae; }\nQPushButton#nav:hover { background:#312c25; color:white; }\nQPushButton#nav:pressed { background:#2e2a20; }\nQPushButton#nav:disabled { color:#a39a8b; }\nQPushButton#navActive { text-align:left; background:#2e2a20; border:1px solid #a34d12; border-radius:7px; padding:9px 10px; color:#ffd9ae; }\nQPushButton#navActive:pressed { background:#201c17; }\nQPushButton#navActive:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:#1b1814; border:1px solid #453e33; border-radius:7px; padding:9px; selection-background-color:#a34d12; }\nQLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border:2px solid rgba(255,179,71,0.55); }\nQPushButton:focus { border:2px solid rgba(255,179,71,0.55); }\nQPushButton#primary:focus, QPushButton#nav:focus, QPushButton#navActive:focus, QPushButton#accordion:focus, QPushButton#topbarBtn:focus, QPushButton#topbarBtn:checked:focus { border:2px solid rgba(255,179,71,0.55); }\nQTextBrowser:focus { border:2px solid rgba(255,179,71,0.55); }\nQListWidget:focus, QTableWidget:focus { border:2px solid rgba(255,179,71,0.55); }\nQCheckBox:focus, QRadioButton:focus { border:2px solid rgba(255,179,71,0.55); border-radius:7px; }\nQTextBrowser { background:#201d18; border:1px solid rgba(255,179,71,0.38); border-radius:12px; padding:12px; selection-background-color:#a34d12; }\nQComboBox QAbstractItemView { background:#27231d; selection-background-color:#a34d12; }\nQListWidget, QTableWidget { selection-background-color:#a34d12; }\nQProgressBar { background:#1b1814; border:1px solid rgba(255,179,71,0.18); border-radius:5px; height:10px; text-align:center; font-size:9px; color:#e0dacf; }\nQProgressBar::chunk { background:#b47f4a; border-radius:3px; }\nQProgressBar#hot::chunk { background:#d97a26; }\nQProgressBar#crit::chunk { background:#c0392b; }\nQStatusBar { background:#201c17; color:#a39a8b; }\nQSplitter::handle { background:#3f382e; width:1px; }\nQScrollBar:vertical { background:#1b1814; width:10px; margin:0px; border:0; }\nQScrollBar:horizontal { background:#1b1814; height:10px; margin:0px; border:0; }\nQScrollBar::handle:vertical { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-height:20px; }\nQScrollBar::handle:horizontal { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-width:20px; }\nQScrollBar::handle:vertical:hover { background:#433c31; }\nQScrollBar::handle:horizontal:hover { background:#433c31; }\nQScrollBar::handle:vertical:pressed { background:#2d2922; }\nQScrollBar::handle:horizontal:pressed { background:#2d2922; }\nQScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }\nQScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }\nQScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; background:transparent; border:0; }\nQScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }\nQScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }\nQScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }\nQToolTip { background:#231f1a; border:1px solid #4a4236; color:#eae6df; padding:4px 8px; }\nQTabWidget::pane { border:1px solid rgba(255,179,71,0.18); background:#201c17; }\nQTabBar::tab { background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; color:#c4bdae; }\nQTabBar::tab:hover { background:#312c25; color:white; }\nQTabBar::tab:selected { background:#221f1a; border-bottom:2px solid #c2611a; color:#ffd9ae; }\nQCheckBox:disabled { color:#a39a8b; }\nQCheckBox::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:3px; background:#1b1814; }\nQCheckBox::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQCheckBox::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQCheckBox::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQRadioButton:disabled { color:#a39a8b; }\nQRadioButton::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:8px; background:#1b1814; }\nQRadioButton::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQRadioButton::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQRadioButton::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQListWidget::item { padding:4px 8px; color:#eae6df; }\nQListWidget::item:hover { background:#312c25; }\nQListWidget::item:selected { background:#383229; }\nQPushButton#accordion { text-align:left; background:transparent; border:0; padding:4px 2px; color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQPushButton#accordion:hover { color:#e2c9a9; background:transparent; }\nQPushButton#accordion:pressed { background:#312c25; }\nQPushButton#accordion:disabled { color:#a39a8b; }\nQPushButton#topbarBtn { padding:5px 10px; }\nQPushButton#topbarBtn:checked { background:#40392f; border-color:#a34d12; color:#ffd9ae; }\nQPushButton#topbarBtn:pressed { background:#201c17; }\nQPushButton#topbarBtn:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQScrollArea#historyScroll { background:#201c17; border:0; }\nQWidget#historyContent { background:#201c17; }\nQMenu { background:#231f1a; border:1px solid #4a4236; }\nQMenu::item { padding:7px 22px 7px 12px; color:#eae6df; }\nQMenu::item:selected { background:#383229; }\nQMenu::separator { height:1px; background:#3f382e; margin:4px 8px; }\n"
+    EXPECTED_STYLE = "\nQWidget { background:#12100d; color:#eae6df; font-family:'Inter','Noto Sans',sans-serif; font-size:13px; }\nQMainWindow { background:#12100d; }\nQFrame#sidebar, QFrame#inspector { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #332e26, stop:0.05 #221f1a, stop:1 #201c17); border:0; }\nQFrame#sidebar { border-right:1px solid rgba(255,179,71,0.30); }\nQFrame#inspector { border-left:1px solid rgba(255,179,71,0.30); }\nQFrame#header { background:#221f1a; border-bottom:1px solid rgba(255,179,71,0.30); }\nQLabel#brand { font-size:20px; font-weight:300; letter-spacing:4px; color:#f3ede0; }\nQLabel#stamp { color:#c9aa7f; font-family:'DejaVu Sans Mono',monospace; font-size:10px; letter-spacing:1px; }\nQLabel#muted { color:#a39a8b; }\nQLabel#section { color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQLabel#big { font-size:15px; font-weight:700; color:#f8f7f5; }\nQPushButton { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #38322a, stop:1 #2d2922); border:1px solid #554c3e; border-radius:7px; padding:8px 12px; color:#f0ede7; }\nQPushButton:hover { background:#433c31; border-color:rgba(255,179,71,0.45); }\nQPushButton:pressed { background:#201c17; }\nQPushButton:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#primary { background:qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #c2611a, stop:1 #a34d12); border-color:#c2611a; color:white; font-weight:700; }\nQPushButton#primary:hover { background:#c2611a; }\nQPushButton#primary:pressed { background:#a34d12; }\nQPushButton#primary:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQPushButton#nav { text-align:left; background:transparent; border:0; padding:9px 10px; color:#c4bdae; }\nQPushButton#nav:hover { background:#312c25; color:white; }\nQPushButton#nav:pressed { background:#2e2a20; }\nQPushButton#nav:disabled { color:#a39a8b; }\nQPushButton#navActive { text-align:left; background:#2e2a20; border:1px solid #a34d12; border-radius:7px; padding:9px 10px; color:#ffd9ae; }\nQPushButton#navActive:pressed { background:#201c17; }\nQPushButton#navActive:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background:#1b1814; border:1px solid #453e33; border-radius:7px; padding:9px; selection-background-color:#a34d12; }\nQLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border:2px solid rgba(255,179,71,0.55); }\nQPushButton:focus { border:2px solid rgba(255,179,71,0.55); }\nQPushButton#primary:focus, QPushButton#nav:focus, QPushButton#navActive:focus, QPushButton#accordion:focus, QPushButton#topbarBtn:focus, QPushButton#topbarBtn:checked:focus { border:2px solid rgba(255,179,71,0.55); }\nQTextBrowser:focus { border:2px solid rgba(255,179,71,0.55); }\nQListWidget:focus, QTableWidget:focus { border:2px solid rgba(255,179,71,0.55); }\nQCheckBox:focus, QRadioButton:focus { border:2px solid rgba(255,179,71,0.55); border-radius:7px; }\nQTextBrowser { background:#201d18; border:1px solid rgba(255,179,71,0.38); border-radius:12px; padding:12px; selection-background-color:#a34d12; }\nQComboBox QAbstractItemView { background:#27231d; selection-background-color:#a34d12; }\nQListWidget, QTableWidget { selection-background-color:#a34d12; }\nQProgressBar { background:#1b1814; border:1px solid rgba(255,179,71,0.18); border-radius:5px; height:10px; text-align:center; font-size:9px; color:#e0dacf; }\nQProgressBar::chunk { background:#b47f4a; border-radius:3px; }\nQProgressBar#hot::chunk { background:#d97a26; }\nQProgressBar#crit::chunk { background:#c0392b; }\nQStatusBar { background:#201c17; color:#a39a8b; }\nQSplitter::handle { background:#3f382e; width:1px; }\nQScrollBar:vertical { background:#1b1814; width:10px; margin:0px; border:0; }\nQScrollBar:horizontal { background:#1b1814; height:10px; margin:0px; border:0; }\nQScrollBar::handle:vertical { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-height:20px; }\nQScrollBar::handle:horizontal { background:#38322a; border:1px solid #554c3e; border-radius:5px; min-width:20px; }\nQScrollBar::handle:vertical:hover { background:#433c31; }\nQScrollBar::handle:horizontal:hover { background:#433c31; }\nQScrollBar::handle:vertical:pressed { background:#2d2922; }\nQScrollBar::handle:horizontal:pressed { background:#2d2922; }\nQScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }\nQScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }\nQScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; background:transparent; border:0; }\nQScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0px; background:transparent; border:0; }\nQScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical { background:transparent; border:0; width:0px; height:0px; }\nQScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal { background:transparent; border:0; width:0px; height:0px; }\nQToolTip { background:#231f1a; border:1px solid #4a4236; color:#eae6df; padding:4px 8px; }\nQTabWidget::pane { border:1px solid rgba(255,179,71,0.18); background:#201c17; }\nQTabBar::tab { background:transparent; border:0; border-bottom:2px solid transparent; padding:8px 14px; color:#c4bdae; }\nQTabBar::tab:hover { background:#312c25; color:white; }\nQTabBar::tab:selected { background:#221f1a; border-bottom:2px solid #c2611a; color:#ffd9ae; }\nQCheckBox:disabled { color:#a39a8b; }\nQCheckBox::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:3px; background:#1b1814; }\nQCheckBox::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQCheckBox::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQCheckBox::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQRadioButton:disabled { color:#a39a8b; }\nQRadioButton::indicator { width:16px; height:16px; border:1px solid #554c3e; border-radius:8px; background:#1b1814; }\nQRadioButton::indicator:hover { border-color:rgba(255,179,71,0.45); }\nQRadioButton::indicator:checked { background:#c2611a; border-color:#c2611a; }\nQRadioButton::indicator:disabled { background:#1b1814; border-color:#453e33; }\nQListWidget::item { padding:4px 8px; color:#eae6df; }\nQListWidget::item:hover { background:#312c25; }\nQListWidget::item:selected { background:#383229; }\nQPushButton#accordion { text-align:left; background:transparent; border:0; padding:4px 2px; color:#c9aa7f; font-size:10px; font-weight:700; letter-spacing:1.6px; }\nQPushButton#accordion:hover { color:#e2c9a9; background:transparent; }\nQPushButton#accordion:pressed { background:#312c25; }\nQPushButton#accordion:disabled { color:#a39a8b; }\nQPushButton#topbarBtn { padding:5px 10px; }\nQPushButton#topbarBtn:checked { background:#40392f; border-color:#a34d12; color:#ffd9ae; }\nQPushButton#topbarBtn:pressed { background:#201c17; }\nQPushButton#topbarBtn:disabled { background:#1b1814; border-color:#453e33; color:#a39a8b; }\nQScrollArea#historyScroll { background:#201c17; border:0; }\nQWidget#historyContent { background:#201c17; }\nQScrollArea#projectScroll { background:#201c17; border:0; }\nQWidget#projectContent { background:#201c17; }\nQMenu { background:#231f1a; border:1px solid #4a4236; }\nQMenu::item { padding:7px 22px 7px 12px; color:#eae6df; }\nQMenu::item:selected { background:#383229; }\nQMenu::separator { height:1px; background:#3f382e; margin:4px 8px; }\n"
 
     # Tokens STYLE itself consumes (the template's placeholders).
     STYLE_TOKENS = ['accent_primary_bottom', 'accent_primary_top', 'border_button', 'border_input', 'border_menu', 'padding_accordion', 'padding_button', 'padding_chat', 'padding_input', 'padding_menu_item', 'padding_nav', 'padding_topbar', 'progress_chunk', 'progress_crit', 'progress_hot', 'radius_card', 'radius_chunk', 'radius_control', 'radius_progress', 'rim', 'rim_chat', 'rim_focus', 'rim_hover', 'rim_soft', 'surface_base', 'surface_button_bottom', 'surface_button_hover', 'surface_button_top', 'surface_chat', 'surface_combo_view', 'surface_glass_bottom', 'surface_glass_mid', 'surface_glass_top', 'surface_input', 'surface_menu', 'surface_menu_selected', 'surface_nav_active', 'surface_nav_hover', 'surface_splitter', 'surface_topbar_checked', 'text_accordion_hover', 'text_amber_light', 'text_base', 'text_big', 'text_brand', 'text_button', 'text_muted', 'text_nav', 'text_progress', 'text_section', 'text_white']
@@ -31661,14 +33490,21 @@ class SweepDialogTests(unittest.TestCase):
             def stop(self):
                 stopped["stop"] = True
 
-            def wait(self, ms):
-                stopped["wait"] = ms
+            def isRunning(self):
                 return True
 
         dlg._thread = FakeThread()
         from PySide6.QtGui import QCloseEvent
-        dlg.closeEvent(QCloseEvent())
-        self.assertEqual(stopped, {"stop": True, "wait": 2000})
+        event = QCloseEvent()
+        dlg.closeEvent(event)
+        # Bench-crash fix (supersedes the R76 wait): a fixed wait
+        # loses to a minutes-long blocking model call, so the
+        # close is refused instead — stop() still runs, the event
+        # is ignored, and the dialog parks in the stopping state
+        # until the real thread's finished signal closes it.
+        self.assertEqual(stopped, {"stop": True})
+        self.assertFalse(event.isAccepted())
+        self.assertTrue(dlg._stopping)
         with tempfile.TemporaryDirectory() as td:
             blocker = Path(td) / "blocker"
             blocker.write_text("x")
@@ -33104,6 +34940,134 @@ class SweepInstallShTests(unittest.TestCase):
         self.assertIn("STILL missing", r.stderr)
         self.assertIn("libegl1", r.stderr)
         self.assertIn("sudo apt install", r.stderr)
+
+
+class InstallShVerdictTests(unittest.TestCase):
+    """B32: install.sh --list-only's headline verdict told the
+    truth only when nothing was missing. probe_missing fills
+    MISSING, but the System section's loop skipped uninstalled
+    packages (so it printed a bare "all up to date") and the
+    final "Everything is up to date" verdict never checked
+    MISSING nor whether the venv exists. These run the tree's
+    install.sh under PATH shims that make the machine state
+    deterministic: dpkg-query claims version 1.0, apt-cache
+    offers candidate 1.0 (nothing outdated), ollama is healthy,
+    and ldconfig either lists every Qt runtime library or drops
+    libEGL (the missing-package case)."""
+
+    def setUp(self):
+        import os
+        import shutil
+        import stat
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.home = base / "home"
+        self.home.mkdir()
+        shim = base / "shim"
+        shim.mkdir()
+        app = base / "Linux Forge Agent"
+        app.mkdir()
+        self.app = app
+        tree = Path(__file__).resolve().parent.parent
+        shutil.copy(tree / "install.sh", app / "install.sh")
+        shutil.copy(tree / "run.sh", app / "run.sh")
+        (app / "requirements.txt").write_text("", encoding="utf-8")
+        py = (
+            "#!/usr/bin/env bash\n"
+            "last=\"\"\n"
+            "for arg in \"$@\"; do last=\"$arg\"; done\n"
+            "if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"venv\" ]; then\n"
+            "  mkdir -p \"$last/bin\"\n"
+            "  cp \"$(dirname \"$0\")/healthy-stub\" \"$last/bin/python\"\n"
+            "  chmod +x \"$last/bin/python\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 0\n"
+        )
+        healthy = "#!/usr/bin/env bash\nexit 0\n"
+        tools = {
+            "python3": py,
+            "healthy-stub": healthy,
+            "dpkg-query": "#!/usr/bin/env bash\necho \"1.0\"\nexit 0\n",
+            "apt-cache": "#!/usr/bin/env bash\n"
+                         "echo \"  Candidate: 1.0\"\nexit 0\n",
+            "ollama": "#!/usr/bin/env bash\n"
+                      "echo \"ollama version is 0.41.2\"\nexit 0\n",
+            "sudo": "#!/usr/bin/env bash\nexit 1\n",
+            "apt-get": "#!/usr/bin/env bash\nexit 1\n",
+        }
+        for name, body in tools.items():
+            path = shim / name
+            path.write_text(body, encoding="utf-8")
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        self.shim = shim
+        self.env = dict(os.environ)
+        self.env["HOME"] = str(self.home)
+        self.env["PATH"] = str(shim) + os.pathsep + os.environ["PATH"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _ldconfig(self, libraries):
+        import stat
+        path = self.shim / "ldconfig"
+        path.write_text("#!/usr/bin/env bash\necho \"" + libraries
+                        + "\"\nexit 0\n", encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+    def _make_venv(self):
+        import stat
+        bindir = self.app / ".venv" / "bin"
+        bindir.mkdir(parents=True)
+        stub = bindir / "python"
+        stub.write_text("#!/usr/bin/env bash\nexit 0\n",
+                        encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+
+    def _list_only(self):
+        import subprocess
+        proc = subprocess.run(
+            ["bash", "install.sh", "--list-only"],
+            cwd=self.app, env=self.env,
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout
+
+    @staticmethod
+    def _system_section(out):
+        return out.split("System packages:")[1].split(
+            "Python packages")[0]
+
+    def test_missing_package_hedges_the_section_and_kills_the_verdict(self):
+        self._ldconfig("libGL.so.1 libxkbcommon.so.0 libpulse.so.0")
+        self._make_venv()
+        out = self._list_only()
+        self.assertNotIn("Everything is up to date", out)
+        self.assertIn("(not installed yet: libegl1", out)
+        section = self._system_section(out)
+        self.assertIn("all installed packages up to date", section)
+        bare = [line for line in section.splitlines()
+                if line.strip() == "all up to date"]
+        self.assertEqual(bare, [])
+
+    def test_no_venv_yet_kills_the_verdict(self):
+        self._ldconfig(
+            "libEGL.so.1 libGL.so.1 libxkbcommon.so.0 libpulse.so.0")
+        out = self._list_only()
+        self.assertNotIn("Everything is up to date", out)
+        self.assertIn("(no environment yet", out)
+
+    def test_verdict_prints_when_everything_is_current(self):
+        self._ldconfig(
+            "libEGL.so.1 libGL.so.1 libxkbcommon.so.0 libpulse.so.0")
+        self._make_venv()
+        out = self._list_only()
+        self.assertIn(
+            "Everything is up to date — nothing needs updating.", out)
+        section = self._system_section(out)
+        bare = [line for line in section.splitlines()
+                if line.strip() == "all up to date"]
+        self.assertEqual(len(bare), 1)
 
 
 class ReferenceBuildTests(unittest.TestCase):
@@ -37335,6 +39299,208 @@ class ProjectNameElisionTests(unittest.TestCase):
             self.app.processEvents()
 
 
+class ProjectRowsScrollTests(unittest.TestCase):
+    """R3-08 (Round 3 audit, M): at a 1366x732 window the sidebar's
+    content exceeds the height it is given, and Qt's layout
+    squeezed the nested project list — the [01] rows rendered
+    ~14 px against a 36 px sizeHint and long names painted zero
+    pixels (the buttons stayed live; the list was invisible).
+    A refresh on a shown window also left long names at full
+    text: refresh_projects elides before the rebuilt buttons
+    have geometry, and only the sidebar-resize hook re-elided.
+    The rows now live in a QScrollArea (the [02] history list's
+    own pattern), so they keep their full height inside a
+    scrolling content widget, and refresh_projects re-elides on
+    the next loop turn, once the buttons have settled."""
+
+    # 8 projects — the count that overflowed the sidebar at
+    # 732 px — including Joshua's real clipped name.
+    _NAMES = ["cat game or linux touch screen", "duo", "forge",
+              "minty", "pixel forge", "skullpt", "duo chat",
+              "winlinx"]
+    _LONG = _NAMES[0]
+    _RUNTIME_NAME = "a very long project name added at runtime"
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        import time
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow, STYLE
+        cls.app.setStyleSheet(STYLE)
+        cls.win = ForgeWindow()
+        # Un-collapse the sidebar explicitly (the
+        # ProjectNameElisionTests lesson).
+        cls.win.set_sidebar_collapsed(False)
+        # Drain the startup model refresh thread (the
+        # PrivacyWindowTests pattern).
+        deadline = time.time() + 30
+        while (cls.win._models_thread is not None
+               and cls.win._models_thread.isRunning()
+               and time.time() < deadline):
+            cls.app.processEvents()
+            time.sleep(0.05)
+        cls.app.processEvents()
+        cls._tmp = tempfile.mkdtemp(prefix="r3b1-")
+        cls._orig_projects = list(cls.win.projects)
+        cls._orig_workspace = cls.win.workspace
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        cls.win.projects = cls._orig_projects
+        cls.win.workspace = cls._orig_workspace
+        cls.win.refresh_projects()
+        cls.win.close()
+        shutil.rmtree(cls._tmp, ignore_errors=True)
+
+    def _settle(self, rounds=8):
+        import time
+        for _ in range(rounds):
+            self.app.processEvents()
+            time.sleep(0.05)
+
+    def _show_projects(self, names, height=732):
+        self.win.projects = [
+            {"path": self._tmp + "/" + n.replace(" ", "-"),
+             "name": n} for n in names]
+        # "duo" is the active project; the long name is not.
+        self.win.workspace = self.win.projects[1]["path"]
+        self.win.refresh_projects()
+        self.win.resize(1366, height)
+        self.win.show()
+        self._settle()
+
+    def _buttons(self):
+        # Buttons in fixture order, from the layout itself (the
+        # ProjectNameElisionTests pattern).
+        from PySide6.QtWidgets import QPushButton
+        btns = []
+        lay = self.win.project_list
+        for i in range(lay.count()):
+            w = lay.itemAt(i).widget()
+            if isinstance(w, QPushButton):
+                btns.append(w)
+        return btns
+
+    @staticmethod
+    def _nonbg(widget):
+        # Non-background pixel count of the widget's own grab —
+        # 0 means the row painted nothing at all.
+        from PySide6.QtGui import QImage
+        img = widget.grab().toImage().convertToFormat(
+            QImage.Format.Format_ARGB32)
+        bg = img.pixel(0, 0)
+        n = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                if img.pixel(x, y) != bg:
+                    n += 1
+        return n
+
+    def test_rows_keep_full_height_and_paint_at_732(self):
+        self._show_projects(self._NAMES)
+        btns = self._buttons()
+        self.assertEqual(len(btns), 8)
+        for btn in btns:
+            self.assertEqual(
+                btn.height(), btn.sizeHint().height(),
+                f"row crushed: {btn.text()!r} is {btn.height()}px, "
+                f"sizeHint is {btn.sizeHint().height()}px")
+            self.assertGreater(
+                self._nonbg(btn), 0,
+                f"row paints nothing: {btn.text()!r}")
+        # The overflow goes to the scrollbar, not into the rows.
+        vbar = self.win.project_scroll.verticalScrollBar()
+        self.assertGreater(
+            vbar.maximum(), 0,
+            "8 projects at 732px should overflow into scrolling, "
+            "not into crushed rows")
+
+    def test_long_name_elided_at_732(self):
+        self._show_projects(self._NAMES)
+        long_btn = self._buttons()[0]
+        self.assertTrue(
+            long_btn.text().endswith("…"),
+            f"long name not elided at 732px: {long_btn.text()!r}")
+        self.assertLess(len(long_btn.text()),
+                        len("▢  " + self._LONG))
+
+    def test_runtime_refresh_elides_without_resize(self):
+        self._show_projects(self._NAMES)
+        # Add a project to the SHOWN window and refresh — no
+        # resize anywhere in this test.
+        self.win.projects = list(self.win.projects) + [{
+            "path": self._tmp + "/runtime-added",
+            "name": self._RUNTIME_NAME}]
+        self.win.refresh_projects()
+        self._settle()
+        new_btn = self._buttons()[-1]
+        self.assertTrue(
+            new_btn.text().endswith("…"),
+            f"runtime-added name not elided: {new_btn.text()!r}")
+        self.assertEqual(new_btn.height(),
+                         new_btn.sizeHint().height())
+        self.assertGreater(self._nonbg(new_btn), 0)
+
+    def test_no_scrollbar_when_the_list_fits(self):
+        # A tall window affords the whole list: every row shows
+        # and the scrollbar has nothing to scroll. (1200, not
+        # 1100: at 1100 the sidebar is within a few px of
+        # fitting, and the workspace label's wrapped height can
+        # squeeze the viewport by the odd pixel - a 2px scroll
+        # range there is the layout being honest, not a defect.)
+        self._show_projects(self._NAMES, height=1200)
+        self.assertGreaterEqual(self.win.height(), 1150,
+                                "platform did not grant the tall "
+                                "window this test needs")
+        vbar = self.win.project_scroll.verticalScrollBar()
+        self.assertEqual(vbar.maximum(), 0,
+                         "list fits but the scrollbar still scrolls")
+        self.assertFalse(vbar.isVisible(),
+                         "list fits but the scrollbar is visible")
+        for btn in self._buttons():
+            self.assertEqual(btn.height(), btn.sizeHint().height())
+
+    def test_collapsed_sidebar_still_collapses_and_expands(self):
+        self._show_projects(self._NAMES)
+        self.win.set_sidebar_collapsed(True)
+        self._settle()
+        self.assertFalse(self.win.sidebar.isVisible())
+        self.win.set_sidebar_collapsed(False)
+        self._settle()
+        self.assertTrue(self.win.sidebar.isVisible())
+        btns = self._buttons()
+        self.assertEqual(len(btns), 8)
+        for btn in btns:
+            self.assertEqual(btn.height(), btn.sizeHint().height())
+
+    def test_focus_restore_still_lands_after_rebuild(self):
+        # F24's hand-off must survive the scroll wrap: focus a
+        # project button, rebuild, focus lands on the new button
+        # for the same path.
+        self._show_projects(self._NAMES)
+        path = self.win.projects[2]["path"]
+        target = None
+        for btn in self._buttons():
+            if btn.property("projectPath") == path:
+                target = btn
+        self.assertIsNotNone(target)
+        target.setFocus()
+        self._settle()
+        self.assertIs(self.win.focusWidget(), target)
+        self.win.refresh_projects()
+        self._settle()
+        new_btn = None
+        for btn in self._buttons():
+            if btn.property("projectPath") == path:
+                new_btn = btn
+        self.assertIsNotNone(new_btn)
+        self.assertIsNot(new_btn, target)
+        self.assertIs(self.win.focusWidget(), new_btn)
+
+
 class WindowGeometryTests(unittest.TestCase):
     """F1 (U5, audit 2026-11-13): the bench opened at 1360x880 on a
     1366x768 screen (112 px too tall, 148 px against the ~732 px
@@ -37544,6 +39710,62 @@ class WindowGeometryTests(unittest.TestCase):
         avail = self._screen_avail(win)
         self.assertTrue(avail.intersects(win.frameGeometry()))
         self.assertNotEqual((win.x(), win.y()), (5000, 5000))
+
+    def _opener_dialog_round_trip(self, opener_name, class_name):
+        # C10 (joint user-testing thread, 2026-11-19): the
+        # Settings and Bench dialogs never got geometry memory —
+        # their openers built them and exec'd them without the
+        # install every other window gets, so they forgot their
+        # size and place on every open. The dialog class is swapped
+        # for a stub subclass whose exec records the instance and
+        # returns at once (the real exec would block offscreen),
+        # then the round trip runs for real: the opener's dialog
+        # must carry the install, a resize must save on close, and
+        # a second open must come back at the saved size.
+        import forge.main as main
+        from PySide6.QtWidgets import QDialog
+        from forge.main import _geometry_key
+        dialog_cls = getattr(main, class_name)
+        captured = []
+
+        class _Stubbed(dialog_cls):
+            def exec(self):
+                captured.append(self)
+                return QDialog.Rejected
+
+        setattr(main, class_name, _Stubbed)
+        try:
+            win = self._make_window()
+            getattr(win, opener_name)()
+            self.assertEqual(len(captured), 1)
+            dlg1 = captured[0]
+            self._windows.append(dlg1)
+            self.assertTrue(
+                getattr(dlg1, "_geometry_memory_installed", False))
+            dlg1.resize(760, 700)
+            dlg1.show()
+            self.app.processEvents()
+            size1 = (dlg1.width(), dlg1.height())
+            dlg1.close()
+            self.app.processEvents()
+            settings = win._geometry_settings
+            settings.sync()
+            self.assertTrue(settings.contains(_geometry_key(dlg1)))
+            getattr(win, opener_name)()
+            self.assertEqual(len(captured), 2)
+            dlg2 = captured[1]
+            self._windows.append(dlg2)
+            self.assertEqual((dlg2.width(), dlg2.height()), size1)
+            dlg2.close()
+            self.app.processEvents()
+        finally:
+            setattr(main, class_name, dialog_cls)
+
+    def test_settings_dialog_round_trip_via_opener(self):
+        self._opener_dialog_round_trip("open_settings", "SettingsDialog")
+
+    def test_bench_dialog_round_trip_via_opener(self):
+        self._opener_dialog_round_trip("open_bench", "BenchDialog")
 
 
 
@@ -43803,6 +46025,9 @@ class DebugWindowTests(unittest.TestCase):
 
     def test_window_starts_steps_and_inspects_the_session(self):
         win = self.win.debug_win
+        # B14: the room no longer preselects a file (U6) — the
+        # owner picks the row, then starts.
+        win.debug_file_list.setCurrentRow(0)
         win.debug_bp_edit.setPlainText("7")
         win._start_debug()
         self.assertTrue(self._pump_until(
@@ -43864,6 +46089,60 @@ class DebugWindowTests(unittest.TestCase):
             self.win._run_thread = None
         self.assertIn("run is live", text)
         self.assertFalse(self.win.debug_session_live())
+
+    # ---------- B14: the debugger starts the file the owner picked
+
+    def test_refresh_preselects_nothing_and_debug_stays_unarmed(self):
+        (self.root / "crash.py").write_text(
+            "x = 1\ny = 2\nz = x + y\nprint(z)\n", encoding="utf-8")
+        win = self.win.debug_win
+        win.refresh()
+        self.assertGreaterEqual(win.debug_file_list.count(), 2)
+        self.assertEqual(win.debug_file_list.currentRow(), -1)
+        self.assertIsNone(win.selected_entry())
+        self.assertFalse(win.debug_start_btn.isEnabled())
+
+    def test_focus_alone_does_not_arm_the_first_file(self):
+        # A DebugWindow of its own: showing the shared one would
+        # change its close() behaviour for the tests after this
+        # one (a shown-then-closed window stops receiving
+        # closeEvent until it is shown again).
+        from forge.main import DebugWindow
+        win = DebugWindow(self.win)
+        win.refresh()
+        win.show()
+        self.app.processEvents()
+        win.debug_file_list.setFocus()
+        self.app.processEvents()
+        self.assertEqual(win.debug_file_list.currentRow(), -1)
+        self.assertFalse(win.debug_start_btn.isEnabled())
+        win.close()
+
+    def test_picked_file_is_the_session_target(self):
+        (self.root / "crash.py").write_text(
+            "x = 1\ny = 2\nz = x + y\nprint(z)\n", encoding="utf-8")
+        win = self.win.debug_win
+        win.refresh()
+        rows = [win.debug_file_list.item(i).text()
+                for i in range(win.debug_file_list.count())]
+        self.assertIn("crash.py", rows)
+        win.debug_file_list.setCurrentRow(rows.index("crash.py"))
+        self.assertTrue(win.debug_start_btn.isEnabled())
+        win._start_debug()
+        # The start lands on the window's control thread — pump
+        # until the session exists instead of reading it
+        # synchronously (an unpumped read races the thread and,
+        # worse, leaves the in-flight start to land inside
+        # whichever test runs next).
+        self.assertTrue(self._pump_until(
+            lambda: self.win._debug_session is not None))
+        session = self.win._debug_session
+        self.assertIsNotNone(session)
+        self.assertEqual(session.target.name, "crash.py")
+        self._pump_until(lambda: win.debug_status.text() == "stopped")
+        self.assertEqual(win.debug_status.text(), "stopped")
+        self.assertIn("crash.py:1", win.debug_location.text())
+        win.close()
 
 
 class MonitorClassifierTests(unittest.TestCase):
@@ -46122,7 +48401,17 @@ class TestingWindowTests(unittest.TestCase):
         self.assertIn("No test command is configured",
                       view.test_source_label.text())
         self.assertEqual(view.test_command_edit.text(), "")
-        self.assertFalse(view.test_run_btn.isEnabled())
+        # B21: Run tests stays pressable with an empty field — a
+        # disabled button was a silent dead end (the live test
+        # clicked it and nothing at all happened). Pressing it
+        # answers in plain words and starts nothing.
+        self.assertTrue(view.test_run_btn.isEnabled())
+        view._run_tests()
+        self.assertIn("Type a test command above first",
+                      view.test_status_label.text())
+        self.assertEqual(view.run_log.history, [])
+        self.assertIsNone(view.run_log.current)
+        self.assertEqual(self.win.settings.get("verify_commands"), [])
         view.test_command_edit.setText("python3 -m pytest -q")
         view.test_command_edit.textEdited.emit("python3 -m pytest -q")
         self.assertTrue(view.test_run_btn.isEnabled())
@@ -46743,6 +49032,142 @@ class ResizablePanelsTests(unittest.TestCase):
         builder = wins[-2]
         self.assertEqual(builder.canvas.width(), builder.design["width"])
         self.assertEqual(builder.canvas.height(), builder.design["height"])
+
+
+class WriteCanvasPersistenceTests(unittest.TestCase):
+    """B28b: the Write room's canvas split (session / document /
+    suggestions) shipped with fixed start sizes and no persistence
+    at all — the main window's panels round-trip through
+    layout_panel_sizes, but a drag on the canvas split snapped
+    back on the next launch. The split now saves through
+    forge/layout.py's canvas helpers (layout_canvas_sizes) with
+    the same debounce + deferred-restore discipline, and steps
+    aside entirely for owners without a settings dict."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        cls._saved_key = cls.win.settings.get("layout_canvas_sizes")
+        cls.win.settings.pop("layout_canvas_sizes", None)
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._saved_key is None:
+            cls.win.settings.pop("layout_canvas_sizes", None)
+        else:
+            cls.win.settings["layout_canvas_sizes"] = cls._saved_key
+        cls.win.save_settings()
+        cls.win.close()
+
+    def setUp(self):
+        self.win.settings.pop("layout_canvas_sizes", None)
+
+    def _pump_until(self, predicate, timeout=5.0):
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            self.app.processEvents()
+            if predicate():
+                return True
+            _time.sleep(0.01)
+        return predicate()
+
+    # ---------- the layout helpers (pure) ----------
+
+    def test_canvas_sizes_default_without_the_key(self):
+        from forge import layout as layout_mod
+        self.assertEqual(layout_mod.read_canvas_sizes({}),
+                         [300, 560, 300])
+        self.assertEqual(layout_mod.read_canvas_sizes(None),
+                         [300, 560, 300])
+
+    def test_canvas_sizes_sanitize_and_clamp(self):
+        from forge import layout as layout_mod
+        self.assertEqual(
+            layout_mod.read_canvas_sizes(
+                {"layout_canvas_sizes": [10, 99999, "wide"]}),
+            [300, 560, 300])
+        self.assertEqual(
+            layout_mod.read_canvas_sizes(
+                {"layout_canvas_sizes": [10, 700, 5000]}),
+            [120, 700, 1200])
+        self.assertEqual(
+            layout_mod.read_canvas_sizes(
+                {"layout_canvas_sizes": [250, 700]}),
+            [300, 560, 300])
+
+    def test_canvas_sizes_write_read_round_trip(self):
+        from forge import layout as layout_mod
+        settings = {"unrelated": 1}
+        layout_mod.write_canvas_sizes(settings, [420, 640, 260])
+        self.assertEqual(settings["layout_canvas_sizes"], [420, 640, 260])
+        self.assertEqual(settings["unrelated"], 1)
+        self.assertEqual(layout_mod.read_canvas_sizes(settings),
+                         [420, 640, 260])
+        # A junk write keeps the stored pair rather than resetting.
+        layout_mod.write_canvas_sizes(settings, "junk")
+        self.assertEqual(settings["layout_canvas_sizes"], [420, 640, 260])
+
+    # ---------- the window wiring ----------
+
+    def test_drag_saves_and_a_fresh_window_restores(self):
+        from forge.main import WriteWindow
+        win = self.win
+        w1 = win.mode_windows["write"]
+        w1.show()
+        self.assertTrue(self._pump_until(
+            lambda: w1.canvas_splitter.width() >= w1.width() - 40))
+        # Arrangement, not the behaviour under test: the session
+        # page comes out of the tab widget hidden (pre-existing —
+        # the splitter gives a hidden column 0 px), and the
+        # offscreen window is too narrow for the columns' minimum
+        # hints. Show the column and widen the window (a real
+        # 1366 px screen fits the Write room at 1160) so all three
+        # columns are live at draggable widths.
+        w1.canvas_splitter.widget(0).show()
+        w1.resize(1400, 700)
+        self.assertTrue(self._pump_until(
+            lambda: w1.canvas_splitter.width() > 1000))
+        total = sum(w1.canvas_splitter.sizes())
+        w1.canvas_splitter.setSizes([420, total - 420 - 260, 260])
+        self.assertTrue(self._pump_until(
+            lambda: w1.canvas_splitter.sizes()[0] == 420
+            and w1.canvas_splitter.sizes()[2] == 260))
+        # A drag fires splitterMoved (setSizes alone does not);
+        # the debounced save then lands the widths in settings.
+        w1.canvas_splitter.splitterMoved.emit(420, 0)
+        self.assertTrue(self._pump_until(
+            lambda: win.settings.get("layout_canvas_sizes") is not None))
+        saved = win.settings["layout_canvas_sizes"]
+        self.assertEqual(saved[0], 420)
+        self.assertEqual(saved[2], w1.canvas_splitter.sizes()[2])
+        # A fresh Write window (the next launch's room) restores
+        # the side columns; the document column takes the rest.
+        # Widened before its first pump so the deferred restore
+        # sees a splitter the saved widths fit.
+        w2 = WriteWindow(win, "write")
+        w2.canvas_splitter.widget(0).show()
+        w2.resize(1400, 700)
+        w2.show()
+        self.assertTrue(self._pump_until(
+            lambda: w2.canvas_splitter.sizes()[0] == 420
+            and w2.canvas_splitter.sizes()[2] == saved[2]))
+        w2.close()
+        w1.hide()
+
+    def test_bare_owner_steps_aside(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import WriteWindow
+        owner = QWidget()
+        owner.workspace = self.win.workspace
+        win = WriteWindow(owner, "write")
+        self.assertIsNone(win._canvas_settings())
+        win._save_canvas_sizes()          # must not raise
+        win._apply_canvas_sizes()         # must not raise
+        win.close()
 
 
 class DesignCanvasModelTests(unittest.TestCase):
@@ -48459,6 +50884,7 @@ class FoldCapTests(unittest.TestCase):
 
     def test_still_over_budget_says_so_once_and_gauge_stays_honest(self):
         from forge import context as ctx
+        from forge import worker as worker_mod
         self.win.messages = self._fat_history()
         self.win.input.setPlainText("next question")
         self.win.send_message()
@@ -48468,8 +50894,12 @@ class FoldCapTests(unittest.TestCase):
         self.assertIn("The turn runs anyway", lines[0])
         self.assertIn("fresh conversation", lines[0])
         # The gauge reads the post-fold estimate honestly.
-        parts = ctx.breakdown(self.win.messages,
-                              self.win._context_schemas())
+        # R3-02: its tools part is the OFFERED surface (the
+        # worker's P0a trim), the accounting the worker uses.
+        offered, _held = worker_mod.trim_schemas_for_budget(
+            self.win._context_schemas(), self.win.messages,
+            self.win._resolve_budget(self.MODEL))
+        parts = ctx.breakdown(self.win.messages, offered)
         est = parts["system"] + parts["history"] + parts["tools"]
         self.assertTrue(self.win.ctx_text.text().startswith(
             f"~{est:,}"), self.win.ctx_text.text())
@@ -52245,9 +54675,17 @@ class StableToolSurfaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             log = _FakeEventLog()
             client = _BudgetClient()
+            # Window 2000 -> 1600 (8K LOAD build, 2026-11-19): the
+            # description slim took the configured surface here
+            # from 1,536 to 1,161 estimated tokens, so at 2,000 the
+            # mid-turn fold could suddenly free enough room at
+            # cycle 1 and the wrap-up closed one generation late.
+            # At 1,600 the same relationships hold as the day this
+            # fixture was measured: cycle 0 offered, cycle 1
+            # closed, one tool hit, stop logged.
             worker = AgentWorker(client, "fake",
                                  [{"role": "user", "content": "go"}],
-                                 {"num_ctx": 2000}, td,
+                                 {"num_ctx": 1600}, td,
                                  extra_tools=extra, eventlog=log)
             finished = []
             worker.finished_text.connect(
@@ -60212,8 +62650,13 @@ class PresendWindowLoggingTests(unittest.TestCase):
         win = self.win
         win.settings["scan_before_cloud_send"] = True
 
-        class _FakeSettings:
+        class _FakeSettings(QDialog):
+            # A real QDialog since C10: open_settings installs
+            # geometry memory on the dialog it opens, and the
+            # memory filter parents itself to the dialog — a
+            # plain object cannot take either.
             def __init__(self, parent, settings):
+                super().__init__(parent)
                 self._values = dict(settings)
                 self._values["scan_before_cloud_send"] = False
                 # A loopback URL: an empty/missing one earns the
@@ -62028,9 +64471,13 @@ class HomeworkBudgetGuardTests(unittest.TestCase):
     1.0, over the 0.90 fraction from cycle 1). Fill math, measured
     with the tree's own estimators (CHARS_PER_TOKEN is 3.5, not 4
     — the first fixture used 4 and tripped at cycle 0): user 11 +
-    fat 1,206 (4,200 chars) + Plan schemas 678 = 1,895 / 2,000 =
-    0.947 at cycle 0; one read adds ~30, so cycle 1 sits at ~0.96
-    and trips."""
+    fat 1,349 (4,700 chars) + Plan schemas 509 = 1,869 / 2,000 =
+    0.93 at cycle 0; one read adds ~30, so cycle 1 sits at ~0.95
+    and trips. (Fat 4,200 -> 4,700 chars and the schema figure
+    updated 2026-11-19 for the 8K LOAD build: the description
+    slim took the Plan surface from 678 to 509 estimated tokens,
+    so the old fat left cycle 0 at 0.86 and the guard never
+    tripped.)"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -62056,7 +64503,7 @@ class HomeworkBudgetGuardTests(unittest.TestCase):
         w.status.connect(statuses.append)
         return w, log, statuses
 
-    def _fat_messages(self, chars=4200):
+    def _fat_messages(self, chars=4700):
         return [{"role": "user", "content": "make a cat game"},
                 {"role": "assistant", "content": "A" * chars}]
 
@@ -62112,6 +64559,126 @@ class HomeworkBudgetGuardTests(unittest.TestCase):
         self.assertIn("src/demo.py", outcome["reads"])
         self.assertNotIn("homework_budget_stop", log.kinds())
         self.assertNotIn("context_budget_stop", log.kinds())
+
+
+class HomeworkTimeBudgetTests(unittest.TestCase):
+    """Homework time budget (2026-11-19, live-model finding B2):
+    the Plan/Research homework pass shares the turn's generation
+    clock but had no time guard of its own, so five slow reading
+    rounds ate the whole 30-minute turn cap and the draft never
+    started. The pass now stops reading at half the turn timeout
+    and ends with outcome "notes", the same shape as the
+    context-budget stop in HomeworkBudgetGuardTests. No turn
+    timeout (None) means no homework cap either. These tests call
+    _homework_phase directly and move the generation clock by
+    hand: _turn_gen_seconds is the exact counter the guard reads."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "src").mkdir()
+        (self.root / "src" / "demo.py").write_text(
+            "def existing_fn():\n    return 1\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _worker(self, client, **kw):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        statuses = []
+        w = AgentWorker(
+            client, "fake-model",
+            [{"role": "user", "content": "make a cat game"}],
+            {"num_ctx": 2000, "num_predict": 512},
+            str(self.root),
+            permissions={"rules": [], "mode": "plan", "classes": {}},
+            planning=True, eventlog=log, **kw)
+        w.approval_needed.connect(lambda *a: w.resolve_approval(True))
+        w.status.connect(statuses.append)
+        return w, log, statuses
+
+    def _slow_generate(self, w, seconds_per_call):
+        """Wrap the worker's _generate so each generation also
+        advances the turn's generation clock by a fixed amount:
+        the shape of a slow CPU reading round."""
+        real_generate = w._generate
+
+        def generate(*args, **kwargs):
+            result = real_generate(*args, **kwargs)
+            w._turn_gen_seconds += seconds_per_call
+            return result
+
+        w._generate = generate
+
+    def test_time_stop_breaks_homework_past_half_the_turn_timeout(self):
+        # A 10-minute turn cap gives homework 300 seconds; each
+        # reading round burns 100, so three rounds run and the
+        # fourth cycle stops on the clock, not the cycle cap.
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+        ] * 12)
+        w, log, statuses = self._worker(client, turn_timeout_minutes=10)
+        self._slow_generate(w, 100.0)
+        outcome = w._homework_phase("plan")
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertIn("homework_time_stop", log.kinds())
+        self.assertNotIn("homework_budget_stop", log.kinds())
+        # What was read before the stop stays recorded, and the
+        # homework record still lands (the caller drafts from it).
+        self.assertIn("src/demo.py", outcome["reads"])
+        notes = [m["content"] for m in w.messages
+                 if m.get("role") == "system"
+                 and m["content"].startswith("[Homework")]
+        self.assertEqual(len(notes), 1)
+        # The owner is told plainly what happened.
+        self.assertTrue(any("Drafting with what I have read" in s
+                            for s in statuses), statuses)
+
+    def test_time_stop_before_first_generation_when_half_spent(self):
+        # Half the cap already burned by earlier generations of
+        # the turn: the pass stops before its first read.
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY"},
+        ])
+        w, log, statuses = self._worker(client, turn_timeout_minutes=10)
+        w._turn_gen_seconds = 300.0
+        outcome = w._homework_phase("plan")
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertEqual(outcome["reads"], [])
+        self.assertIn("homework_time_stop", log.kinds())
+
+    def test_homework_under_the_cap_completes_normally(self):
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY"},
+        ])
+        w, log, statuses = self._worker(client, turn_timeout_minutes=10)
+        outcome = w._homework_phase("plan")
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertEqual(outcome["text"], "READY")
+        self.assertIn("src/demo.py", outcome["reads"])
+        self.assertNotIn("homework_time_stop", log.kinds())
+
+    def test_no_turn_timeout_means_no_homework_time_cap(self):
+        client = _PlanClient([
+            {"tool": "read_file", "args": {"path": "src/demo.py"}},
+            {"content": "READY"},
+        ])
+        w, log, statuses = self._worker(client, turn_timeout_minutes=0)
+        self.assertIsNone(w._turn_timeout_seconds)
+        # An absurd clock reading must not stop the pass: with no
+        # turn cap there is no homework cap either.
+        w._turn_gen_seconds = 10 ** 9
+        outcome = w._homework_phase("plan")
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(outcome["outcome"], "notes")
+        self.assertIn("src/demo.py", outcome["reads"])
+        self.assertNotIn("homework_time_stop", log.kinds())
 
 
 class TurnTimeoutTests(unittest.TestCase):
@@ -62202,6 +64769,259 @@ class TurnTimeoutTests(unittest.TestCase):
         self.assertTrue(any(a.startswith("Stopped here.") for a in answers),
                         answers)
         self.assertTrue(finished)
+
+
+class GenerationWatchdogTests(unittest.TestCase):
+    """Prompt-eval watchdog (2026-11-19, P1): the turn timeout's
+    per-event check only runs when a stream event arrives, so a
+    generation that produces NO events — a model stuck in prompt
+    evaluation, a stalled connection — sat silent for 40 minutes
+    in the 2026-11-15 incident while the cap never fired. A
+    watchdog thread now watches the same clock during every
+    capped generation and sets the same cancel triple; the
+    client's cancel watch breaks the blocked read and the turn
+    settles on the timeout line. No test drives the clock with
+    sleeps: the generation clock is moved by hand (the homework
+    pattern — _turn_gen_seconds is the exact counter the guard
+    reads) or the stream blocks on events the test itself
+    controls."""
+
+    def _worker(self, client=None, **kw):
+        from forge.worker import AgentWorker
+        log = _FakeEventLog()
+        w = AgentWorker(
+            client or _BatchClient([]), "fake",
+            [{"role": "user", "content": "go"}], {},
+            tempfile.mkdtemp(), eventlog=log, **kw)
+        return w, log
+
+    def _watchdog_threads(self):
+        import threading
+        return [t for t in threading.enumerate()
+                if t.name == "forge-generation-watchdog"
+                and t.is_alive()]
+
+    def _await_no_watchdogs(self):
+        import time
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if not self._watchdog_threads():
+                return
+            time.sleep(0.01)
+        self.fail("generation watchdog thread did not stand down")
+
+    def test_silent_generation_is_cancelled_by_the_watchdog(self):
+        import threading
+
+        class _SilentClient:
+            """Accepts the cancel event like the real client, then
+            never produces an event: the stream blocks until the
+            cancel event fires and ends as a clean EOF — a model
+            stuck in prompt evaluation, broken by the cancel
+            watch. The bounded wait is only a safety valve: the
+            cancel assertions below are what prove the watchdog
+            fired."""
+
+            def __init__(self):
+                self.entered = threading.Event()
+                self.seen_cancel_event = None
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None, cancel_event=None):
+                self.seen_cancel_event = cancel_event
+                self.entered.set()
+                if cancel_event is not None:
+                    cancel_event.wait(10)
+                return
+                yield  # a generator function that yields nothing
+
+        client = _SilentClient()
+        w, _log = self._worker(client)
+        # The turn's earlier generations already burned past the
+        # cap, so this generation is overdue from its first
+        # instant — yet no event will ever arrive to trip the
+        # per-event check.
+        w._turn_timeout_seconds = 30
+        w._turn_gen_seconds = 31.0
+        text, tool_calls = w._generate([], phase="main")
+        self.assertTrue(client.entered.is_set())
+        self.assertIsNotNone(client.seen_cancel_event)
+        self.assertTrue(w._timed_out)
+        self.assertTrue(w._cancel)
+        self.assertTrue(w._cancel_event.is_set())
+        self.assertEqual(text, "")
+        self.assertEqual(tool_calls, [])
+        # The watchdog stood down once the generation ended.
+        self._await_no_watchdogs()
+
+    def test_silent_stream_turn_ends_on_the_timeout_line(self):
+        class _SilentClient:
+            """On entry the turn's generation clock is already
+            past the cap (earlier work in the turn was slow);
+            after that the stream goes silent — no event ever
+            arrives for the per-event check to trip on."""
+
+            def __init__(self):
+                self.worker = None
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None, cancel_event=None):
+                self.worker._turn_gen_seconds = 10 ** 6
+                if cancel_event is not None:
+                    cancel_event.wait(10)
+                return
+                yield
+
+        client = _SilentClient()
+        w, log = self._worker(client, turn_timeout_minutes=1)
+        client.worker = w
+        finished = []
+        w.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        w.run()
+        self.assertTrue(w._timed_out)
+        self.assertIn("turn_timeout", log.kinds())
+        answers = [m.get("content", "") for m in w.messages
+                   if m.get("role") == "assistant"]
+        self.assertTrue(any("thinking time" in a for a in answers),
+                        answers)
+        self.assertTrue(any(a.startswith("Stopped here.") for a in answers),
+                        answers)
+        self.assertTrue(finished)
+        self._await_no_watchdogs()
+
+    def test_streaming_generation_is_untouched(self):
+        class _TextClient:
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None, cancel_event=None):
+                yield {"message": {"content": "hello",
+                                   "tool_calls": []}}
+                yield {"message": {"content": "", "tool_calls": []},
+                       "done": True, "prompt_eval_count": 9,
+                       "eval_count": 5,
+                       "eval_duration": 1000000000}
+
+        w, log = self._worker(_TextClient(), turn_timeout_minutes=1)
+        statuses = []
+        w.status.connect(statuses.append)
+        finished = []
+        w.finished_text.connect(
+            lambda text, msgs: finished.append(text))
+        w.run()
+        self.assertFalse(w._timed_out)
+        self.assertFalse(w._cancel)
+        self.assertNotIn("turn_timeout", log.kinds())
+        answers = [m.get("content", "") for m in w.messages
+                   if m.get("role") == "assistant"]
+        self.assertTrue(any("hello" in a for a in answers), answers)
+        self.assertTrue(finished)
+        # A fast generation stays silent (no progress, no
+        # heartbeat) and leaves no watchdog behind.
+        self.assertFalse(any("tok/s" in s for s in statuses), statuses)
+        self._await_no_watchdogs()
+
+    def test_no_cap_means_no_watchdog(self):
+        import threading
+
+        class _BlockedClient:
+            """Blocks until the test releases it, then answers."""
+
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def chat_stream(self, model, messages, options, schemas,
+                            keep_alive=None, cancel_event=None):
+                self.entered.set()
+                self.release.wait(10)
+                yield {"message": {"content": "done at last",
+                                   "tool_calls": []}}
+                yield {"message": {"content": "", "tool_calls": []},
+                       "done": True}
+
+        client = _BlockedClient()
+        w, _log = self._worker(client, turn_timeout_minutes=0)
+        self.assertIsNone(w._turn_timeout_seconds)
+        before = len(self._watchdog_threads())
+        thread = threading.Thread(target=w.run, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(client.entered.wait(10))
+            # Mid-generation with the cap off: no watchdog was
+            # started for this generation and nothing has touched
+            # the cancel state, however quiet the stream stays.
+            self.assertLessEqual(len(self._watchdog_threads()), before)
+            self.assertFalse(w._timed_out)
+            self.assertFalse(w._cancel)
+            self.assertFalse(w._cancel_event.is_set())
+        finally:
+            client.release.set()
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        answers = [m.get("content", "") for m in w.messages
+                   if m.get("role") == "assistant"]
+        self.assertTrue(any("done at last" in a for a in answers),
+                        answers)
+        self.assertFalse(w._timed_out)
+
+    def test_stall_heartbeat_while_stream_is_quiet(self):
+        import threading
+        import time
+        w, _log = self._worker(turn_timeout_minutes=30)
+        # The progress emit itself is pinned by
+        # GenerationProgressTests; here it is recorded instead of
+        # connected, because a signal emitted from the watchdog
+        # thread to a slot on this thread is queued for an event
+        # loop this test does not run.
+        emitted = []
+        heard = threading.Event()
+
+        def record_progress(phase, started, chars):
+            emitted.append((phase, chars))
+            heard.set()
+
+        w._emit_generation_progress = record_progress
+        now = time.time()
+        # A stream that spoke once, 30 seconds ago, and has been
+        # quiet since — well under the 30-minute cap.
+        state = {"last_event": now - 30.0, "chars": 350,
+                 "progress": now - 30.0}
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=w._generation_watchdog,
+            args=(now - 30.0, "main", state, stop), daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(heard.wait(10))
+        finally:
+            stop.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(emitted[0], ("main", 350))
+        # A heartbeat is not a timeout: nothing was cancelled.
+        self.assertFalse(w._timed_out)
+        self.assertFalse(w._cancel)
+        self.assertFalse(w._cancel_event.is_set())
+
+    def test_watchdog_stands_down_on_owner_cancel(self):
+        import threading
+        import time
+        w, _log = self._worker(turn_timeout_minutes=1)
+        w._turn_gen_seconds = 10 ** 6  # overdue many times over
+        w._cancel = True  # the owner pressed Stop first
+        stop = threading.Event()
+        thread = threading.Thread(
+            target=w._generation_watchdog,
+            args=(time.time(), "main",
+                  {"last_event": 0.0, "chars": 0, "progress": 0.0},
+                  stop),
+            daemon=True)
+        thread.start()
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        # The watchdog saw the owner's cancel and left the turn to
+        # the plain stop path: no timeout flag was set.
+        self.assertFalse(w._timed_out)
 
 
 class DigestScalingTests(unittest.TestCase):
@@ -62519,3 +65339,2382 @@ class DeepAudit47PluginTests(unittest.TestCase):
                         lambda req, timeout=None: fake):
             out = hf.hf_search_models({"query": "forge", "limit": "3"}, ctx)
         self.assertIn("- a/b", out)
+
+
+class CorruptDbQuarantineTests(unittest.TestCase):
+    """Audit P0-2: a corrupt conversations database used to brick
+    startup (the first CREATE TABLE raised DatabaseError uncaught).
+    The store now quarantines the unreadable file to <name>.corrupt
+    and starts fresh, mirroring the settings file (Sweep R40)."""
+
+    def test_garbage_db_quarantined_and_store_starts_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.sqlite3"
+            garbage = b"this is not a database at all" * 40
+            path.write_bytes(garbage)
+            store = ConversationStore(path)
+            aside = Path(tmp) / "history.sqlite3.corrupt"
+            self.assertTrue(aside.exists())
+            self.assertEqual(aside.read_bytes(), garbage)
+            messages = [{"role": "user", "content": "hello"},
+                        {"role": "assistant", "content": "world"}]
+            cid = store.save(None, messages)
+            self.assertEqual(store.load(cid), messages)
+
+    def test_healthy_db_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.sqlite3"
+            messages = [{"role": "user", "content": "keep me"}]
+            first = ConversationStore(path)
+            cid = first.save(None, messages)
+            second = ConversationStore(path)
+            self.assertFalse(
+                Path(tmp, "history.sqlite3.corrupt").exists())
+            self.assertEqual(second.load(cid), messages)
+
+    def test_missing_db_created_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.sqlite3"
+            store = ConversationStore(path)
+            self.assertTrue(path.exists())
+            self.assertFalse(
+                Path(tmp, "history.sqlite3.corrupt").exists())
+            messages = [{"role": "user", "content": "first"}]
+            cid = store.save(None, messages)
+            self.assertEqual(store.load(cid), messages)
+
+    def test_late_statement_failure_quarantined(self):
+        """The failure does not have to be the first statement: a
+        view named conversations passes CREATE TABLE IF NOT EXISTS
+        and only fails at the ALTER. The whole init is wrapped, so
+        it quarantines the same way."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("CREATE VIEW conversations AS SELECT 1 AS x")
+            db.commit()
+            db.close()
+            store = ConversationStore(path)
+            self.assertTrue(
+                Path(tmp, "history.sqlite3.corrupt").exists())
+            messages = [{"role": "user", "content": "recovered"}]
+            cid = store.save(None, messages)
+            self.assertEqual(store.load(cid), messages)
+
+    def test_reopen_after_quarantine_keeps_new_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.sqlite3"
+            garbage = b"broken beyond repair" * 40
+            path.write_bytes(garbage)
+            first = ConversationStore(path)
+            messages = [{"role": "user", "content": "new history"}]
+            cid = first.save(None, messages)
+            second = ConversationStore(path)
+            self.assertEqual(second.load(cid), messages)
+            aside = Path(tmp) / "history.sqlite3.corrupt"
+            self.assertEqual(aside.read_bytes(), garbage)
+
+
+
+class CustomizeDialogFitTests(unittest.TestCase):
+    """R3-04 (GUIFX Round 3): the Customize dialog fits the
+    screen. Its tab pages ride in scroll areas and the dialog
+    opens clamped to the usable screen, so Save and Cancel,
+    pinned below the tabs, are on screen on every tab."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _dialog(self, tmp):
+        from pathlib import Path
+        import forge.main as main_mod
+        from forge.skills import Skill
+        from forge.plugins import Plugin
+        base = Path(tmp)
+        skills = [Skill(name=f"skill-{i}",
+                        description=f"Does useful thing number {i} "
+                                    "for the project.",
+                        folder=base / f"skill-{i}")
+                  for i in range(12)]
+        plugins = []
+        for i in range(4):
+            plugins.append(Plugin(
+                pid=f"plug-{i}", name=f"Plug {i}", kind="plugin",
+                description=f"Plugin number {i}.",
+                folder=base / f"plug-{i}",
+                tools=[{"name": f"plug_tool_{i}_{j}"}
+                       for j in range(3)],
+                handlers={}))
+        for pid, label in (("github", "GitHub"),
+                           ("huggingface", "Hugging Face")):
+            plugins.append(Plugin(
+                pid=pid, name=label, kind="connector",
+                description=f"{label} connector.", folder=base / pid,
+                tools=[{"name": f"{pid}_search"}], handlers={}))
+        tools = [(f"tool_{i:02d}", "built-in") for i in range(45)]
+        return main_mod.CustomizeDialog(None, skills, plugins,
+                                        set(), set(), {},
+                                        tools=tools)
+
+    def _avail(self):
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    def test_opens_inside_available_screen(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            dlg = self._dialog(tmp)
+            try:
+                dlg.show()
+                self.app.processEvents()
+                avail = self._avail()
+                self.assertLessEqual(dlg.height(), avail.height())
+                self.assertLessEqual(dlg.frameGeometry().bottom(),
+                                     avail.bottom())
+                # The page wrap must not walk the open tab:
+                # the dialog opens on its first tab, as before.
+                from PySide6.QtWidgets import QTabWidget
+                self.assertEqual(
+                    dlg.findChild(QTabWidget).currentIndex(), 0)
+            finally:
+                dlg.close()
+
+    def test_save_cancel_on_screen_on_every_tab(self):
+        import tempfile
+        from PySide6.QtWidgets import QDialogButtonBox, QTabWidget
+        with tempfile.TemporaryDirectory() as tmp:
+            dlg = self._dialog(tmp)
+            try:
+                dlg.show()
+                self.app.processEvents()
+                avail = self._avail()
+                tabs = dlg.findChild(QTabWidget)
+                box = dlg.findChild(QDialogButtonBox)
+                buttons = (box.button(QDialogButtonBox.Save),
+                           box.button(QDialogButtonBox.Cancel))
+                for i in range(tabs.count()):
+                    tabs.setCurrentIndex(i)
+                    self.app.processEvents()
+                    for btn in buttons:
+                        top = btn.mapToGlobal(
+                            btn.rect().topLeft()).y()
+                        bottom = btn.mapToGlobal(
+                            btn.rect().bottomRight()).y()
+                        self.assertGreaterEqual(
+                            top, avail.top(),
+                            f"tab {i}: {btn.text()} above the screen")
+                        self.assertLessEqual(
+                            bottom, avail.bottom(),
+                            f"tab {i}: {btn.text()} below the screen")
+            finally:
+                dlg.close()
+
+    def test_tall_tabs_scroll_to_the_bottom(self):
+        import tempfile
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtWidgets import QScrollArea, QTabWidget
+        with tempfile.TemporaryDirectory() as tmp:
+            dlg = self._dialog(tmp)
+            try:
+                dlg.show()
+                self.app.processEvents()
+                tabs = dlg.findChild(QTabWidget)
+                # Skills (0) and Tools (3) are the tall tabs in
+                # this payload: each must scroll, and at the end
+                # of the scroll the page's bottom edge and its
+                # last control must be inside the viewport:
+                # nothing is cut off.
+                for idx, last_box in (
+                        (0, dlg._save_skill_box),
+                        (3, dlg._tool_boxes["tool_44"])):
+                    tabs.setCurrentIndex(idx)
+                    self.app.processEvents()
+                    scroll = tabs.widget(idx)
+                    self.assertIsInstance(scroll, QScrollArea)
+                    bar = scroll.verticalScrollBar()
+                    self.assertGreater(bar.maximum(), 0,
+                                       f"tab {idx} does not scroll")
+                    bar.setValue(bar.maximum())
+                    self.app.processEvents()
+                    page = scroll.widget()
+                    self.assertLessEqual(
+                        abs(bar.value()
+                            + scroll.viewport().height()
+                            - page.height()), 2,
+                        f"tab {idx}: page bottom not reachable")
+                    rect = QRect(
+                        last_box.mapTo(scroll.viewport(),
+                                       QPoint(0, 0)),
+                        last_box.size())
+                    self.assertTrue(
+                        scroll.viewport().rect().intersects(rect),
+                        f"tab {idx}: last control not visible at "
+                        "the scroll end")
+            finally:
+                dlg.close()
+
+    def test_no_scrollbar_when_the_dialog_has_room(self):
+        import tempfile
+        from PySide6.QtWidgets import QScrollArea, QTabWidget
+        with tempfile.TemporaryDirectory() as tmp:
+            dlg = self._dialog(tmp)
+            try:
+                dlg.show()
+                self.app.processEvents()
+                # Room taller than the content (a tall screen):
+                # resize past the natural height and no tab may
+                # need its scrollbar.
+                dlg.resize(dlg.width(), 1700)
+                self.app.processEvents()
+                tabs = dlg.findChild(QTabWidget)
+                for i in range(tabs.count()):
+                    tabs.setCurrentIndex(i)
+                    self.app.processEvents()
+                    scroll = tabs.widget(i)
+                    self.assertIsInstance(scroll, QScrollArea)
+                    self.assertEqual(
+                        scroll.verticalScrollBar().maximum(), 0,
+                        f"tab {i} scrolls despite room to fit")
+            finally:
+                dlg.close()
+
+
+class UiBuilderFitTests(unittest.TestCase):
+    """R3-06 (GUIFX Round 3): the UI builder dialog fits the
+    screen. The parts palette scrolls, so the dialog's minimum
+    no longer forces it past a 768 screen, and Export and
+    Close sit inside the frame."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        import tempfile
+        import forge.main as main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        self.dlg = main_mod.UiBuilderDialog(None, self.temp.name)
+        # The real app runs under STYLE (main() applies it to
+        # the application); the dialog's forced height is a
+        # styled-geometry fact, so the fit assertions must run
+        # under the same stylesheet. Scoped to the dialog: no
+        # global state leaks into other test classes.
+        self.dlg.setStyleSheet(main_mod.STYLE)
+
+    def tearDown(self):
+        if self.dlg._preview is not None:
+            self.dlg._preview.close()
+        self.dlg.close()
+        self.temp.cleanup()
+
+    def _avail(self):
+        from PySide6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    def test_opens_inside_available_screen(self):
+        self.dlg.show()
+        self.app.processEvents()
+        avail = self._avail()
+        self.assertLessEqual(self.dlg.height(), avail.height())
+        # 700 is the dialog's own chosen open height: on any
+        # screen at least that tall it must actually open there,
+        # not at the 1033 the palette minimum used to force.
+        self.assertLessEqual(self.dlg.height(), 700)
+
+    def test_export_close_and_properties_on_screen(self):
+        from PySide6.QtWidgets import QPushButton
+        self.dlg.show()
+        self.app.processEvents()
+        avail = self._avail()
+        by_text = {b.text(): b
+                   for b in self.dlg.findChildren(QPushButton)}
+        for widget in (by_text["Export .py…"], by_text["Close"],
+                       self.dlg.prop_name, self.dlg.prop_text,
+                       self.dlg.prop_delete):
+            bottom = widget.mapToGlobal(
+                widget.rect().bottomRight()).y()
+            self.assertLessEqual(
+                bottom, avail.bottom(),
+                f"{widget.text() or type(widget).__name__} sits "
+                "below the screen")
+
+    def test_palette_scrolls_and_last_part_reachable(self):
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtWidgets import QScrollArea
+        self.dlg.show()
+        self.app.processEvents()
+        btn = self.dlg._palette_btns["v_line"]
+        node = btn
+        while node is not None and not isinstance(node, QScrollArea):
+            node = node.parent()
+        self.assertIsNotNone(node, "palette is not in a scroll area")
+        scroll = node
+        bar = scroll.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0,
+                           "palette does not scroll")
+        bar.setValue(bar.maximum())
+        self.app.processEvents()
+        rect = QRect(btn.mapTo(scroll.viewport(), QPoint(0, 0)),
+                     btn.size())
+        self.assertTrue(scroll.viewport().rect().intersects(rect),
+                        "last palette part not visible at the "
+                        "scroll end")
+
+    def test_canvas_still_scrolls(self):
+        from PySide6.QtWidgets import QScrollArea
+        self.dlg.show()
+        self.app.processEvents()
+        areas = [a for a in self.dlg.findChildren(QScrollArea)
+                 if a.widget() is self.dlg.canvas]
+        self.assertEqual(len(areas), 1)
+        # A design taller than the body row must scroll inside
+        # the canvas area, exactly as before: drive the height
+        # through the dialog's own spin box.
+        self.dlg.height_spin.setValue(1200)
+        self.app.processEvents()
+        self.assertGreater(
+            areas[0].verticalScrollBar().maximum(), 0)
+
+
+class ResearchWindowFitTests(unittest.TestCase):
+    """R3-05 (GUIFX Round 3): the Research room fits the
+    screen. Its workflow page rides in a scroll area, so the
+    room opens at the ModeWindow size and the Report section
+    is reachable instead of sitting past the edge."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _window(self, tmp):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import ResearchWindow
+        owner = QWidget()
+        owner.workspace = tmp
+        win = ResearchWindow(owner, "research")
+        win._test_owner = owner
+        return win
+
+    def test_room_opens_at_the_mode_window_size(self):
+        import tempfile
+        from PySide6.QtGui import QGuiApplication
+        with tempfile.TemporaryDirectory() as tmp:
+            win = self._window(tmp)
+            try:
+                win.show()
+                self.app.processEvents()
+                screen = QGuiApplication.primaryScreen()
+                avail = screen.availableGeometry()
+                self.assertLessEqual(win.height(), avail.height())
+                # The ModeWindow base size, the size the other
+                # five rooms open at: the Research content's
+                # minimum no longer forces 963.
+                self.assertEqual(win.height(), 640)
+                self.assertLess(win.minimumSize().height(),
+                                avail.height())
+            finally:
+                win.close()
+
+    def test_report_and_followup_reachable_by_scrolling(self):
+        import tempfile
+        from PySide6.QtCore import QPoint, QRect
+        with tempfile.TemporaryDirectory() as tmp:
+            win = self._window(tmp)
+            try:
+                win.show()
+                self.app.processEvents()
+                scroll = win.research_scroll
+                bar = scroll.verticalScrollBar()
+                self.assertGreater(bar.maximum(), 0,
+                                   "research page does not scroll")
+                for widget in (win.report_editor,
+                               win.report_save_btn,
+                               win.followup_btn):
+                    scroll.ensureWidgetVisible(widget)
+                    self.app.processEvents()
+                    rect = QRect(
+                        widget.mapTo(scroll.viewport(),
+                                     QPoint(0, 0)),
+                        widget.size())
+                    self.assertTrue(
+                        scroll.viewport().rect().intersects(rect),
+                        f"{type(widget).__name__} not reachable "
+                        "by scrolling")
+            finally:
+                win.close()
+
+
+class _FakeHttpResponse:
+    """A urlopen stand-in's answer: a BytesIO body, dict headers,
+    a status, and the context-manager shape real urllib responses
+    carry."""
+
+    def __init__(self, body=b"", status=200, headers=None):
+        import io
+        self._buf = io.BytesIO(body)
+        self.status = status
+        self.headers = headers or {}
+
+    def read(self, size=-1):
+        return self._buf.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _release_payload(tag="v2.6", assets=None, body="What is new"):
+    if assets is None:
+        assets = [
+            {"name": "notes.zip",
+             "browser_download_url": "https://example.invalid/notes.zip",
+             "size": 10},
+            {"name": "CODE-FORGE-v2.6.zip",
+             "browser_download_url":
+                 "https://example.invalid/CODE-FORGE-v2.6.zip",
+             "size": 1234},
+            {"name": "CODE-FORGE-v2.6.zip.sha256",
+             "browser_download_url":
+                 "https://example.invalid/CODE-FORGE-v2.6.zip.sha256",
+             "size": 90},
+        ]
+    return json.dumps({
+        "tag_name": tag,
+        "html_url": "https://example.invalid/release",
+        "body": body, "assets": assets}).encode("utf-8")
+
+
+class AutoUpdateCheckTests(unittest.TestCase):
+    """Auto-update (2026-11-17 order), the check half: pure
+    functions in forge.update, driven through fake transports —
+    no network is ever touched."""
+
+    def _opener(self, payload):
+        return lambda url, timeout=None: _FakeHttpResponse(payload)
+
+    def test_parse_version_shapes(self):
+        from forge import update as upd
+        self.assertEqual(upd.parse_version("2.6"), (2, 6))
+        self.assertEqual(upd.parse_version("v2.6"), (2, 6))
+        self.assertEqual(upd.parse_version("2.6.1"), (2, 6, 1))
+        self.assertIsNone(upd.parse_version("v2.5-f11f13"))
+        self.assertIsNone(upd.parse_version("latest"))
+        self.assertIsNone(upd.parse_version(""))
+        self.assertIsNone(upd.parse_version(None))
+
+    def test_is_newer_is_numeric_not_lexicographic(self):
+        from forge import update as upd
+        self.assertTrue(upd.is_newer("2.6", "2.5"))
+        self.assertTrue(upd.is_newer("2.10", "2.9"))
+        self.assertFalse(upd.is_newer("2.9", "2.10"))
+        self.assertFalse(upd.is_newer("2.6", "2.6"))
+        self.assertFalse(upd.is_newer("2.6", "2.6.0"))
+        self.assertTrue(upd.is_newer("v3", "2.6"))
+        self.assertFalse(upd.is_newer("junk", "2.5"))
+        self.assertFalse(upd.is_newer("2.6", "junk"))
+
+    def test_check_newer_carries_the_downloadable_pair(self):
+        from forge import update as upd
+        result = upd.check_for_update(
+            "2.5", urlopen=self._opener(_release_payload()))
+        self.assertEqual(result["state"], "newer")
+        self.assertEqual(result["latest"], "2.6")
+        # The zip WITH a sidecar partner wins over the other zip.
+        self.assertEqual(result["zip"]["name"], "CODE-FORGE-v2.6.zip")
+        self.assertEqual(result["sidecar"]["name"],
+                         "CODE-FORGE-v2.6.zip.sha256")
+        self.assertEqual(result["notes"], "What is new")
+
+    def test_check_current_when_latest_is_not_newer(self):
+        from forge import update as upd
+        for tag, current in (("v2.6", "2.6"), ("v2.5", "2.6")):
+            result = upd.check_for_update(
+                current, urlopen=self._opener(_release_payload(tag=tag)))
+            self.assertEqual(result["state"], "current", tag)
+            self.assertEqual(result["reason"], "")
+
+    def test_check_unknown_on_network_failure(self):
+        import urllib.error
+        from forge import update as upd
+
+        def boom(url, timeout=None):
+            raise urllib.error.URLError("no route to host")
+
+        result = upd.check_for_update("2.5", urlopen=boom)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("could not reach GitHub", result["reason"])
+        self.assertIsNone(result["latest"])
+
+    def test_check_unknown_on_timeout(self):
+        from forge import update as upd
+
+        def slow(url, timeout=None):
+            raise TimeoutError("timed out")
+
+        result = upd.check_for_update("2.5", urlopen=slow)
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("timed out", result["reason"])
+
+    def test_check_unknown_on_malformed_json(self):
+        from forge import update as upd
+        result = upd.check_for_update(
+            "2.5", urlopen=self._opener(b"{not json"))
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("did not answer in a form", result["reason"])
+
+    def test_check_unknown_on_missing_tag(self):
+        from forge import update as upd
+        payload = json.dumps({"assets": []}).encode("utf-8")
+        result = upd.check_for_update(
+            "2.5", urlopen=self._opener(payload))
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("did not name a version", result["reason"])
+
+    def test_check_unknown_on_batch_suffix_tag(self):
+        # The pre-2.6 tags (v2.5-f11f13) are not plain versions:
+        # the check must say unknown, never guess an update.
+        from forge import update as upd
+        result = upd.check_for_update(
+            "2.5", urlopen=self._opener(
+                _release_payload(tag="v2.5-f11f13")))
+        self.assertEqual(result["state"], "unknown")
+        self.assertIn("did not look like a version", result["reason"])
+
+    def test_check_newer_without_assets_has_no_pair(self):
+        from forge import update as upd
+        result = upd.check_for_update(
+            "2.5", urlopen=self._opener(_release_payload(assets=[])))
+        self.assertEqual(result["state"], "newer")
+        self.assertIsNone(result["zip"])
+        self.assertIsNone(result["sidecar"])
+
+
+class _DownloadServer:
+    """Answers download_file's requests from a fixed body,
+    honoring Range the way a static file host does — or ignoring
+    it, when honor_range is False."""
+
+    def __init__(self, body, honor_range=True):
+        self.body = body
+        self.honor_range = honor_range
+        self.requests = []
+
+    def __call__(self, request, timeout=None):
+        self.requests.append(request)
+        range_header = request.headers.get("Range")
+        if self.honor_range and range_header:
+            start = int(range_header.split("=")[1].split("-")[0])
+            part = self.body[start:]
+            return _FakeHttpResponse(part, status=206, headers={
+                "Content-Range":
+                    f"bytes {start}-{len(self.body) - 1}/{len(self.body)}",
+                "Content-Length": str(len(part))})
+        return _FakeHttpResponse(
+            self.body, status=200,
+            headers={"Content-Length": str(len(self.body))})
+
+
+class AutoUpdateDownloadTests(unittest.TestCase):
+    """Auto-update, the download half: resumable, cancellable,
+    and honest about a short read."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.body = bytes(range(256)) * 3000  # 768,000 bytes
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_full_download_lands_and_reports_progress(self):
+        from forge import update as upd
+        server = _DownloadServer(self.body)
+        seen = []
+        dest = self.root / "rel" / "app.zip"
+        size = upd.download_file(
+            "https://example.invalid/app.zip", dest,
+            progress=lambda d, t: seen.append((d, t)),
+            urlopen=server)
+        self.assertEqual(size, len(self.body))
+        self.assertEqual(dest.read_bytes(), self.body)
+        self.assertEqual(seen[-1], (len(self.body), len(self.body)))
+        self.assertIsNone(server.requests[0].headers.get("Range"))
+
+    def test_resume_sends_range_and_appends(self):
+        from forge import update as upd
+        dest = self.root / "app.zip"
+        dest.write_bytes(self.body[:1000])
+        server = _DownloadServer(self.body)
+        size = upd.download_file(
+            "https://example.invalid/app.zip", dest, urlopen=server)
+        self.assertEqual(server.requests[0].headers.get("Range"),
+                         "bytes=1000-")
+        self.assertEqual(size, len(self.body))
+        self.assertEqual(dest.read_bytes(), self.body)
+
+    def test_server_ignoring_range_restarts_the_file(self):
+        from forge import update as upd
+        dest = self.root / "app.zip"
+        dest.write_bytes(b"stale partial content")
+        server = _DownloadServer(self.body, honor_range=False)
+        size = upd.download_file(
+            "https://example.invalid/app.zip", dest, urlopen=server)
+        self.assertEqual(size, len(self.body))
+        self.assertEqual(dest.read_bytes(), self.body)
+
+    def test_cancel_keeps_the_partial_for_the_next_try(self):
+        import threading
+        from forge import update as upd
+        server = _DownloadServer(self.body)
+        event = threading.Event()
+        dest = self.root / "app.zip"
+        with self.assertRaises(upd.DownloadCancelled):
+            upd.download_file(
+                "https://example.invalid/app.zip", dest,
+                progress=lambda d, t: event.set(),
+                cancel_event=event, urlopen=server)
+        partial = dest.read_bytes()
+        self.assertEqual(len(partial), 1024 * 256)
+        self.assertEqual(partial, self.body[:1024 * 256])
+
+    def test_early_end_is_an_error_not_a_silent_short_file(self):
+        from forge import update as upd
+
+        def short_server(request, timeout=None):
+            return _FakeHttpResponse(
+                self.body[:100], status=200, headers={
+                    "Content-Length": str(len(self.body))})
+
+        with self.assertRaises(upd.UpdateError) as ctx:
+            upd.download_file("https://example.invalid/app.zip",
+                              self.root / "app.zip",
+                              urlopen=short_server)
+        self.assertIn("ended early", str(ctx.exception))
+
+    def test_download_timeout_is_plain_words(self):
+        from forge import update as upd
+
+        def slow(request, timeout=None):
+            raise TimeoutError("timed out")
+
+        with self.assertRaises(upd.UpdateError) as ctx:
+            upd.download_file("https://example.invalid/app.zip",
+                              self.root / "app.zip", urlopen=slow)
+        self.assertIn("timed out", str(ctx.exception))
+
+
+class AutoUpdatePendingTests(unittest.TestCase):
+    """Auto-update, the deferred half: the pending record and
+    its next-launch re-verification."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.data = self.root / "data"
+        self.zip_path = self.root / "CODE-FORGE-v2.6.zip"
+        self.zip_path.write_bytes(b"the update zip")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _record(self, **overrides):
+        from forge import update as upd
+        record = upd.make_pending_record(
+            self.zip_path, upd._hash_file(self.zip_path), "2.6")
+        record.update(overrides)
+        return record
+
+    def _apply(self, current="2.5"):
+        from unittest import mock
+        from forge import update as upd
+        spawns = []
+        with mock.patch.object(
+                upd, "spawn_updater",
+                lambda *a, **k: spawns.append(a)):
+            result = upd.apply_pending_update(
+                self.root, self.data, current)
+        return result, spawns
+
+    def test_record_round_trips(self):
+        from forge import update as upd
+        record = self._record()
+        upd.write_pending_update(self.data, record)
+        back = upd.read_pending_update(self.data)
+        self.assertEqual(back["zip"], str(self.zip_path))
+        self.assertEqual(back["sha256"], record["sha256"])
+        self.assertEqual(back["version"], "2.6")
+        upd.clear_pending_update(self.data)
+        self.assertIsNone(upd.read_pending_update(self.data))
+
+    def test_no_record_is_a_quiet_none(self):
+        result, spawns = self._apply()
+        self.assertEqual(result["status"], "none")
+        self.assertEqual(spawns, [])
+
+    def test_verified_record_applies_and_clears(self):
+        from forge import update as upd
+        upd.write_pending_update(self.data, self._record())
+        result, spawns = self._apply()
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(len(spawns), 1)
+        self.assertEqual(spawns[0][2], str(self.zip_path))
+        self.assertIsNone(upd.read_pending_update(self.data))
+
+    def test_tampered_zip_is_dropped_never_installed(self):
+        from forge import update as upd
+        upd.write_pending_update(self.data, self._record())
+        self.zip_path.write_bytes(b"a swapped zip")
+        result, spawns = self._apply()
+        self.assertEqual(result["status"], "dropped")
+        self.assertIn("no longer matches", result["reason"])
+        self.assertEqual(spawns, [])
+        self.assertIsNone(upd.read_pending_update(self.data))
+
+    def test_stale_record_is_dropped(self):
+        from forge import update as upd
+        upd.write_pending_update(self.data, self._record())
+        result, spawns = self._apply(current="2.6")
+        self.assertEqual(result["status"], "dropped")
+        self.assertIn("no longer newer", result["reason"])
+        self.assertEqual(spawns, [])
+
+    def test_missing_zip_is_dropped(self):
+        from forge import update as upd
+        upd.write_pending_update(self.data, self._record())
+        self.zip_path.unlink()
+        result, spawns = self._apply()
+        self.assertEqual(result["status"], "dropped")
+        self.assertEqual(spawns, [])
+
+    def test_incomplete_record_is_dropped(self):
+        from forge import update as upd
+        upd.write_pending_update(self.data, {"zip": str(self.zip_path)})
+        result, spawns = self._apply()
+        self.assertEqual(result["status"], "dropped")
+        self.assertEqual(spawns, [])
+
+    def test_spawn_failure_keeps_the_record(self):
+        from unittest import mock
+        from forge import update as upd
+        upd.write_pending_update(self.data, self._record())
+
+        def no_spawn(*a, **k):
+            raise OSError("updater missing")
+
+        with mock.patch.object(upd, "spawn_updater", no_spawn):
+            result = upd.apply_pending_update(self.root, self.data, "2.5")
+        self.assertEqual(result["status"], "error")
+        self.assertIsNotNone(upd.read_pending_update(self.data))
+
+
+class AutoUpdateThreadTests(unittest.TestCase):
+    """Auto-update, the two worker threads: run() driven directly
+    (no event loop needed — the signals connect straight to the
+    recorders), with the network and the disk seams stubbed."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_check_thread_emits_the_check_dict(self):
+        from forge.main import UpdateCheckThread
+        thread = UpdateCheckThread(
+            "2.5",
+            urlopen=lambda url, timeout=None:
+                _FakeHttpResponse(_release_payload()))
+        got = []
+        thread.done.connect(got.append)
+        thread.run()
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["state"], "newer")
+        self.assertEqual(got[0]["latest"], "2.6")
+
+    def test_check_thread_turns_a_crash_into_unknown(self):
+        from unittest import mock
+        import forge.update as upd
+        from forge.main import UpdateCheckThread
+        thread = UpdateCheckThread("2.5")
+        got = []
+        thread.done.connect(got.append)
+        with mock.patch.object(upd, "check_for_update",
+                               side_effect=RuntimeError("boom")):
+            thread.run()
+        self.assertEqual(got[0]["state"], "unknown")
+        self.assertIn("boom", got[0]["reason"])
+
+    def _download_result(self):
+        return {"state": "newer", "latest": "2.6",
+                "url": "https://example.invalid/release",
+                "reason": "", "notes": "",
+                "zip": {"name": "CODE-FORGE-v2.6.zip",
+                        "url": "https://example.invalid/z.zip",
+                        "size": 3},
+                "sidecar": {"name": "CODE-FORGE-v2.6.zip.sha256",
+                            "url": "https://example.invalid/z.sha256",
+                            "size": 1}}
+
+    def test_download_thread_ready_only_after_verify_and_gate(self):
+        from unittest import mock
+        import forge.update as upd
+        from forge.main import UpdateDownloadThread
+        temp = tempfile.TemporaryDirectory()
+        dest = Path(temp.name)
+
+        def fake_download(url, dest_path, progress=None,
+                          cancel_event=None, **kwargs):
+            Path(dest_path).write_bytes(b"zip")
+            if progress is not None:
+                progress(3, 3)
+            return 3
+
+        try:
+            with mock.patch.object(upd, "download_file",
+                                   fake_download), \
+                    mock.patch.object(
+                        upd, "verify_release_sidecar",
+                        lambda p: {"status": "verified",
+                                   "sha256": "a" * 64,
+                                   "detail": "checksum matches"}), \
+                    mock.patch.object(
+                        upd, "gate_manual_update",
+                        lambda *a, **k: {"allowed": True,
+                                         "reason": "verified"}):
+                thread = UpdateDownloadThread(
+                    self._download_result(), dest)
+                ready, failed, progress = [], [], []
+                thread.ready.connect(ready.append)
+                thread.failed.connect(failed.append)
+                thread.progress.connect(
+                    lambda d, t: progress.append((d, t)))
+                thread.run()
+            self.assertEqual(failed, [])
+            self.assertEqual(progress, [(3, 3)])
+            self.assertEqual(len(ready), 1)
+            self.assertEqual(ready[0]["sha256"], "a" * 64)
+            self.assertEqual(ready[0]["version"], "2.6")
+            self.assertTrue(
+                ready[0]["zip"].endswith("CODE-FORGE-v2.6.zip"))
+        finally:
+            temp.cleanup()
+
+    def test_download_thread_refuses_a_mismatched_sidecar(self):
+        from unittest import mock
+        import forge.update as upd
+        from forge.main import UpdateDownloadThread
+        temp = tempfile.TemporaryDirectory()
+        try:
+            with mock.patch.object(
+                    upd, "download_file",
+                    lambda *a, **k: 3), \
+                    mock.patch.object(
+                        upd, "verify_release_sidecar",
+                        lambda p: {"status": "mismatch",
+                                   "sha256": "b" * 64,
+                                   "detail":
+                                       "the zip does not match "
+                                       "its checksum file"}), \
+                    mock.patch.object(
+                        upd, "gate_manual_update",
+                        lambda *a, **k: {"allowed": True,
+                                         "reason": "verified"}):
+                thread = UpdateDownloadThread(
+                    self._download_result(), Path(temp.name))
+                ready, failed = [], []
+                thread.ready.connect(ready.append)
+                thread.failed.connect(failed.append)
+                thread.run()
+            self.assertEqual(ready, [])
+            self.assertEqual(len(failed), 1)
+            self.assertIn("did not verify", failed[0])
+        finally:
+            temp.cleanup()
+
+    def test_download_thread_refuses_an_absent_sidecar(self):
+        # The auto path never installs a blind download: no
+        # sidecar beside the zip is a refusal here, even though
+        # the manual path may acknowledge its way past one.
+        from unittest import mock
+        import forge.update as upd
+        from forge.main import UpdateDownloadThread
+        temp = tempfile.TemporaryDirectory()
+        result = self._download_result()
+        result["sidecar"] = None
+        try:
+            with mock.patch.object(
+                    upd, "download_file",
+                    lambda *a, **k: 3), \
+                    mock.patch.object(
+                        upd, "verify_release_sidecar",
+                        lambda p: {"status": "absent",
+                                   "sha256": "b" * 64,
+                                   "detail":
+                                       "no checksum file shipped "
+                                       "beside this zip"}), \
+                    mock.patch.object(
+                        upd, "gate_manual_update",
+                        lambda *a, **k: {"allowed": True,
+                                         "reason": "verified"}):
+                thread = UpdateDownloadThread(
+                    result, Path(temp.name))
+                ready, failed = [], []
+                thread.ready.connect(ready.append)
+                thread.failed.connect(failed.append)
+                thread.run()
+            self.assertEqual(ready, [])
+            self.assertEqual(len(failed), 1)
+            self.assertIn("did not verify", failed[0])
+        finally:
+            temp.cleanup()
+
+
+class _FakeSignal:
+    def __init__(self):
+        self.connected = []
+
+    def connect(self, fn):
+        self.connected.append(fn)
+
+
+class _FakeProgressDialog:
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        self.values = []
+        self.closed = False
+        self.canceled = _FakeSignal()
+        _FakeProgressDialog.instances.append(self)
+
+    def setWindowTitle(self, title):
+        pass
+
+    def setMinimumDuration(self, ms):
+        pass
+
+    def setValue(self, value):
+        self.values.append(value)
+
+    def setMaximum(self, maximum):
+        pass
+
+    def setLabelText(self, text):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeMessageBox:
+    """QMessageBox stand-in for the auto-update window tests:
+    the static boxes are recorded, and an instance box clicks
+    the button the test names in next_click."""
+
+    Information = 1
+    Question = 2
+    AcceptRole = 0
+    RejectRole = 1
+    YesRole = 2
+    NoRole = 3
+
+    instances = []
+    informations = []
+    warnings = []
+    next_click = None
+
+    def __init__(self, parent=None):
+        self.buttons = {}
+        self.text = ""
+        self.title = ""
+        self.default = None
+        self._clicked = None
+        _FakeMessageBox.instances.append(self)
+
+    def setWindowTitle(self, title):
+        self.title = title
+
+    def setIcon(self, icon):
+        self.icon = icon
+
+    def setText(self, text):
+        self.text = text
+
+    def addButton(self, text, role):
+        button = (text, role)
+        self.buttons[text] = button
+        return button
+
+    def setDefaultButton(self, button):
+        self.default = button
+
+    def exec(self):
+        self._clicked = self.buttons.get(type(self).next_click)
+        return 0
+
+    def clickedButton(self):
+        return self._clicked
+
+    @staticmethod
+    def information(parent, title, text, *a, **k):
+        _FakeMessageBox.informations.append((title, text))
+        return 0
+
+    @staticmethod
+    def warning(parent, title, text, *a, **k):
+        _FakeMessageBox.warnings.append((title, text))
+        return 0
+
+
+class AutoUpdateWindowTests(unittest.TestCase):
+    """Auto-update, the window half: the silent launch check,
+    the ask-before-pull popup, and the restart question, all
+    driven with the message boxes stubbed."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        _FakeMessageBox.instances = []
+        _FakeMessageBox.informations = []
+        _FakeMessageBox.warnings = []
+        _FakeMessageBox.next_click = None
+        _FakeProgressDialog.instances = []
+
+    def _fresh_window(self):
+        import time
+        from unittest import mock
+        import forge.main as main_mod
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        (root / "settings.json").write_text("{}", encoding="utf-8")
+        patchers = [mock.patch.object(main_mod, "APP_DIR", root),
+                    mock.patch.object(main_mod, "DB_FILE",
+                                      root / "settings.json")]
+        for patcher in patchers:
+            patcher.start()
+        try:
+            win = main_mod.ForgeWindow()
+        except Exception:
+            for patcher in patchers:
+                patcher.stop()
+            raise
+        win.store = ConversationStore(root / "c.db")
+        win.eventlog = EventLog(root / "log")
+        deadline = time.time() + 30
+        while (win._models_thread is not None
+               and win._models_thread.isRunning()
+               and time.time() < deadline):
+            self.app.processEvents()
+            time.sleep(0.05)
+        self.app.processEvents()
+        win.worker = None
+        return win, temp, patchers
+
+    @staticmethod
+    def _stop_patchers(patchers):
+        for patcher in patchers:
+            patcher.stop()
+
+    def _newer_result(self):
+        return {"state": "newer", "latest": "2.7",
+                "url": "https://example.invalid/release",
+                "reason": "", "notes": "Bug fixes.",
+                "zip": {"name": "CODE-FORGE-v2.7.zip",
+                        "url": "https://example.invalid/z.zip",
+                        "size": 3},
+                "sidecar": {"name": "CODE-FORGE-v2.7.zip.sha256",
+                            "url": "https://example.invalid/s",
+                            "size": 1}}
+
+    def test_app_version_is_2_6(self):
+        import forge.main as main_mod
+        self.assertEqual(main_mod.APP_VERSION, "2.6")
+
+    def test_menu_entry_exists_and_runs_a_manual_check(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            self.assertIn("Check for updates",
+                          win.act_check_updates.text())
+            calls = []
+            win._run_update_check = (
+                lambda manual: calls.append(manual))
+            win.act_check_updates.trigger()
+            self.assertEqual(calls, [True])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_startup_check_runs_once_and_only_once(self):
+        win, temp, patchers = self._fresh_window()
+        try:
+            calls = []
+            win._run_update_check = (
+                lambda manual: calls.append(manual))
+            win.startup_update_check()
+            win.startup_update_check()
+            self.assertEqual(calls, [False])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_launch_check_is_silent_when_current_or_unknown(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                win._on_update_check_done(
+                    {"state": "current", "latest": "2.6",
+                     "url": None, "reason": ""}, manual=False)
+                win._on_update_check_done(
+                    {"state": "unknown", "latest": None,
+                     "url": None, "reason": "offline"},
+                    manual=False)
+            self.assertEqual(_FakeMessageBox.instances, [])
+            self.assertEqual(_FakeMessageBox.informations, [])
+            self.assertEqual(_FakeMessageBox.warnings, [])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_manual_check_reports_current_and_unknown(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                win._on_update_check_done(
+                    {"state": "current", "latest": "2.6",
+                     "url": None, "reason": ""}, manual=True)
+                win._on_update_check_done(
+                    {"state": "unknown", "latest": None,
+                     "url": None,
+                     "reason": "could not reach GitHub: offline"},
+                    manual=True)
+            self.assertEqual(len(_FakeMessageBox.informations), 1)
+            self.assertIn("up to date",
+                          _FakeMessageBox.informations[0][1])
+            self.assertEqual(len(_FakeMessageBox.warnings), 1)
+            self.assertIn("Could not check for updates",
+                          _FakeMessageBox.warnings[0][1])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_newer_popup_downloads_only_on_the_owners_tap(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            downloads = []
+            win._start_update_download = downloads.append
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                _FakeMessageBox.next_click = "Later"
+                win._on_update_check_done(
+                    self._newer_result(), manual=False)
+                self.assertEqual(downloads, [])
+                self.assertEqual(len(_FakeMessageBox.instances), 1)
+                box = _FakeMessageBox.instances[0]
+                self.assertIn("2.7", box.text)
+                # The safe answer is the default.
+                self.assertIs(box.default, box.buttons["Later"])
+                _FakeMessageBox.next_click = "Update now"
+                win._on_update_check_done(
+                    self._newer_result(), manual=False)
+            self.assertEqual(len(downloads), 1)
+            self.assertEqual(downloads[0]["latest"], "2.7")
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_release_without_a_zip_is_a_plain_dead_end_free_no(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            result = self._newer_result()
+            result["zip"] = None
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                win._start_update_download(result)
+            self.assertIsNone(win._update_download_thread)
+            self.assertEqual(len(_FakeMessageBox.warnings), 1)
+            self.assertIn("does not carry a downloadable",
+                          _FakeMessageBox.warnings[0][1])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_download_failure_is_reported_in_plain_words(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                win._on_update_download_failed(
+                    "the download timed out")
+            self.assertEqual(len(_FakeMessageBox.warnings), 1)
+            self.assertIn("timed out",
+                          _FakeMessageBox.warnings[0][1])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_restart_now_goes_through_the_shared_spawn(self):
+        from unittest import mock
+        import forge.main as main_mod
+        win, temp, patchers = self._fresh_window()
+        try:
+            spawns = []
+            win._spawn_updater_and_quit = (
+                lambda zip_path, extras: spawns.append(
+                    (zip_path, extras)))
+            prepared = {"zip": "/tmp/CODE-FORGE-v2.7.zip",
+                        "sha256": "c" * 64, "version": "2.7"}
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                _FakeMessageBox.next_click = "Restart now"
+                win._on_update_download_ready(prepared)
+            self.assertEqual(spawns, [(prepared["zip"], [])])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+    def test_not_now_writes_the_pending_record_and_never_spawns(self):
+        from unittest import mock
+        import forge.main as main_mod
+        import forge.update as upd
+        win, temp, patchers = self._fresh_window()
+        try:
+            spawns = []
+            win._spawn_updater_and_quit = (
+                lambda zip_path, extras: spawns.append(
+                    (zip_path, extras)))
+            prepared = {"zip": "/tmp/CODE-FORGE-v2.7.zip",
+                        "sha256": "c" * 64, "version": "2.7"}
+            with mock.patch.object(main_mod, "QMessageBox",
+                                   _FakeMessageBox):
+                _FakeMessageBox.next_click = "Not now"
+                win._on_update_download_ready(prepared)
+                box = _FakeMessageBox.instances[0]
+                # The safe answer is the default here too.
+                self.assertIs(box.default, box.buttons["Not now"])
+            self.assertEqual(spawns, [])
+            record = upd.read_pending_update(Path(temp.name))
+            self.assertIsNotNone(record)
+            self.assertEqual(record["zip"], prepared["zip"])
+            self.assertEqual(record["sha256"], "c" * 64)
+            self.assertEqual(record["version"], "2.7")
+            self.assertEqual(len(_FakeMessageBox.informations), 1)
+            self.assertIn("next time Code Forge starts",
+                          _FakeMessageBox.informations[0][1])
+        finally:
+            win.close()
+            self._stop_patchers(patchers)
+            temp.cleanup()
+
+
+class ClipBatchWindowTests(unittest.TestCase):
+    """R3B6 (clip batch, main window): R3-03 the Watch checkbox
+    label, R3-11 the history empty state scroll position, R3-13
+    the composer pill at 1024 px. Geometry is measured under the
+    app STYLE — these are styled-geometry facts."""
+
+    FULL_PILL = "LOCAL INFERENCE · TOOL CALLS REQUIRE APPROVAL"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        from forge.main import ForgeWindow, STYLE
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyleSheet(STYLE)
+        cls.win = ForgeWindow()
+        cls.win.show()
+        cls._settle()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    @classmethod
+    def _settle(cls, rounds=10):
+        import time
+        for _ in range(rounds):
+            cls.app.processEvents()
+            time.sleep(0.02)
+
+    def test_watch_checkbox_label_fits_and_still_wires(self):
+        # R3-03: the label's text must fit the checkbox contents
+        # rect in the 268 px inspector (it clipped at "…in
+        # project"), the full sentence rides the tooltip, and the
+        # toggle still writes the watch_ai setting.
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
+        box = self.win.watch_check
+        opt = QStyleOptionButton()
+        opt.initFrom(box)
+        contents = box.style().subElementRect(
+            QStyle.SubElement.SE_CheckBoxContents, opt, box)
+        fm = box.fontMetrics()
+        self.assertLessEqual(fm.horizontalAdvance(box.text()),
+                             contents.width(),
+                             "watch label text wider than its "
+                             "contents rect: it clips")
+        self.assertTrue(
+            box.toolTip().startswith(
+                "Watch for AI! / AI? comments in project files."),
+            "the full original sentence must ride the tooltip")
+        box.setChecked(True)
+        self.assertIs(self.win.settings.get("watch_ai"), True)
+        box.setChecked(False)
+        self.assertIs(self.win.settings.get("watch_ai"), False)
+
+    def test_history_empty_state_opens_at_top(self):
+        # R3-11: with the chat viewport shorter than the empty
+        # card (the audit's measured state), the empty render
+        # must open at the TOP so the card's title shows; the
+        # first real message still lands at the bottom, a long
+        # conversation still pins, and a reader scrolled up
+        # keeps their place.
+        win = self.win
+        win._set_header_mode("two")
+        win.chat.setFixedHeight(150)
+        try:
+            win.messages = []
+            win.render()
+            self._settle()
+            bar = win.chat.verticalScrollBar()
+            self.assertGreater(bar.maximum(), 0,
+                               "the cramped state must really "
+                               "exist for this test to mean "
+                               "anything")
+            self.assertEqual(bar.value(), 0,
+                             "empty state opened scrolled: its "
+                             "title is above the visible area")
+            win.messages = [{"role": "user",
+                             "content": "hello bench"}]
+            win.render()
+            self._settle()
+            self.assertEqual(bar.value(), bar.maximum(),
+                             "the first real message must land "
+                             "at the bottom")
+        finally:
+            win.chat.setMinimumHeight(0)
+            win.chat.setMaximumHeight(16777215)
+        win.messages = [{"role": "user", "content": "x " * 400},
+                        {"role": "assistant",
+                         "content": "y " * 400}]
+        win.render()
+        self._settle()
+        bar = win.chat.verticalScrollBar()
+        self.assertGreaterEqual(bar.value(), bar.maximum() - 8,
+                                "a bottom-riding conversation "
+                                "must still pin")
+        bar.setValue(0)
+        win.render()
+        self._settle()
+        self.assertEqual(bar.value(), 0,
+                         "a reader scrolled up keeps their place")
+        win.messages = []
+        win.render()
+        self._settle()
+
+    def test_composer_pill_elides_at_1024_and_restores(self):
+        # R3-13: in the owner's panel state (sidebar 244,
+        # inspector 268) a 1024 px window leaves the composer
+        # row ~500 px and the pill label ~150 px: the pill must
+        # elide with the full text on its tooltip, and widening
+        # back to 1366 must restore the full text.
+        win = self.win
+        win.sidebar.setVisible(True)
+        win.resize(1600, 800)
+        self._settle()
+        win.main_splitter.setSizes([244, 1076, 268])
+        self._settle()
+        win.resize(1024, 768)
+        self._settle()
+        center = win.main_splitter.sizes()[1]
+        self.assertTrue(480 <= center <= 520,
+                        f"panel state not established (center "
+                        f"{center}); the squeeze never happened")
+        label = win.stream_label
+        fm = label.fontMetrics()
+        self.assertTrue(label.text().endswith("…"),
+                        "pill text not elided at 1024: "
+                        f"{label.text()!r}")
+        self.assertEqual(label.toolTip(), self.FULL_PILL)
+        self.assertLessEqual(fm.horizontalAdvance(label.text()),
+                             label.width())
+        win.resize(1366, 768)
+        self._settle()
+        self.assertEqual(label.text(), self.FULL_PILL,
+                         "widening must restore the full pill "
+                         "text")
+        self.assertEqual(label.toolTip(), "")
+
+
+class ClipBatchDialogTests(unittest.TestCase):
+    """R3B6 (clip + copy batch, dialogs and rooms): R3-16 the
+    Behavior captions, R3-07 the skill descriptions, R3-15 the
+    Mission Control empty line, R3-12 the mode-room copy."""
+
+    LONG_DESC = (
+        "Building-block recipe — add a payments connector STUB "
+        "to the owner's project: checkout flow, webhook handler, "
+        "and order records wired against a provider's TEST mode, "
+        "going live only at the owner's explicit word. Use when "
+        "the owner asks for payments, checkout, charging, or "
+        "selling in a project being built.")
+
+    # The tree's own longest bundled plugin description
+    # (plugins/cloudstore/plugin.json, 424 chars).
+    PLUGIN_LONG_DESC = (
+        "Cloud storage via rclone (item #70, adopted — not "
+        "built): list, read, download, upload and delete "
+        "individual files on the owner's Google Drive, "
+        "Dropbox, OneDrive, Nextcloud/WebDAV, S3 or any other "
+        "rclone remote. Setup: install rclone, run `rclone "
+        "config` once in a terminal, name the project's "
+        "allowed remote prefixes in .forge/cloudstore.json, "
+        "then enable this connector. No sync and no mirroring "
+        "— explicit transfers only.")
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        from forge.main import STYLE
+        cls.app = QApplication.instance() or QApplication([])
+        cls.app.setStyleSheet(STYLE)
+
+    def _settle(self, rounds=12):
+        import time
+        for _ in range(rounds):
+            self.app.processEvents()
+            time.sleep(0.02)
+
+    def _bare_owner(self):
+        from PySide6.QtWidgets import QWidget
+        owner = QWidget()
+        owner.workspace = str(Path(tempfile.mkdtemp()))
+        return owner
+
+    def test_behavior_captions_fit_the_dialog(self):
+        # R3-16: at the Settings dialog's default size the
+        # Behavior page must fit its scroll viewport (no
+        # horizontal scrolling) and every caption's right edge
+        # must land inside the dialog.
+        from PySide6.QtWidgets import QLabel, QScrollArea
+        from forge.main import SettingsDialog, STYLE
+        dlg = SettingsDialog(None, {})
+        dlg.setStyleSheet(STYLE)
+        dlg.show()
+        self._settle()
+        # The dialog opens at its sizeHint under a real window
+        # manager; the offscreen platform leaves it narrower,
+        # so state the size it actually opens at.
+        dlg.resize(dlg.sizeHint())
+        self._settle()
+        try:
+            idx = [dlg.tabs.tabText(i)
+                   for i in range(dlg.tabs.count())].index(
+                       "Behavior")
+            dlg.tabs.setCurrentIndex(idx)
+            self._settle()
+            page = dlg.tabs.widget(idx)
+            # The tab page IS its scroll area (SettingsDialog
+            # wraps each page); its content widget carries the
+            # captions.
+            scroll = page
+            self.assertIsInstance(scroll, QScrollArea)
+            page = scroll.widget()
+            self.assertEqual(
+                scroll.horizontalScrollBar().maximum(), 0,
+                "Behavior page is wider than its viewport: the "
+                "captions clip")
+            for caption in page.findChildren(QLabel):
+                if not caption.text():
+                    continue
+                right = caption.mapTo(
+                    dlg, caption.rect().topRight()).x()
+                self.assertLessEqual(
+                    right, dlg.width() + 1,
+                    f"caption runs off the dialog: "
+                    f"{caption.text()[:40]!r} right={right} "
+                    f"dialog={dlg.width()}")
+            texts = [c.text() for c in page.findChildren(QLabel)]
+            self.assertTrue(
+                any(t.startswith("Stop a Groq/Gemini send")
+                    for t in texts),
+                "the scan caption carrying the moved detail "
+                "is missing")
+        finally:
+            dlg.close()
+
+    def test_skill_descriptions_elide_with_full_tooltip(self):
+        # R3-07: a real-length skill description (the tree's own
+        # recipe-payments text) must elide to the row with the
+        # full "name · description" on the tooltip, the row's
+        # Edit button must stay inside the dialog, and a short
+        # description stays whole. The description text itself
+        # is the skill owner's words (U9) — display only.
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
+        from forge.main import CustomizeDialog, STYLE
+        from forge.skills import Skill
+        skills = [
+            Skill(name="recipe-payments",
+                  description=self.LONG_DESC,
+                  folder=Path(tempfile.mkdtemp())),
+            Skill(name="shorty", description="A short one.",
+                  folder=Path(tempfile.mkdtemp())),
+        ]
+        dlg = CustomizeDialog(None, skills, [], set(), set(), {},
+                              tools=[])
+        dlg.setStyleSheet(STYLE)
+        dlg.show()
+        self._settle(16)
+        try:
+            full = f"recipe-payments · {self.LONG_DESC}"
+            box = dlg._skill_boxes["recipe-payments"]
+            self.assertTrue(box.text().endswith("…"),
+                            "long description not elided: the "
+                            "row runs off the dialog")
+            self.assertEqual(box.toolTip(), full,
+                             "the full description must ride "
+                             "the tooltip")
+            opt = QStyleOptionButton()
+            opt.initFrom(box)
+            contents = box.style().subElementRect(
+                QStyle.SubElement.SE_CheckBoxContents, opt, box)
+            self.assertLessEqual(
+                box.fontMetrics().horizontalAdvance(box.text()),
+                contents.width())
+            edit = dlg._skill_edit_btns["recipe-payments"]
+            right = edit.mapTo(dlg, edit.rect().topRight()).x()
+            self.assertLessEqual(right, dlg.width(),
+                                 "the row's Edit button is off "
+                                 "the dialog")
+            self.assertEqual(
+                dlg._skills_scroll.horizontalScrollBar()
+                .maximum(), 0)
+            short = dlg._skill_boxes["shorty"]
+            self.assertEqual(short.text(), "shorty · A short one.")
+        finally:
+            dlg.close()
+
+    def test_plugin_descriptions_elide_with_full_tooltip(self):
+        # R3-07 follow-up: the Plugins tab rows are built like
+        # the skill rows, so a long plugin description (the
+        # tree's own cloudstore text) clipped the same way.
+        # It must elide to the row with the full
+        # "name · description" leading the tooltip (the row's
+        # own Tools line rides under it), the row's Edit
+        # button must stay inside the dialog, and a short
+        # description stays whole with its Tools tooltip
+        # untouched. Display only (U9), like the skills test.
+        from PySide6.QtWidgets import (QStyle, QStyleOptionButton,
+                                       QTabWidget)
+        from forge.main import CustomizeDialog, STYLE
+        from forge.plugins import Plugin
+        plugins = [
+            Plugin(pid="cloudstore", name="Cloud Storage (rclone)",
+                   kind="plugin", description=self.PLUGIN_LONG_DESC,
+                   folder=Path(tempfile.mkdtemp()),
+                   tools=[{"name": "cloud_list"}], handlers={}),
+            Plugin(pid="tinyplug", name="Tiny Plug", kind="plugin",
+                   description="A short one.",
+                   folder=Path(tempfile.mkdtemp()),
+                   tools=[{"name": "tiny_tool"}], handlers={}),
+        ]
+        dlg = CustomizeDialog(None, [], plugins, set(), set(), {},
+                              tools=[])
+        dlg.setStyleSheet(STYLE)
+        dlg.show()
+        self._settle(16)
+        try:
+            tabs = dlg.findChild(QTabWidget)
+            idx = [tabs.tabText(i)
+                   for i in range(tabs.count())].index("Plugins")
+            tabs.setCurrentIndex(idx)
+            self._settle(16)
+            full = f"Cloud Storage (rclone) · {self.PLUGIN_LONG_DESC}"
+            box = dlg._plugin_boxes["cloudstore"]
+            self.assertTrue(box.text().endswith("…"),
+                            "long plugin description not elided: "
+                            "the row runs off the dialog")
+            self.assertTrue(
+                box.toolTip().startswith(full),
+                "the full description must lead the tooltip")
+            self.assertIn("Tools: cloud_list", box.toolTip(),
+                          "the row's Tools line must survive "
+                          "the elision")
+            opt = QStyleOptionButton()
+            opt.initFrom(box)
+            contents = box.style().subElementRect(
+                QStyle.SubElement.SE_CheckBoxContents, opt, box)
+            self.assertLessEqual(
+                box.fontMetrics().horizontalAdvance(box.text()),
+                contents.width())
+            edit = dlg._plugin_edit_btns["cloudstore"]
+            right = edit.mapTo(dlg, edit.rect().topRight()).x()
+            self.assertLessEqual(right, dlg.width(),
+                                 "the row's Edit button is off "
+                                 "the dialog")
+            self.assertEqual(
+                dlg._plugins_scroll.horizontalScrollBar()
+                .maximum(), 0)
+            short = dlg._plugin_boxes["tinyplug"]
+            self.assertEqual(short.text(),
+                             "Tiny Plug · A short one.")
+            self.assertEqual(short.toolTip(), "Tools: tiny_tool")
+        finally:
+            dlg.close()
+
+    def test_mission_control_empty_line_wraps(self):
+        # R3-15: the empty Mission Control line must wrap inside
+        # its window (no horizontal scrolling) at the default
+        # size, with its full text intact.
+        from forge.main import MissionControlWindow, STYLE
+        owner = self._bare_owner()
+        owner.mission_rows = lambda: []
+        mc = MissionControlWindow(owner)
+        mc.setStyleSheet(STYLE)
+        mc.show()
+        self._settle()
+        try:
+            mc.refresh()
+            self._settle()
+            self.assertEqual(mc.rows_list.count(), 1)
+            item = mc.rows_list.item(0)
+            self.assertIn("Nothing running.", item.text())
+            self.assertIn("keeps working and is watched from "
+                          "here.", item.text())
+            # The wrap is the fix: the line reads in full inside
+            # the row. (The h-bar range itself is not asserted:
+            # under the offscreen test platform the wider font
+            # leaves a 14 px residual range even though the text
+            # wraps; under xcb the range is 0, probe-verified.)
+            self.assertTrue(mc.rows_list.wordWrap())
+            rect = mc.rows_list.visualItemRect(item)
+            self.assertGreater(
+                rect.height(),
+                mc.rows_list.fontMetrics().height() * 1.6,
+                "the empty line did not wrap to two lines")
+        finally:
+            mc.close()
+
+    def test_mode_window_articles(self):
+        # R3-12: the room templates must use the right article
+        # ("an Architect turn", "an Ask turn", "a Code turn")
+        # in the transcript placeholder, the composer
+        # placeholder, the Send tooltip, and the sent status.
+        from PySide6.QtWidgets import (QComboBox, QPlainTextEdit)
+        from forge.main import ModeWindow
+
+        def bench_owner():
+            owner = self._bare_owner()
+            owner.mode_combo = QComboBox()
+            owner.mode_combo.addItems(
+                ["Code", "Plan", "Design", "Architect", "Review",
+                 "Ask", "Write", "Research"])
+            owner.input = QPlainTextEdit()
+            owner.send_calls = []
+            owner.send_message = lambda: owner.send_calls.append(
+                owner.input.toPlainText())
+            return owner
+
+        for key, article in (("architect", "an"), ("ask", "an"),
+                             ("code", "a"), ("design", "a")):
+            win = ModeWindow(self._bare_owner(), key)
+            try:
+                label = win.label
+                self.assertIn(f"Run {article} {label} turn",
+                              win.transcript.placeholderText())
+                self.assertIn(f"Send runs {article} {label} turn",
+                              win.composer.placeholderText())
+                self.assertTrue(
+                    win.composer_send_btn.toolTip().startswith(
+                        f"Run {article} {label} turn"))
+                for text in (win.transcript.placeholderText(),
+                             win.composer.placeholderText(),
+                             win.composer_send_btn.toolTip()):
+                    self.assertNotIn("a Architect", text)
+                    self.assertNotIn("a Ask", text)
+            finally:
+                win.close()
+            owner = bench_owner()
+            win = ModeWindow(owner, key)
+            try:
+                win.composer.setPlainText("a request")
+                win.composer_send_btn.click()
+                self.assertTrue(
+                    win.composer_status.text().startswith(
+                        f"Sent as {article} {win.label} turn."),
+                    f"sent status: {win.composer_status.text()!r}")
+            finally:
+                win.close()
+
+    def test_mode_room_copy_has_no_internal_marks(self):
+        # R3-12: no internal build dates or item numbers in the
+        # owner-facing room copy (any room's blurb, and the Plan
+        # window's document placeholder).
+        from forge.main import ModeWindow, PlanWindow
+        for key, blurb in ModeWindow.BLURBS.items():
+            self.assertNotIn("2026-", blurb,
+                             f"{key} blurb carries a build date")
+            self.assertNotIn("(rebuilt", blurb)
+            self.assertNotIn("Item #", blurb)
+        self.assertIn("document workshop",
+                      ModeWindow.BLURBS["write"])
+        self.assertIn("gated and budgeted",
+                      ModeWindow.BLURBS["research"])
+        win = PlanWindow(self._bare_owner())
+        try:
+            placeholder = win.document_view.placeholderText()
+            self.assertNotIn("Item #58", placeholder)
+            self.assertTrue(
+                placeholder.startswith("Plan document:"))
+        finally:
+            win.close()
+
+
+# ---------------------------------------------------------------------------
+# R3B5 (Round 3 Build 5, state-truth batch) — appended classes.
+# Each class fail-proofs ONE finding on the pristine tree:
+# FailedTurnStateTests = R3-10, PreLoadGateStateTests = R3-09,
+# ArtifactsButtonSyncTests = R3-14.
+# ---------------------------------------------------------------------------
+
+
+class _GateFakeWorker:
+    """A stand-in AgentWorker for the gate tests: every signal the
+    window connects is a _TestSignal, start() is a no-op, and
+    isRunning() reads True (a turn in flight). The window's real
+    send path runs unchanged — only the worker's engine is fake."""
+
+    _SIGNALS = ("token", "status", "approval_needed", "receipt",
+                "turn_changes", "plan_gofish", "plan_document",
+                "plan_ready", "plan_revised", "plan_active",
+                "plan_step_done", "plan_turn_done", "skill_drafted",
+                "finished_text", "failed")
+
+    def __init__(self, *args, **kwargs):
+        for name in self._SIGNALS:
+            setattr(self, name, _TestSignal())
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        pass
+
+    def isRunning(self):
+        return True
+
+
+class FailedTurnStateTests(unittest.TestCase):
+    """R3-10: a failed turn must leave a truthful bench — the
+    status bar back to the idle message (never the worker's last
+    mid-turn line), AGENT CONTROL back to IDLE without needing
+    another turn, and a one-line failure marker in the transcript
+    itself, persisted with the conversation."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from forge import main as main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._real_app_dir = main_mod.APP_DIR
+        main_mod.APP_DIR = root / "app"
+        self.win.worker = None
+        self.win._side_chat = None
+        self.win.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "do the thing"},
+        ]
+        self.win.conversation_id = self.win.store.save(
+            None, self.win.messages, model=None, project=None)
+        # The mid-turn state the audit found: the worker's last
+        # status stuck on the bar, the bench reading THINKING.
+        self.win.statusBar().showMessage(
+            "Context nearly full. Wrapping up without tools…")
+        self.win.agent_state.setText("●  THINKING")
+
+    def tearDown(self):
+        from forge import main as main_mod
+        main_mod.APP_DIR = self._real_app_dir
+        self.win.worker = None
+        self.temp.cleanup()
+
+    def _fail(self, error):
+        from unittest import mock
+        import forge.main as main_mod
+        with mock.patch.object(main_mod.QMessageBox, "critical",
+                               lambda *a, **k: None):
+            self.win.on_failed(error)
+
+    def _markers(self, messages=None):
+        return [m for m in (self.win.messages if messages is None
+                            else messages)
+                if m.get("turn_failed")]
+
+    def test_failed_turn_leaves_a_truthful_bench(self):
+        self._fail("Ollama request failed: connection refused")
+        # (a) The status bar says the turn is over, in the idle
+        # words — never the wrap-up line the worker left on it.
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Ready · Local-first · Ollama")
+        # (c) AGENT CONTROL is back to IDLE on its own.
+        self.assertEqual(self.win.agent_state.text(), "●  IDLE")
+        self.assertEqual(self.win.ember_label.text(), "COOLING")
+        # (b) Exactly one failure marker, in the transcript and
+        # in the stored conversation.
+        markers = self._markers()
+        self.assertEqual(len(markers), 1)
+        self.assertTrue(
+            markers[0]["content"].startswith("(That turn failed"))
+        self.assertNotIn("—", markers[0]["content"])
+        self.assertIn("That turn failed",
+                      self.win.chat.document().toPlainText())
+        stored = self.win.store.load(self.win.conversation_id)
+        self.assertEqual(len(self._markers(stored)), 1)
+
+    def test_failure_marker_speaks_plain_words(self):
+        self._fail("Ollama request failed: [Errno 111] "
+                   "Connection refused")
+        markers = self._markers()
+        self.assertEqual(len(markers), 1)
+        self.assertIn("couldn't reach the service",
+                      markers[0]["content"])
+
+    def test_failure_marker_for_an_unmapped_error_is_one_plain_line(self):
+        self._fail("the frobnicate decohered at stage 9")
+        markers = self._markers()
+        self.assertEqual(len(markers), 1)
+        self.assertEqual(markers[0]["content"], "(That turn failed.)")
+
+    def test_next_turn_after_a_failure_starts_clean(self):
+        from unittest import mock
+        self._fail("Ollama request failed: connection refused")
+        with mock.patch.object(self.win, "_distill_knowledge_async",
+                               lambda *a, **k: None), \
+                mock.patch.object(self.win, "_cadence_evaluate",
+                                  lambda *a, **k: None):
+            self.win.on_finished(
+                "the answer",
+                self.win.messages
+                + [{"role": "assistant", "content": "the answer"}])
+        self.assertEqual(self.win.agent_state.text(), "●  IDLE")
+        self.assertEqual(self.win.statusBar().currentMessage(),
+                         "Response complete")
+        # The marker survives the next turn's settle, still one.
+        self.assertEqual(len(self._markers()), 1)
+
+
+class PreLoadGateStateTests(unittest.TestCase):
+    """R3-09: while the pre-load process check is waiting for the
+    owner's answer, the bench must not claim a turn is running —
+    no THINKING state, no WORKING ember, no "Request sent" log
+    line. Those appear only after the gate answers, as today."""
+
+    MODEL = "fake-model"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentText(cls.MODEL)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        from forge import main as main_mod
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._real_app_dir = main_mod.APP_DIR
+        main_mod.APP_DIR = root / "app"
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win._side_chat = None
+        self.win._streams = {}
+        self.win._stage_stream_id = None
+        self.win.conversation_id = None
+        self.win._log_lines = []
+        self.win.messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "first ask"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        self.win.input.clear()
+        self.win.mode_combo.setCurrentText("Code")
+        self._real_auto = self.win.settings.get("auto_summarize", True)
+        self.win.settings["auto_summarize"] = False
+        self.win.agent_state.setText("●  IDLE")
+        self.captured = None
+
+    def tearDown(self):
+        from forge import main as main_mod
+        main_mod.APP_DIR = self._real_app_dir
+        self.win.worker = None
+        self.win.settings["auto_summarize"] = self._real_auto
+        self.temp.cleanup()
+
+    def _candidates(self):
+        from forge.procscan import ProcessInfo
+        return [ProcessInfo(pid=101, name="firefox",
+                            rss_bytes=1200 * 1024 * 1024,
+                            cpu_percent=25.0, uid=1000),
+                ProcessInfo(pid=102, name="slack",
+                            rss_bytes=800 * 1024 * 1024,
+                            cpu_percent=5.0, uid=1000)]
+
+    def _drive_send(self, choice):
+        from unittest import mock
+        from forge import procscan as procscan_mod
+        import forge.main as main_mod
+
+        def ask(candidates):
+            # The moment the dialog would open: capture what the
+            # bench is claiming right then.
+            self.captured = (self.win.agent_state.text(),
+                             self.win.ember_label.text(),
+                             list(self.win._log_lines))
+            return (choice, [])
+
+        self.win.input.setPlainText("hello bench")
+        with mock.patch.object(self.win.client, "ps",
+                               return_value=[]), \
+                mock.patch.object(
+                    procscan_mod, "scan_heavy_processes",
+                    return_value=self._candidates()), \
+                mock.patch.object(self.win, "_ask_process_check",
+                                  side_effect=ask), \
+                mock.patch.object(main_mod, "AgentWorker",
+                                  _GateFakeWorker):
+            self.win.send_message()
+
+    def test_while_the_gate_waits_the_bench_claims_nothing(self):
+        self._drive_send("continue")
+        self.assertIsNotNone(self.captured)
+        state, ember, log_lines = self.captured
+        self.assertNotEqual(state, "●  THINKING")
+        self.assertNotEqual(ember, "WORKING")
+        self.assertFalse(
+            any("Request sent" in line for line in log_lines),
+            "the log claimed a sent request while the gate waited")
+        # After the gate answers, the turn announces itself as
+        # it always has.
+        self.assertEqual(self.win.agent_state.text(), "●  THINKING")
+        self.assertEqual(self.win.ember_label.text(), "WORKING")
+        self.assertTrue(any("Request sent to" in line
+                            for line in self.win._log_lines))
+
+    def test_cancel_at_the_gate_leaves_no_sent_claim(self):
+        self._drive_send("cancel")
+        self.assertEqual(self.win.agent_state.text(), "●  IDLE")
+        self.assertIsNone(self.win.worker)
+        self.assertTrue(any("nothing was sent" in line
+                            for line in self.win._log_lines))
+        self.assertFalse(any("Request sent" in line
+                             for line in self.win._log_lines))
+
+
+class ArtifactsButtonSyncTests(unittest.TestCase):
+    """R3-14: the Artifacts window's action buttons follow their
+    contents (the Mission Control _sync_buttons shape) — disabled
+    when there is nothing to act on, enabled for the content that
+    is actually selected, disabled again when it goes away."""
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from PySide6.QtWidgets import QWidget
+        from forge.main import ArtifactsWindow
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        proj.ensure_project(self.root)
+        self.owner = QWidget()
+        self.owner.workspace = str(self.root)
+        self.win = ArtifactsWindow(self.owner)
+
+    def tearDown(self):
+        self.win.close()
+        self.owner.close()
+        self.temp.cleanup()
+
+    def _selection_buttons(self):
+        w = self.win
+        return {
+            "comment": w.artifact_comment_btn,
+            "knowledge approve": w.knowledge_approve_btn,
+            "knowledge discard": w.knowledge_discard_btn,
+            "guidelines approve": w.guidelines_approve_btn,
+            "guidelines revoke": w.guidelines_revoke_btn,
+        }
+
+    def test_empty_window_arms_nothing(self):
+        for name, btn in self._selection_buttons().items():
+            self.assertFalse(btn.isEnabled(), name)
+        # The one creator stays armed: adding an entry is how
+        # content comes to exist, and it needs no selection.
+        self.assertTrue(self.win.knowledge_add_btn.isEnabled())
+
+    def test_artifact_selection_arms_comment(self):
+        from forge import artifacts as artifacts_mod
+        artifacts_mod.record(str(self.root), "note", "First",
+                             "body one")
+        self.win.refresh()
+        self.assertEqual(self.win.artifacts_list.count(), 1)
+        self.assertTrue(self.win.artifact_comment_btn.isEnabled())
+        # The list empties (a kind with no entries): disarmed.
+        idx = self.win.kind_filter.findData("review")
+        self.win.kind_filter.setCurrentIndex(idx)
+        self.assertEqual(self.win.artifacts_list.count(), 0)
+        self.assertFalse(self.win.artifact_comment_btn.isEnabled())
+
+    def test_draft_selection_arms_approve_and_discard(self):
+        from forge import knowledge as knowledge_mod
+        knowledge_mod.add_entry(str(self.root), "A fact",
+                                "the body", approved=False)
+        self.win.refresh()
+        self.assertEqual(self.win.knowledge_drafts_list.count(), 1)
+        # Listed but not selected: still disarmed.
+        self.assertFalse(self.win.knowledge_approve_btn.isEnabled())
+        self.assertFalse(self.win.knowledge_discard_btn.isEnabled())
+        self.win.knowledge_drafts_list.setCurrentRow(0)
+        self.assertTrue(self.win.knowledge_approve_btn.isEnabled())
+        self.assertTrue(self.win.knowledge_discard_btn.isEnabled())
+        # Discard through the real handler: the list empties and
+        # the buttons disarm again.
+        self.win._discard_draft()
+        self.assertEqual(self.win.knowledge_drafts_list.count(), 0)
+        self.assertFalse(self.win.knowledge_approve_btn.isEnabled())
+        self.assertFalse(self.win.knowledge_discard_btn.isEnabled())
+
+    def test_guideline_buttons_follow_the_files_state(self):
+        (self.root / "AGENTS.md").write_text("Agents: be kind.\n")
+        self.win.refresh()
+        self.assertEqual(self.win.guidelines_list.count(), 1)
+        self.win.guidelines_list.setCurrentRow(0)
+        # A pending file: Approve armed, Revoke not.
+        self.assertTrue(self.win.guidelines_approve_btn.isEnabled())
+        self.assertFalse(self.win.guidelines_revoke_btn.isEnabled())
+        self.win._approve_guideline()
+        # The handler's refresh drops the selection; re-select
+        # the now-approved file.
+        self.win.guidelines_list.setCurrentRow(0)
+        self.assertFalse(self.win.guidelines_approve_btn.isEnabled())
+        self.assertTrue(self.win.guidelines_revoke_btn.isEnabled())
+        self.win._revoke_guideline()
+        self.win.guidelines_list.setCurrentRow(0)
+        self.assertTrue(self.win.guidelines_approve_btn.isEnabled())
+        self.assertFalse(self.win.guidelines_revoke_btn.isEnabled())
+
+
+class RecipeAuthoringTests(unittest.TestCase):
+    """R3-17: in-UI recipe authoring. The Recipes dialog gains a
+    New recipe form (its own dialog): name + prompt + params,
+    saved through recipes_mod.save_recipe into a temp APP_DIR's
+    recipes/ folder in exactly the loader's shape. The REAL
+    loader reads the written file back with the same values, the
+    dialog lists and runs the new recipe without reopening, and
+    refusals (colliding name, empty name/prompt, a prompt
+    placeholder with no declared param, a duplicate param) show
+    in the form's status label and write nothing. All state lives
+    in a temp dir: the tree's real recipe files are never
+    touched."""
+
+    MODEL = "maternion/minicpm5-heretic:2b"
+
+    @classmethod
+    def setUpClass(cls):
+        from PySide6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication([])
+        from forge.main import ForgeWindow
+        cls.win = ForgeWindow()
+        if cls.win.model_combo.findText(cls.MODEL) < 0:
+            cls.win.model_combo.addItem(cls.MODEL)
+        cls.win.model_combo.setCurrentIndex(
+            cls.win.model_combo.findText(cls.MODEL))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.win.close()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.app_dir = root / "app"
+        self.folder = self.app_dir / "recipes"
+        self.folder.mkdir(parents=True)
+        self.win.store = ConversationStore(root / "c.db")
+        self.win.eventlog = EventLog(root / "log")
+        self._old_workspace = self.win.workspace
+        self.win.workspace = str(root)
+        self.win.worker = None
+        self.win._fold_thread = None
+        self.win.messages = []
+        self.win.conversation_id = None
+        self.win._log_lines = []
+        self.win._recipe_problems_seen = set()
+        self.win.mode_combo.setCurrentText("Code")
+        _GateWorker.instances = []
+
+    def tearDown(self):
+        self.win.workspace = self._old_workspace
+        self.win.worker = None
+        self.temp.cleanup()
+
+    # ---------- helpers ----------
+    def _fill_form(self, form, name, prompt, params=()):
+        form.name_edit.setText(name)
+        form.prompt_edit.setPlainText(prompt)
+        for i, (pname, required, default) in enumerate(params):
+            if i >= len(form._param_rows):
+                form._add_param_row()
+            entry = form._param_rows[i]
+            entry["name"].setText(pname)
+            entry["required"].setChecked(required)
+            entry["default"].setText(default)
+
+    def _save_via_dialog(self, dlg, name, prompt, params=()):
+        """Drive the real path: click New recipe, and when the
+        modal form is up (timer inside its loop), fill it and
+        click Save recipe."""
+        from PySide6.QtCore import QTimer
+        from forge.main import NewRecipeDialog
+
+        def fill_and_save():
+            form = next(
+                (w for w in self.app.topLevelWidgets()
+                 if isinstance(w, NewRecipeDialog)
+                 and w.isVisible()), None)
+            if form is None:
+                QTimer.singleShot(100, fill_and_save)
+                return
+            self._fill_form(form, name, prompt, params)
+            form.save_btn.click()
+
+        QTimer.singleShot(100, fill_and_save)
+        dlg.new_btn.click()
+
+    def _recipe_files(self):
+        return sorted(p.name for p in self.folder.glob("*.json"))
+
+    # ---------- tests ----------
+    def test_new_button_opens_the_form(self):
+        from PySide6.QtCore import QTimer
+        from forge.main import NewRecipeDialog, RecipesDialog
+        dlg = RecipesDialog(self.win, self.app_dir)
+        try:
+            self.assertIn("New recipe", dlg.new_btn.text())
+            seen = []
+
+            def grab_and_close():
+                form = next(
+                    (w for w in self.app.topLevelWidgets()
+                     if isinstance(w, NewRecipeDialog)
+                     and w.isVisible()), None)
+                if form is None:
+                    QTimer.singleShot(100, grab_and_close)
+                    return
+                seen.append(form)
+                form.reject()
+
+            QTimer.singleShot(100, grab_and_close)
+            dlg.new_btn.click()
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0].windowTitle(), "New recipe")
+            self.assertEqual(dlg.list.count(), 0)
+            self.assertEqual(self._recipe_files(), [])
+        finally:
+            dlg.close()
+
+    def test_save_writes_loader_shaped_file_and_round_trips(self):
+        from forge import recipes as recipes_mod
+        from forge.main import NewRecipeDialog
+        form = NewRecipeDialog(self.win, self.app_dir)
+        try:
+            self._fill_form(
+                form, "Release notes",
+                "Write release notes for version {{version}} "
+                "covering {{scope}}.",
+                params=[("version", True, ""),
+                        ("scope", False, "everything")])
+            form._save()
+            self.assertEqual(form.saved_slug, "release-notes")
+        finally:
+            form.close()
+        self.assertEqual(self._recipe_files(), ["release-notes.json"])
+        data = json.loads(
+            (self.folder / "release-notes.json").read_text(
+                encoding="utf-8"))
+        self.assertEqual(
+            set(data), {"name", "description", "prompt", "params",
+                        "mode"})
+        recipes, problems = recipes_mod.load_recipes(self.app_dir)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(recipes), 1)
+        recipe = recipes[0]
+        self.assertEqual(recipe["name"], "Release notes")
+        self.assertEqual(
+            recipe["prompt"],
+            "Write release notes for version {{version}} "
+            "covering {{scope}}.")
+        self.assertEqual(recipe["params"], [
+            {"name": "version", "required": True, "default": None},
+            {"name": "scope", "required": False,
+             "default": "everything"}])
+        self.assertEqual(
+            recipes_mod.render(recipe, {"version": "2.0"}),
+            "Write release notes for version 2.0 "
+            "covering everything.")
+
+    def test_saved_recipe_appears_in_dialog_without_reopen(self):
+        from forge.main import RecipesDialog
+        dlg = RecipesDialog(self.win, self.app_dir)
+        try:
+            self.assertEqual(dlg.list.count(), 0)
+            self.assertFalse(dlg.run_btn.isEnabled())
+            self._save_via_dialog(
+                dlg, "Greet", "Say hello to {{who}}.",
+                params=[("who", False, "the crew")])
+            self.assertEqual(dlg.list.count(), 1)
+            self.assertIn("Greet", dlg.list.item(0).text())
+            self.assertEqual(dlg.list.currentRow(), 0)
+            self.assertTrue(dlg.run_btn.isEnabled())
+            self.assertEqual(dlg._fields["who"].text(), "the crew")
+            self.assertIn("Saved 'Greet'", dlg.status_label.text())
+        finally:
+            dlg.close()
+
+    def test_saved_recipe_runs_through_the_dialog(self):
+        from unittest import mock
+        import forge.main as main_mod
+        from forge.main import RecipesDialog
+        from PySide6.QtWidgets import QDialog
+        dlg = RecipesDialog(self.win, self.app_dir)
+        try:
+            self._save_via_dialog(
+                dlg, "Release notes",
+                "Write release notes for version {{version}}.",
+                params=[("version", True, "")])
+            dlg._fields["version"].setText("2.0")
+            with mock.patch.object(main_mod, "AgentWorker",
+                                   _GateWorker):
+                dlg._run()
+            self.assertEqual(len(_GateWorker.instances), 1)
+            self.assertTrue(_GateWorker.instances[0].started)
+            sent = [m for m in self.win.messages
+                    if m.get("role") == "user"]
+            self.assertEqual(sent[-1]["content"],
+                             "Write release notes for version 2.0.")
+            self.assertEqual(dlg.result(), QDialog.Accepted)
+        finally:
+            dlg.close()
+
+    def test_colliding_name_refused_and_writes_nothing(self):
+        from forge.main import NewRecipeDialog
+        (self.folder / "greet.json").write_text(json.dumps(
+            {"name": "Greet", "prompt": "Say hello."}),
+            encoding="utf-8")
+        form = NewRecipeDialog(self.win, self.app_dir)
+        try:
+            self._fill_form(form, "greet", "Say hi instead.")
+            form._save()
+            self.assertIsNone(form.saved_slug)
+            self.assertIn("already exists",
+                          form.status_label.text())
+        finally:
+            form.close()
+        self.assertEqual(self._recipe_files(), ["greet.json"])
+
+    def test_empty_name_and_prompt_refused(self):
+        from forge.main import NewRecipeDialog
+        form = NewRecipeDialog(self.win, self.app_dir)
+        try:
+            form._save()
+            self.assertIsNone(form.saved_slug)
+            self.assertIn("missing a 'name'",
+                          form.status_label.text())
+            form.name_edit.setText("Named")
+            form._save()
+            self.assertIsNone(form.saved_slug)
+            self.assertIn("missing a 'prompt'",
+                          form.status_label.text())
+        finally:
+            form.close()
+        self.assertEqual(self._recipe_files(), [])
+
+    def test_undeclared_placeholder_refused(self):
+        from forge.main import NewRecipeDialog
+        form = NewRecipeDialog(self.win, self.app_dir)
+        try:
+            self._fill_form(
+                form, "Notes", "Write notes for {{version}}.")
+            form._save()
+            self.assertIsNone(form.saved_slug)
+            self.assertIn("'version'", form.status_label.text())
+        finally:
+            form.close()
+        self.assertEqual(self._recipe_files(), [])
+
+    def test_duplicate_param_refused(self):
+        from forge.main import NewRecipeDialog
+        form = NewRecipeDialog(self.win, self.app_dir)
+        try:
+            self._fill_form(
+                form, "Twice", "Do {{x}} then {{x}} again.",
+                params=[("x", True, ""), ("x", False, "")])
+            form._save()
+            self.assertIsNone(form.saved_slug)
+            self.assertIn("duplicate param 'x'",
+                          form.status_label.text())
+        finally:
+            form.close()
+        self.assertEqual(self._recipe_files(), [])
