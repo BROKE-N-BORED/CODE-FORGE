@@ -9714,7 +9714,7 @@ class AuditSweepSourceTests(unittest.TestCase):
 
     def test_app_start_and_title_share_the_version_constant(self):
         source = self._main_source()
-        self.assertIn('APP_VERSION = "2.6"', source)
+        self.assertIn('APP_VERSION = "2.7"', source)
         self.assertIn("version=APP_VERSION", source)
         self.assertIn("CODE FORGE v{APP_VERSION}", source)
 
@@ -21154,10 +21154,18 @@ class EmDashGuardTests(unittest.TestCase):
     # (the UpdateCheckThread and UpdateDownloadThread classes,
     # above every site); the last four moved +97 (those 88 +
     # the 9 __init__ attribute lines above them).
+    # Modpdf recomputed these: the first two moved +266 (the
+    # modpdf import, the ModuleAddDialog class, the Customize
+    # Modules tab and its dialog methods, and the Artifacts
+    # store-write hooks, all above them); the last four moved
+    # +267 (those 266 + the rescan_extensions refresh line
+    # above them). The build_system_prompt and send-path module
+    # edits sit below all six sites. Numbers are the guard's
+    # own AST line numbers.
     ALLOWED = {
-        ("forge/main.py", 13475), ("forge/main.py", 13614),
-        ("forge/main.py", 18293), ("forge/main.py", 18301),
-        ("forge/main.py", 18317), ("forge/main.py", 18338),
+        ("forge/main.py", 13742), ("forge/main.py", 13881),
+        ("forge/main.py", 18561), ("forge/main.py", 18569),
+        ("forge/main.py", 18585), ("forge/main.py", 18606),
     }
 
     @staticmethod
@@ -53455,18 +53463,23 @@ class StablePrefixTests(unittest.TestCase):
         # Negative control for the freeze: a helper on the build
         # path that DOES read the clock must make the two frozen
         # builds differ — otherwise the freeze above could be a
-        # no-op and still pass.
+        # no-op and still pass. The probe rides the knowledge
+        # index: since modpdf (2026-11-21) the brief itself rides
+        # as a module and no longer reaches a bare prompt, while
+        # the index is the knowledge channel that still rides
+        # wholesale on every build.
         from datetime import datetime
         from unittest import mock
         from forge import knowledge as _knowledge_mod
-        real_brief = _knowledge_mod.brief_text
+        real_index = _knowledge_mod.knowledge_index_text
 
-        def _volatile_brief(root):
-            return (real_brief(root) + "\nBuilt: "
+        def _volatile_index(root):
+            return (real_index(root) + "\nBuilt: "
                     + _knowledge_mod.datetime.now().isoformat())
 
-        with mock.patch.object(_knowledge_mod, "brief_text",
-                               _volatile_brief):
+        with mock.patch.object(_knowledge_mod,
+                               "knowledge_index_text",
+                               _volatile_index):
             first = self._build_frozen(
                 datetime(2026, 3, 4, 5, 6, 7))
             second = self._build_frozen(
@@ -66436,9 +66449,9 @@ class AutoUpdateWindowTests(unittest.TestCase):
                             "url": "https://example.invalid/s",
                             "size": 1}}
 
-    def test_app_version_is_2_6(self):
+    def test_app_version_is_2_7(self):
         import forge.main as main_mod
-        self.assertEqual(main_mod.APP_VERSION, "2.6")
+        self.assertEqual(main_mod.APP_VERSION, "2.7")
 
     def test_menu_entry_exists_and_runs_a_manual_check(self):
         from unittest import mock

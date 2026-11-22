@@ -309,12 +309,53 @@ def fill_fraction(messages, num_ctx, schemas=None) -> float:
 
 def breakdown(messages, schemas=None) -> dict:
     """What eats the window (the Note 15 design input on this item):
-    system prompt vs conversation history vs tool schemas."""
+    system prompt vs conversation history vs tool schemas. The
+    "modules" count is the knowledge-module block's share OF the
+    system count (modpdf, 2026-11-21): the module text rides
+    inside the system prompt, delimited by MODULES_BLOCK_BEGIN /
+    MODULES_BLOCK_END, so the gauge can say how much of the system
+    prompt is loaded modules without double counting."""
     system = sum(estimate_message(m) for m in messages or []
                  if m.get("role") == "system")
     return {"system": system,
             "history": estimate_messages(messages) - system,
-            "tools": estimate_schemas(schemas)}
+            "tools": estimate_schemas(schemas),
+            "modules": modules_estimate(messages)}
+
+
+# --- knowledge module block (modpdf, 2026-11-21) -------------------
+# forge/modpdf.py injects the turn's loaded PDF modules into the
+# system prompt as ONE block between these two marker lines. The
+# markers are the contract between the injector and every surface
+# that accounts tokens (the gauge, the "What the AI sees" room):
+# the text between them, markers included, is module text.
+
+MODULES_BLOCK_BEGIN = "[Knowledge modules loaded from PDF files]"
+MODULES_BLOCK_END = "[End of knowledge modules]"
+
+
+def modules_estimate(messages) -> int:
+    """Estimated tokens of the knowledge-module block inside the
+    system message(s), markers included; 0 when no block rides.
+    A block whose end marker is missing counts to the end of its
+    message (the text still rides, so it still counts)."""
+    total = 0
+    for m in messages or []:
+        if (m or {}).get("role") != "system":
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        start = content.find(MODULES_BLOCK_BEGIN)
+        if start < 0:
+            continue
+        end = content.find(MODULES_BLOCK_END, start)
+        if end >= 0:
+            end += len(MODULES_BLOCK_END)
+        else:
+            end = len(content)
+        total += estimate_text(content[start:end])
+    return total
 
 
 def is_summary(message) -> bool:

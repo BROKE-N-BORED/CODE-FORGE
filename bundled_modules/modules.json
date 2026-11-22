@@ -1,0 +1,88 @@
+{
+ "modules": [
+  {
+   "id": "bundled-homework-protocol",
+   "file": "homework-protocol.pdf",
+   "title": "Mode homework and work protocol",
+   "about": "The homework, clarify, and draft protocol for the drafting modes, with every mode's skeleton and clarification questions.",
+   "modes": [
+    "plan",
+    "design",
+    "architect",
+    "review",
+    "ask",
+    "research"
+   ],
+   "keywords": [
+    "homework",
+    "plan",
+    "planning",
+    "draft",
+    "clarify",
+    "questions",
+    "skeleton",
+    "protocol",
+    "design",
+    "architect",
+    "research",
+    "steps"
+   ],
+   "always": false,
+   "enabled": true,
+   "kind": "knowledge",
+   "source": "bundled"
+  },
+  {
+   "id": "bundled-debugging-protocol",
+   "file": "debugging-protocol.pdf",
+   "title": "Debugging protocol",
+   "about": "How the debugger works: session states, the workspace jail, and the read-first working discipline.",
+   "modes": [
+    "code"
+   ],
+   "keywords": [
+    "debug",
+    "debugging",
+    "breakpoint",
+    "crash",
+    "error",
+    "traceback",
+    "pdb",
+    "bug",
+    "fails",
+    "failing",
+    "inspect",
+    "step",
+    "broken"
+   ],
+   "always": false,
+   "enabled": true,
+   "kind": "knowledge",
+   "source": "bundled"
+  },
+  {
+   "id": "bundled-review-checklist",
+   "file": "review-checklist.pdf",
+   "title": "Review checklist",
+   "about": "The full review discipline: the walkthrough shape, the finding format, the voices, coverage, and incremental review.",
+   "modes": [
+    "review"
+   ],
+   "keywords": [
+    "review",
+    "checklist",
+    "finding",
+    "findings",
+    "severity",
+    "audit",
+    "critique",
+    "coverage",
+    "walkthrough"
+   ],
+   "always": false,
+   "enabled": true,
+   "kind": "knowledge",
+   "source": "bundled"
+  }
+ ]
+}

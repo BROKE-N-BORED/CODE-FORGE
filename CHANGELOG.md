@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.7 - 2026-11-21
+
+Modular PDF knowledge system, branch 1.
+
+- Knowledge the model needs now lives in modular PDF files and loads only when it is relevant to the turn, inside a strict budget of 20 percent of the context window. Everything else stays on disk and costs no context.
+- The project brief, approved guidelines, learnings, and macros now ride as self-updating modules (Code Forge Memories, Code Forge Rules, Code Forge Workflows). Each one refreshes itself the moment its store changes.
+- New Modules tab in Customize: see every module, turn modules off, or add your own PDF files.
+- Three starter modules in the box: homework protocol, debugging protocol, review checklist.
+- If anything in the module path fails, the prompt falls back to the previous behaviour. A module problem can never break a turn.
+- A fresh Code turn starts 229 tokens lighter than in v2.6.
+- Verified with the full test suite: 3,227 tests run, and every failure was traced and accounted for (one known FFmpeg test-side item among them).
+
 ## 2026-11-20 — Version 2.6: live-model fixes, the fit and truth pass, and auto-update
 
 - Code mode now offers the tools that fit the model's window instead of offering all of them and dropping the calls. The old surface overflowed the 8K window, turns died at the first step, and the model invented results for calls that never ran. A dropped call now says plainly that it was dropped, and repeating the same dropped call three times ends the turn instead of looping.

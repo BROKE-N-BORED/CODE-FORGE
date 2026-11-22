@@ -102,6 +102,7 @@ from . import maintenance as maint_mod
 from . import providers as providers_mod
 from . import modelfit as modelfit_mod
 from . import modes as modes_mod
+from . import modpdf as modpdf_mod
 from . import self_maintenance as self_maint_mod
 from . import inbox as inbox_mod
 from . import testcadence as cadence_mod
@@ -147,7 +148,7 @@ PLUGINS_DIR = ROOT_DIR / "plugins"
 COMMANDS_DIR = ROOT_DIR / "commands"
 # The one version the app presents as current — the window title and
 # the event log's app_start stamp both read it from here.
-APP_VERSION = "2.6"
+APP_VERSION = "2.7"
 
 # Owner's donation link (2026-11-10): Code Forge is free; the
 # welcome screen's donate button and QR both point here — the
@@ -1930,6 +1931,75 @@ class AllowListDialog(QDialog):
         self._refresh()
 
 
+class ModuleAddDialog(QDialog):
+    """modpdf: the small form shown when the owner adds a PDF as
+    a knowledge module. Every field carries a plain-words
+    caption underneath it (U20). Nothing is pre-picked beyond
+    the file's own name as a title suggestion."""
+
+    def __init__(self, parent, pdf_path):
+        super().__init__(parent)
+        self.setWindowTitle("Add a knowledge module")
+        self.setMinimumWidth(440)
+        self._pdf_path = Path(pdf_path)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"File: {self._pdf_path.name}"))
+        self._title = QLineEdit(
+            self._pdf_path.stem.replace("_", " ").replace(
+                "-", " "))
+        lay.addWidget(self._field(
+            "Title", self._title,
+            "The name shown in the list, and the heading the "
+            "agent sees when this module loads."))
+        self._about = QLineEdit()
+        lay.addWidget(self._field(
+            "What it covers", self._about,
+            "One plain line about what is in the PDF. This line "
+            "is for you; the agent does not see it."))
+        self._keywords = QLineEdit()
+        lay.addWidget(self._field(
+            "Words that load it", self._keywords,
+            "Words separated by commas. When a message from you "
+            "contains one of these words, this module becomes a "
+            "candidate for that turn."))
+        self._modes = QLineEdit()
+        lay.addWidget(self._field(
+            "Modes", self._modes,
+            "The modes this module belongs to, separated by "
+            "commas: code, plan, design, architect, review, ask, "
+            "write, research. Leave blank for every mode."))
+        row = QHBoxLayout()
+        add = QPushButton("Add module")
+        add.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addStretch(1)
+        row.addWidget(add)
+        row.addWidget(cancel)
+        lay.addLayout(row)
+
+    def _field(self, label, edit, caption):
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(QLabel(label))
+        lay.addWidget(edit)
+        cap = QLabel(caption)
+        cap.setWordWrap(True)
+        lay.addWidget(cap)
+        return host
+
+    def values(self):
+        keywords = [w.strip() for w in
+                    self._keywords.text().split(",") if w.strip()]
+        modes_text = self._modes.text().strip()
+        modes = ([w.strip().lower() for w in
+                  modes_text.split(",") if w.strip()]
+                 if modes_text else "all")
+        return (self._title.text().strip(),
+                self._about.text().strip(), keywords, modes)
+
+
 class CustomizeDialog(QDialog):
     """One home for skills, plugins and connectors (the pattern every modern
     agent tool converged on): each item listed with its tools and an on/off
@@ -1944,7 +2014,9 @@ class CustomizeDialog(QDialog):
                  offer_save_run_as_skill=False, skribe_decisions=False,
                  fingerprint_changed_skills=None,
                  fingerprint_changed_plugins=None,
-                 broken_skills=None):
+                 broken_skills=None,
+                 modules_app_dir=None, modules_bundled_dir=None,
+                 modules_sources=None):
         super().__init__(parent)
         self.setWindowTitle("Customize · skills · plugins · connectors")
         self.setMinimumWidth(600)
@@ -2346,6 +2418,48 @@ class CustomizeDialog(QDialog):
         remove_btn.clicked.connect(self._remove_rule)
         perm_lay.addWidget(remove_btn)
         tabs.addTab(perm_page, "Permissions")
+        # Modules tab (modpdf, 2026-11-21): knowledge modules are
+        # PDF files on disk; only the ones relevant to a turn are
+        # loaded into it. Toggles, adds and removals act on the
+        # manifest at once, like the secret allowlist; the
+        # dialog's OK and Cancel govern the other tabs only.
+        self._modpdf_app_dir = (Path(modules_app_dir)
+                                if modules_app_dir else APP_DIR)
+        self._modpdf_bundled_dir = (
+            Path(modules_bundled_dir) if modules_bundled_dir
+            else ROOT_DIR / "bundled_modules")
+        self._modpdf_sources = modules_sources
+        mod_page = QWidget(); mod_lay = QVBoxLayout(mod_page)
+        mod_intro = QLabel(
+            "Knowledge modules are PDF files kept on disk. At the "
+            "start of each turn the agent loads only the modules "
+            "that fit the turn, inside a fixed slice of the "
+            "context window. A module that stays on disk costs no "
+            "context at all. Changes on this tab take effect at "
+            "once.")
+        mod_intro.setWordWrap(True)
+        mod_lay.addWidget(mod_intro)
+        self._module_problems = QLabel("")
+        self._module_problems.setWordWrap(True)
+        self._module_problems.setVisible(False)
+        mod_lay.addWidget(self._module_problems)
+        mod_scroll = QScrollArea()
+        mod_scroll.setWidgetResizable(True)
+        mod_rows_host = QWidget()
+        self._module_rows = QVBoxLayout(mod_rows_host)
+        mod_scroll.setWidget(mod_rows_host)
+        mod_lay.addWidget(mod_scroll, 1)
+        mod_add_row = QHBoxLayout()
+        mod_add_btn = QPushButton("Add PDF…")
+        mod_add_btn.clicked.connect(self._add_module_pdf)
+        mod_add_row.addWidget(mod_add_btn)
+        mod_add_row.addStretch(1)
+        mod_lay.addLayout(mod_add_row)
+        self._module_status = QLabel("")
+        self._module_status.setWordWrap(True)
+        mod_lay.addWidget(self._module_status)
+        tabs.addTab(mod_page, "Modules")
+        self._refresh_module_rows()
         lay_root = QVBoxLayout(self)
         lay_root.addWidget(tabs)
         # Note 22: housing for project-local skills/plugins. Moving files
@@ -2849,6 +2963,144 @@ class CustomizeDialog(QDialog):
                         vault.set(key, value)
             except Exception:
                 self._secret_vault_failures.append(key)
+
+    # --- Modules tab (modpdf) ---------------------------------
+
+    def _refresh_module_rows(self):
+        while self._module_rows.count():
+            item = self._module_rows.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        problems = []
+        entries = []
+        try:
+            _seeded, seed_problems = modpdf_mod.ensure_store(
+                self._modpdf_app_dir, self._modpdf_bundled_dir)
+            problems += seed_problems
+            if self._modpdf_sources is not None:
+                problems += modpdf_mod.refresh_self_modules(
+                    self._modpdf_app_dir, self._modpdf_sources())
+            entries, load_problems = modpdf_mod.load_manifest(
+                self._modpdf_app_dir)
+            problems += load_problems
+        except Exception as exc:
+            problems.append(
+                f"The module store could not be read: {exc}")
+        if problems:
+            self._module_problems.setText(
+                "Some modules could not be read: "
+                + "; ".join(problems))
+            self._module_problems.setVisible(True)
+        else:
+            self._module_problems.setVisible(False)
+        if not entries:
+            empty = QLabel(
+                "No modules yet. Add a PDF to give the agent a "
+                "reference it can load when a turn needs it.")
+            empty.setWordWrap(True)
+            self._module_rows.addWidget(empty)
+            self._module_rows.addStretch(1)
+            return
+        source_words = {"bundled": "Ships with Code Forge",
+                        "user": "Added by you",
+                        "self": "Kept up to date by Code Forge"}
+        for entry in entries:
+            row_widget = QWidget()
+            row = QVBoxLayout(row_widget)
+            top = QHBoxLayout()
+            box = QCheckBox(entry.get("title")
+                            or entry.get("id", ""))
+            box.setChecked(bool(entry.get("enabled", True)))
+            box.toggled.connect(
+                lambda on, eid=entry["id"]:
+                self._toggle_module(eid, on))
+            top.addWidget(box, 1)
+            if entry.get("source") == "user":
+                remove = QPushButton("Remove")
+                remove.clicked.connect(
+                    lambda _c=False, eid=entry["id"],
+                    t=entry.get("title", ""):
+                    self._remove_module(eid, t))
+                top.addWidget(remove)
+            row.addLayout(top)
+            bits = []
+            if entry.get("about"):
+                bits.append(str(entry["about"]))
+            try:
+                tokens = modpdf_mod.module_tokens(
+                    self._modpdf_app_dir, entry)
+            except Exception:
+                tokens = 0
+            if tokens:
+                bits.append(f"about {tokens:,} tokens when loaded")
+            words = source_words.get(entry.get("source"))
+            if words:
+                bits.append(words)
+            meta = QLabel(" · ".join(bits))
+            meta.setWordWrap(True)
+            row.addWidget(meta)
+            self._module_rows.addWidget(row_widget)
+        self._module_rows.addStretch(1)
+
+    def _toggle_module(self, entry_id, on):
+        try:
+            modpdf_mod.set_enabled(
+                self._modpdf_app_dir, entry_id, bool(on))
+            self._module_status.setText(
+                "Saved. The change applies from the next turn.")
+        except Exception as exc:
+            self._module_status.setText(
+                f"The change could not be saved: {exc}")
+
+    def _remove_module(self, entry_id, title):
+        box = QMessageBox(self)
+        box.setWindowTitle("Remove module")
+        box.setText(
+            f"Remove '{title}' from the modules list? Its PDF "
+            f"file is deleted from the modules folder.")
+        remove_btn = box.addButton(
+            "Remove", QMessageBox.AcceptRole)
+        keep_btn = box.addButton(
+            "Keep it", QMessageBox.RejectRole)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        if box.clickedButton() is not remove_btn:
+            return
+        try:
+            modpdf_mod.remove_module(
+                self._modpdf_app_dir, entry_id)
+            self._module_status.setText(f"Removed '{title}'.")
+        except Exception as exc:
+            self._module_status.setText(
+                f"It could not be removed: {exc}")
+        self._refresh_module_rows()
+
+    def _add_module_pdf(self):
+        path, _picked = QFileDialog.getOpenFileName(
+            self, "Add a knowledge module", "",
+            "PDF files (*.pdf)")
+        if not path:
+            return
+        dialog = ModuleAddDialog(self, Path(path))
+        if dialog.exec() != QDialog.Accepted:
+            return
+        title, about, keywords, modes = dialog.values()
+        try:
+            entry = modpdf_mod.add_user_module(
+                self._modpdf_app_dir, path, title=title,
+                about=about, keywords=keywords, modes=modes)
+        except ValueError as exc:
+            self._module_status.setText(str(exc))
+            return
+        except Exception as exc:
+            self._module_status.setText(
+                f"The module could not be added: {exc}")
+            return
+        self._module_status.setText(
+            f"Added '{entry['title']}'. It loads when a turn "
+            f"matches its words or its modes.")
+        self._refresh_module_rows()
 
     def values(self):
         disabled_skills = {name for name, box in self._skill_boxes.items() if not box.isChecked()}
@@ -11888,6 +12140,16 @@ class ArtifactsWindow(QWidget):
                     + "\n\n… (showing the head of the file)")
         self.artifact_view.setPlainText(text)
 
+    def _poke_module_views(self):
+        """modpdf Addition 1: a store write refreshes its module
+        view in the same operation (the prompt build refreshes
+        again every turn, so this is freshness for the Customize
+        tab, not the only guard)."""
+        owner = getattr(self, "_owner", None)
+        if owner is not None and hasattr(
+                owner, "_refresh_modpdf_views"):
+            owner._refresh_modpdf_views()
+
     def _approve_guideline(self):
         owner = self._owner
         rel = self._selected_guideline()
@@ -11908,6 +12170,7 @@ class ArtifactsWindow(QWidget):
             f"Approved · “{rel}” now applies in Review and Plan "
             f"turns for this project.")
         self._refresh_guidelines()
+        self._poke_module_views()
 
     def _revoke_guideline(self):
         owner = self._owner
@@ -11923,6 +12186,7 @@ class ArtifactsWindow(QWidget):
             self.guidelines_status.setText(
                 f"“{rel}” was not approved.")
         self._refresh_guidelines()
+        self._poke_module_views()
 
     def _selected_draft(self):
         row = self.knowledge_drafts_list.currentRow()
@@ -11962,6 +12226,7 @@ class ArtifactsWindow(QWidget):
             f"Approved · “{entry.get('title', '')}” is project "
             f"knowledge now, and its summary is on the brief.")
         self._refresh_knowledge_drafts()
+        self._poke_module_views()
 
     def _discard_draft(self):
         owner = self._owner
@@ -11978,6 +12243,7 @@ class ArtifactsWindow(QWidget):
             self.knowledge_status.setText(
                 "That draft was already gone.")
         self._refresh_knowledge_drafts()
+        self._poke_module_views()
 
     def _add_knowledge(self):
         owner = self._owner
@@ -12018,6 +12284,7 @@ class ArtifactsWindow(QWidget):
         else:
             return
         self._refresh_knowledge_drafts()
+        self._poke_module_views()
 
     def _show_selected(self, row):
         owner = self._owner
@@ -17954,6 +18221,7 @@ class ForgeWindow(QMainWindow):
         self.all_skills, self._broken_skills = scan_skills_report(
             self.app_skills_dir)
         self.macros = macros_mod.scan_macros(COMMANDS_DIR)
+        self._refresh_modpdf_views()
         self.all_plugins, self._full_registry = (
             self._load_plugins_with_fingerprints())
         self.reload_extensions()
@@ -18387,7 +18655,10 @@ class ForgeWindow(QMainWindow):
                                      self.settings, "fingerprint_changed_skills")),
                                  fingerprint_changed_plugins=set(self._settings_list(
                                      self.settings, "fingerprint_changed_plugins")),
-                                 broken_skills=getattr(self, "_broken_skills", []))
+                                 broken_skills=getattr(self, "_broken_skills", []),
+                                 modules_app_dir=APP_DIR,
+                                 modules_bundled_dir=ROOT_DIR / "bundled_modules",
+                                 modules_sources=self._modpdf_self_sources)
         if dialog.exec() == QDialog.Accepted:
             disabled_skills, disabled_plugins, config, rules, skribe_on, disabled_tools = dialog.values()
             self.settings["permission_rules"] = rules
@@ -22434,9 +22705,26 @@ class ForgeWindow(QMainWindow):
                  "Project instructions (owner-written, this project only):\n" + instructions)
         brief = knowledge_mod.brief_text(self.workspace)
         if brief:
-            _add("project brief", 2,
-                 "Project brief: what this project is and where it "
-                 "stands (.forge/brief.md; read it first):\n" + brief)
+            # modpdf (2026-11-21): the brief's full text no longer
+            # rides wholesale on every turn. It is carried by the
+            # Code Forge Memories knowledge module (a generated PDF
+            # view of the knowledge store) and loads when it is
+            # relevant; the prompt keeps this pointer so the model
+            # always knows the brief exists.
+            opening = ""
+            for _line in brief.splitlines():
+                _line = _line.strip()
+                if _line and not _line.startswith("#"):
+                    opening = _line
+                    break
+            pointer = ("Project brief: what this project is and "
+                       "where it stands (.forge/brief.md). Its full "
+                       "text rides as the Code Forge Memories "
+                       "knowledge module when it is relevant to "
+                       "the turn.")
+            if opening:
+                pointer += " It opens: " + opening[:160]
+            _add("project brief", 2, pointer)
         sources = proj.sources_index_text(self.workspace)
         if sources:
             _add("sources index", 2, sources)
@@ -22499,11 +22787,38 @@ class ForgeWindow(QMainWindow):
                      "Sources folder instructions "
                      "(.forge/sources/PROMPT.md):\n"
                      + sources_prompt)
+        # modpdf (2026-11-21): this turn's knowledge module pack,
+        # computed once here; the parts below and the module part
+        # near the end all read it. The pack refreshes the
+        # generated self-store views first, so a store write is
+        # never stale, then picks whole modules by mode, standing
+        # membership, and relevance to the latest user message,
+        # inside a fixed slice of the window. None means the
+        # module path itself failed; the migrated parts below
+        # then ride wholesale, exactly as they did before modules
+        # existed, so a broken module store can never break a
+        # turn or lose the owner's text.
+        try:
+            _mod_num_ctx = int(self.settings.get("num_ctx", 8192)
+                               or 8192)
+        except Exception:
+            _mod_num_ctx = 8192
+        try:
+            modpack = modpdf_mod.assemble_pack(
+                APP_DIR, mode_now, self.messages, _mod_num_ctx,
+                self_sources=self._modpdf_self_sources(),
+                bundled_dir=ROOT_DIR / "bundled_modules")
+        except Exception:
+            modpack = None
         # CR1 (Learnings loop): the owner's taught review learnings
         # ride in REVIEW turns only — global first, then this
         # project's. Byte-stability: with no learnings the block is
-        # "" and the prompt is byte-identical to before.
-        if mode_now == "review":
+        # "" and the prompt is byte-identical to before. Since
+        # modpdf the block rides as the Code Forge Memories module
+        # view (standing in review mode, loaded by the pack
+        # above); the wholesale part below is the failure
+        # fallback only.
+        if modpack is None and mode_now == "review":
             learnings = learnings_mod.learnings_block(self.workspace)
             if learnings:
                 _add("review learnings", 1, learnings)
@@ -22516,7 +22831,11 @@ class ForgeWindow(QMainWindow):
         # its own. forge/guidelines.py owns detection + the
         # approval record; the block is "" with nothing approved,
         # so those projects prompt byte-identically to before.
-        if mode_now in ("review", "plan"):
+        # Since modpdf the block rides as the Code Forge Rules
+        # module view (standing in review and plan modes, loaded
+        # by the pack above); the wholesale part below is the
+        # failure fallback only.
+        if modpack is None and mode_now in ("review", "plan"):
             guidelines = guidelines_mod.guidelines_block(
                 self.workspace)
             if guidelines:
@@ -22564,6 +22883,33 @@ class ForgeWindow(QMainWindow):
                  + f"\nMaintenance work copy: {work}"
                  + f"\nLive app root (reference only, never "
                    f"edit directly): {ROOT_DIR}")
+        # modpdf: the pack rides as ONE named part (tier 1: the
+        # owner's words rank just under the core), so the CR10
+        # compression and the gauge account for it like any other
+        # part. What loaded, what the budget skipped, and any
+        # problem are logged in plain words (U32).
+        if modpack is not None:
+            if modpack["text"]:
+                _add("knowledge modules", 1, modpack["text"])
+            try:
+                _bits = []
+                if modpack["loaded"]:
+                    _bits.append("loaded: " + ", ".join(
+                        modpack["loaded"]))
+                _over = [(t, r) for t, r in modpack["skipped"]
+                         if r.startswith("needs about")]
+                if _over:
+                    _bits.append("skipped: " + "; ".join(
+                        f"{t} ({r})" for t, r in _over))
+                if _bits:
+                    self.log("Knowledge modules: "
+                             + ". ".join(_bits))
+                for _problem in modpack["problems"]:
+                    if _problem not in self._hook_problems_seen:
+                        self._hook_problems_seen.add(_problem)
+                        self.log("Knowledge modules: " + _problem)
+            except Exception:
+                pass
         # CR10: rank + compress the named parts to a share of the
         # window before the model. When everything fits, kept is
         # the parts unchanged and there is no footer — the prompt
@@ -22593,6 +22939,105 @@ class ForgeWindow(QMainWindow):
             except Exception:
                 pass
         return "\n\n".join(parts)
+
+    def _modpdf_self_sources(self):
+        """modpdf Addition 1: the living stores as module
+        sources. Each value is the store's current injectable
+        text; forge/modpdf.py renders it to a PDF view in the
+        module store. The stores themselves stay canonical and
+        are read here exactly the way build_system_prompt always
+        read them. A store with no text is simply absent, and
+        its module view is removed."""
+        sources = {}
+        brief = knowledge_mod.brief_text(self.workspace)
+        kidx = knowledge_mod.knowledge_index_text(self.workspace)
+        if brief or kidx:
+            chunks = ["# Project brief and knowledge index"]
+            if brief:
+                chunks.append(brief)
+            if kidx:
+                chunks.append(kidx)
+            sources["memories"] = {
+                "title": "Code Forge Memories",
+                "about": "The project brief and the knowledge "
+                         "index for the current project.",
+                "modes": "all",
+                "keywords": ["brief", "knowledge", "project",
+                             "history", "background", "status",
+                             "overview", "summary"],
+                "standing": False,
+                "markdown": "\n\n".join(chunks),
+                "workspace": self.workspace}
+        learnings = learnings_mod.learnings_block(self.workspace)
+        if learnings:
+            # Each line of the block becomes its own paragraph
+            # in the module view: the app's PDF text path reads
+            # back visual lines, so a flat list rendered as one
+            # flowing paragraph would come back with its lines
+            # re-wrapped. Line-per-paragraph keeps the view's
+            # text line-for-line the block's own text.
+            sources["learnings"] = {
+                "title": "Code Forge Memories",
+                "about": "Review learnings the owner taught, "
+                         "global and for the current project.",
+                "modes": ["review"],
+                "keywords": ["learning", "learnings", "taught",
+                             "review"],
+                "standing": True,
+                "markdown": "\n\n".join(learnings.split("\n")),
+                "workspace": self.workspace}
+        guidelines = guidelines_mod.guidelines_block(self.workspace)
+        if guidelines:
+            sources["rules"] = {
+                "title": "Code Forge Rules",
+                "about": "Project guideline files the owner "
+                         "approved for the current project.",
+                "modes": ["review", "plan"],
+                "keywords": ["rule", "rules", "guideline",
+                             "guidelines", "standard", "agents"],
+                "standing": True,
+                "markdown": guidelines,
+                "workspace": self.workspace}
+        if self.macros:
+            chunks = ["# Workflow macros",
+                      "One section per macro: the command, what "
+                      "it does, and its full text."]
+            for name, (desc, body) in sorted(
+                    self.macros.items()):
+                section = f"## /{name}"
+                if desc:
+                    section += f"\nWhat it does: {desc}"
+                section += f"\n\n{body}"
+                chunks.append(section)
+            sources["workflows"] = {
+                "title": "Code Forge Workflows",
+                "about": "The owner's workflow macros with "
+                         "their full text.",
+                "modes": "all",
+                "keywords": ["workflow", "workflows", "macro",
+                             "macros", "command", "commands"]
+                + sorted(self.macros.keys()),
+                "standing": False,
+                "markdown": "\n\n".join(chunks),
+                "workspace": None}
+        return sources
+
+    def _refresh_modpdf_views(self):
+        """Re-render the self-store module views from the
+        stores' current text (modpdf Addition 1). Called after
+        store writes and rescans; the prompt build refreshes
+        again on every turn, so a view can never be stale when
+        a turn reads it. Problems are logged, never raised."""
+        try:
+            problems = modpdf_mod.refresh_self_modules(
+                APP_DIR, self._modpdf_self_sources())
+        except Exception:
+            return
+        for problem in problems:
+            try:
+                self.log("Knowledge modules: " + problem)
+            except Exception:
+                pass
 
     def _on_chat_scroll(self, value):
         # Render-follows fix (2026-11-15): remember whether the
@@ -26185,8 +26630,6 @@ class ForgeWindow(QMainWindow):
                 return
         # Owner's ruling (2026-11-06): the governor measures, it never
         # governs — the send path does not consult it.
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self.build_system_prompt()
         if self.pending_upload_note:
             text = self.pending_upload_note + "\n" + text
             self.pending_upload_note = ""
@@ -26199,6 +26642,13 @@ class ForgeWindow(QMainWindow):
                 return
         else:
             self.messages.append({"role": "user", "content": text})
+        # modpdf (2026-11-21): the system prompt is rebuilt HERE,
+        # after the new user message is in the list, so knowledge
+        # module selection judges the message being sent. It used
+        # to rebuild before the append, which judged the previous
+        # turn's message.
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0]["content"] = self.build_system_prompt()
         # Item #54: the resume state is a persistent record of the
         # MAIN thread (its restore loads this conversation and puts
         # last_prompt back in the input box) — a side chat's prompt
@@ -28329,6 +28779,9 @@ class ForgeWindow(QMainWindow):
         if held_back:
             tip += (f" The full tool list does not fit the window, "
                     f"so {len(held_back)} tools are held back.")
+        if parts.get("modules"):
+            tip += (f" Knowledge modules are ~{parts['modules']:,} "
+                    f"of the system prompt tokens.")
         # The summarize remedy is offered only when there ARE
         # older messages a fold could take (R3-02): on a fresh
         # chat the old text told the owner to trim a history
